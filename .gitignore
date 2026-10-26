@@ -1,0 +1,18 @@
+.env
+__pycache__/
+*.pyc
+*.blend1
+output/
+work/
+archive/
+dist/
+
+# Local only: experiments, analysis and lab notes stay out of the GitHub repo
+NOTES.md
+TODO.md
+tools/
+docs/ref_photos/
+docs/size_data/
+docs/spring/
+tests/*
+!tests/scripts.py
