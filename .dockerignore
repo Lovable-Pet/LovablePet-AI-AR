@@ -1,0 +1,7 @@
+# Only requirements.txt, api/ and tests/scripts.py go into the image
+*
+!requirements.txt
+!api/
+!tests/scripts.py
+**/__pycache__
+**/*.pyc
