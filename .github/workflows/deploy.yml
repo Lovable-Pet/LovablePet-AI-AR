@@ -1,34 +1,118 @@
-# Push to main → pull and restart on the EC2 server.
+# PR / push to dev or main: build the image and check it starts (/health).
+# Push to main: also push it to GHCR and redeploy on EC2.
+#
 # Secrets: SSH_HOST (Elastic IP), SSH_USER (ubuntu), SSH_KEY (private key whose
-# .pub is in the server's ~/.ssh/authorized_keys).
-# A restart marks running jobs failed (api/server.py), so push when idle.
-name: deploy
+# .pub is in the server's ~/.ssh/authorized_keys). One-time server setup: README.
+# A redeploy marks running jobs failed (api/server.py), so merge to main when idle.
+name: CI/CD
 
 on:
   push:
-    branches: [main]
-    paths: ['api/**', 'requirements.txt', 'deploy/**']
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
   workflow_dispatch:
 
-concurrency: deploy
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
 
 jobs:
-  deploy:
+  build:
+    name: Build & Smoke test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
-      - uses: appleboy/ssh-action@v1.2.0
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: |
+            ${{ env.IMAGE }}:${{ github.sha }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          docker run -d --name smoke -p 8000:8000 "$IMAGE:${{ github.sha }}"
+          curl -fsS --retry 15 --retry-delay 2 --retry-all-errors localhost:8000/health
+          docker exec smoke python -c "import api.lite, api.template_pick, api.prepare_photo"
+          docker rm -f smoke
+
+      - name: Push to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
+
+  deploy:
+    name: Deploy to EC2
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Copy compose file
+        uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
+          source: deploy/docker-compose.yml
+          target: lovablepet-ai          # relative to the SSH user's home
+          strip_components: 1
+
+      - name: Pull and restart
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_ACTOR: ${{ github.actor }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          envs: GH_TOKEN,GH_ACTOR,REPO,SHA
           script: |
             set -e
-            cd ~/pipeline
-            git pull --ff-only
-            source .venv/bin/activate
-            ~/.local/bin/uv pip install -r requirements.txt
-            sudo cp deploy/pet-pipeline.service /etc/systemd/system/
-            sudo systemctl daemon-reload
-            sudo systemctl restart pet-pipeline
-            sleep 3
-            curl -fsS localhost:8000/health
+            cd ~/lovablepet-ai
+            [ -f .env ] || { echo "~/lovablepet-ai/.env is missing (see README)"; exit 1; }
+            docker network create lovablepet 2>/dev/null || true
+
+            # templates: first deploy only, from the assets-v1 release
+            if [ ! -d output/templates/jindo_small ]; then
+              gh release download assets-v1 -R "$REPO" -D /tmp/pet-assets --clobber
+              for f in /tmp/pet-assets/*.tar.gz; do tar -xzf "$f"; done
+              rm -rf /tmp/pet-assets
+            fi
+
+            echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
+            export PIPELINE_IMAGE="ghcr.io/${REPO,,}:$SHA"
+            docker compose pull
+            docker compose up -d --remove-orphans
+            docker logout ghcr.io
+            docker image prune -f
+            curl -fsS --retry 15 --retry-delay 2 --retry-all-errors localhost:8000/health
