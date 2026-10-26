@@ -1,5 +1,5 @@
 # Server (api/server.py) dependencies. Install torch first, CPU build on a
-# machine without a GPU (see deploy/setup_server.sh):
+# machine without a GPU (the Dockerfile does this):
 #   pip install torch==2.11.0 torchvision==0.26.0 --index-url https://download.pytorch.org/whl/cpu
 fastapi==0.141.1
 uvicorn[standard]==0.52.4
