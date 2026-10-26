@@ -1,0 +1,17 @@
+[Unit]
+Description=Lovable Pet pipeline (api.server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/pipeline
+EnvironmentFile=/home/ubuntu/pipeline/.env
+# One worker only: jobs live in this process's memory (api/server.py _jobs).
+# Use PIPELINE_CONCURRENCY in .env for parallel jobs instead.
+ExecStart=/home/ubuntu/pipeline/.venv/bin/uvicorn api.server:app --host 0.0.0.0 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
