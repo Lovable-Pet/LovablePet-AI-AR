@@ -1,7 +1,8 @@
-# Only requirements.txt, api/ and tests/scripts.py go into the image
+# Only these go into the build context (the server image, and the Lambda image's handler)
 *
 !requirements.txt
 !api/
 !tests/scripts.py
+!lambda/rembg/handler.py
 **/__pycache__
 **/*.pyc

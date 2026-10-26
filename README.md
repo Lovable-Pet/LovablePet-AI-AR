@@ -11,6 +11,7 @@ api/data/         생김새 분류기 template_pick.npz
 ar_pipeline/      템플릿 제작 Blender 스크립트 (드라이버 new_template.py)
 Dockerfile        서버 이미지 (CPU torch, api/, tests/scripts.py)
 deploy/           EC2용 docker-compose.yml
+lambda/rembg/     배경 제거(BRIA RMBG 2.0) Lambda 이미지 (handler.py, Dockerfile; 계산은 api/bria.py)
 docs/             API.md (Spring 연동 계약; Spring 쪽 클라이언트 코드는 Spring 서버 저장소에 있다)
 tests/scripts.py  오프라인 대본 (PIPELINE_ALLOW_SCRIPTED=1, 호출·비용 없음)
 ```
@@ -48,6 +49,7 @@ main에 머지되면 이미지를 GHCR(`ghcr.io/lovable-pet/lovablepet-ai-ar`)�
 서버 준비 (한 번):
 
 1. EC2: Ubuntu 24.04, t3.large(8 GB), 디스크 30 GB, Elastic IP. 보안그룹 22(SSH), Spring 포트. 8000은 열지 않는다.
+   8 GB는 배경 제거를 Lambda로 보낼 때(`REMBG_URL`, 아래 "배경 제거 Lambda") 기준이다. 서버가 직접 돌리면 그 한 번에 약 8 GB가 더 든다.
 2. 서버에서:
    ```
    sudo apt-get update && sudo apt-get install -y docker.io docker-compose-v2 gh
@@ -62,6 +64,49 @@ Spring 컨테이너는 외부 네트워크 `lovablepet`에 붙어 `http://pipeli
 
 로그: `docker logs -f pipeline`
 
+## 배경 제거 Lambda
+
+배경 제거(BRIA RMBG 2.0, rembg 기본 모델)는 1024×1024 한 번에 CPU 메모리 약 8 GB를 쓴다. 작업 하나 동안 서버 최고치 10.5 GB 중 이 단계가
+대부분이었고, 나머지 단계는 3 GB대다. `REMBG_URL`이 있으면 이 계산만 Lambda(`lambda/rembg/`)가 하고 서버는 사진을 1024×1024로 줄여 보내
+마스크를 받는다. rembg의 계산을 그대로 둘로 나눈 것이라 결과가 같다(`api/bria.py`).
+
+2026-10-27 확인 (Docker, Lambda 런타임 에뮬레이터, 메모리 10240 MB 제한):
+- 마스크: 평가셋·픽스처 22장에서 `api/bria.py`(서버 직접)·Lambda 모두 rembg와 픽셀 단위로 같다.
+- Lambda 최고 7,965 MB, 한 장 약 20초(첫 호출 28초, 모델 읽기 포함). 키가 틀리면 401.
+- 서버: 대본 작업 두 개 연속 최고 3.1 GB(이전 10.5 GB), 작업 67~73초(이전 126초).
+- 얼굴 자르기는 배경 제거를 다시 돌리지 않고 사진 준비의 컷 상자를 쓴다(작업당 모델 1회). 29장 중 28장이 다시 돌렸을 때와 0~8 px 차이,
+  `images (1)`은 바닥 목줄이 상자에 들어가 72 px 넓다.
+
+`.github/workflows/rembg-lambda.yml`: `lambda/rembg/`나 `api/bria.py`가 main에 바뀌면(또는 수동 실행) 이미지를 ECR에 올리고 함수를 새 이미지로 바꾼다.
+
+AWS 준비 (한 번, 서울 리전 ap-northeast-2):
+
+1. ECR: 프라이빗 리포지토리 `lovablepet-rembg`.
+2. IAM 사용자(GitHub Actions용)에 아래 정책을 붙이고 액세스 키를 만들어 저장소 secrets `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`에 넣는다.
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {"Effect": "Allow", "Action": "ecr:GetAuthorizationToken", "Resource": "*"},
+       {"Effect": "Allow",
+        "Action": ["ecr:BatchCheckLayerAvailability", "ecr:InitiateLayerUpload", "ecr:UploadLayerPart",
+                   "ecr:CompleteLayerUpload", "ecr:PutImage", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
+        "Resource": "arn:aws:ecr:ap-northeast-2:<계정 ID>:repository/lovablepet-rembg"},
+       {"Effect": "Allow",
+        "Action": ["lambda:GetFunction", "lambda:GetFunctionConfiguration", "lambda:UpdateFunctionCode"],
+        "Resource": "arn:aws:lambda:ap-northeast-2:<계정 ID>:function:lovablepet-rembg"}
+     ]
+   }
+   ```
+3. Actions에서 "rembg Lambda"를 수동 실행한다. 함수가 아직 없으니 이미지만 ECR에 올라간다(태그 = 커밋 SHA).
+4. Lambda → 함수 생성 → 컨테이너 이미지, 이름 `lovablepet-rembg`, 위 이미지, x86_64. 구성:
+   메모리 10240 MB, 제한 시간 3분, 환경 변수 `REMBG_KEY`(`openssl rand -hex 32`), 함수 URL(인증 유형 NONE),
+   예약된 동시성 3(URL이 공개라 남용 상한). 새 계정은 메모리 상한이 3008 MB로 막혀 있을 수 있다 — 그러면 Service Quotas/지원 센터에 요청.
+5. 서버 `.env`에 `REMBG_URL=<함수 URL>`, `REMBG_KEY=<같은 값>`을 넣고 `docker compose up -d`.
+
+이후 main에 머지할 때 이 파일들이 바뀌어 있으면 함수가 자동으로 새 이미지로 바뀐다.
+비용: 한 번에 10 GB × 약 20~30초 = 200~300 GB-초, Lambda 무료 한도(월 40만 GB-초) 안에서 월 1,300~2,000회.
+
 ## 환경변수 (`.env`)
 
 | 이름 | 뜻 |
@@ -72,6 +117,8 @@ Spring 컨테이너는 외부 네트워크 `lovablepet`에 붙어 `http://pipeli
 | `PIPELINE_PUBLIC_URL` | 응답 파일 URL 앞에 붙일 주소 |
 | `BLENDER_EXE` | 미리보기 렌더용 Blender |
 | `PIPELINE_ALLOW_SCRIPTED=1` | 오프라인 대본 실행 허용 (연동 테스트용) |
+| `REMBG_URL` | 배경 제거 Lambda의 함수 URL. 없으면 서버가 직접 돌린다(한 번에 약 8 GB) |
+| `REMBG_KEY` | Lambda와 같은 비밀 값 (`X-Rembg-Key` 헤더) |
 
 ## 템플릿 자산 갱신
 

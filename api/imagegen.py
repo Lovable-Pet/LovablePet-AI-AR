@@ -203,12 +203,15 @@ def _erode(mask: np.ndarray, pixels: int) -> np.ndarray:
 
 
 def _rembg_alpha(rgb: Image.Image) -> np.ndarray | None:
+    """The animal's alpha (0..1) from BRIA RMBG 2.0, the model rembg defaults
+    to - on the Lambda when REMBG_URL is set (api/bria.py) - or None when the
+    model cannot run here."""
+    from . import bria
+
     try:
-        from rembg import remove
+        return bria.alpha(rgb)
     except ImportError:
         return None
-    cut = remove(rgb)
-    return np.asarray(cut.convert("RGBA"), dtype=np.float32)[..., 3] / 255.0
 
 
 def cut_out(cell: Image.Image, silhouette: Image.Image) -> tuple[Image.Image, str]:
