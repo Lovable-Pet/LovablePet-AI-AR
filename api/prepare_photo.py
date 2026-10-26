@@ -144,12 +144,13 @@ class PreparedPhoto:
     readings: list[dict[str, Any]] = field(default_factory=list)
     quality: dict[str, Any] | None = None   # photo_quality.measure_quality on the cut-out
     bars: bool = False               # seen through cage bars or a fence (pieces bridged)
+    subject_box: tuple[int, int, int, int] | None = None   # the animal in `path`'s pixels (None: not cut)
 
     def report(self) -> dict[str, Any]:
         return {
             "path": str(self.path), "original": str(self.original), "cut": self.cut,
             "box": list(self.box), "coverage": round(self.coverage, 3), "pieces_dropped": self.pieces_dropped,
-            "bars": self.bars,
+            "bars": self.bars, "subject_box": list(self.subject_box) if self.subject_box else None,
             "rejected": self.rejected, "notes": self.notes, "gate": self.readings, "quality": self.quality,
         }
 
@@ -422,9 +423,14 @@ async def prepare_photo(
     # the animal's own pixels): no call, read by fit.py and the lite run
     from .photo_quality import measure_quality
     quality = measure_quality(cut if cut is not None else image, mask)
+    # the face crop's subject box, so it does not run the model again on the cut-out
+    subject = None
+    if cut is not None and mask is not None and mask.any():
+        rows, cols = np.nonzero(mask)
+        subject = (int(cols.min()), int(rows.min()), int(cols.max()) + 1, int(rows.max()) + 1)
     return PreparedPhoto(path=target, original=photo_path, cut=cut is not None, box=box, coverage=coverage,
                          pieces_dropped=dropped, rejected=reasons, notes=notes, readings=readings, quality=quality,
-                         bars=bars)
+                         bars=bars, subject_box=subject)
 
 
 __all__ = ["BARS_NOTE", "GATE_SCHEMA", "PhotoRejected", "PreparedPhoto", "bridge_bars", "choose_pieces", "cut_out",

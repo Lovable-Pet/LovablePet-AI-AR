@@ -866,6 +866,7 @@ async def run_lite(
     photo_notes: list[str] = []
     photo_quality: dict[str, Any] | None = None
     photo_bars = False
+    photo_subject: tuple[int, int, int, int] | None = None   # the animal's box in the cut-out
     if prepare:
         from .prepare_photo import prepare_photo
 
@@ -876,6 +877,7 @@ async def run_lite(
         photo_notes = prepared.notes
         photo_quality = prepared.quality
         photo_bars = prepared.bars
+        photo_subject = prepared.subject_box
         log["steps"]["prepare"] = prepared.report()
         # a saturated backdrop's light in the fur: the calls read white as tan
         from .photo_colours import remove_backdrop_cast
@@ -983,7 +985,7 @@ async def run_lite(
             from .face_crop import crop_block, crop_face
             from .pattern_classify import BROW_FEATURES, CHEEK_FEATURES, EAR_FEATURES, MUZZLE_FEATURES
             try:
-                crop = await crop_face(photos[0], transport)
+                crop = await crop_face(photos[0], transport, subject=photo_subject)
                 face_log["box"], face_log["frontal"], face_log["visible"] = list(crop.box), crop.frontal, crop.visible
                 if crop.visible:
                     crop.image.save(out_dir / "face_crop.png")

@@ -153,13 +153,15 @@ def _pad(box: tuple[int, int, int, int], bounds: tuple[int, int], share: float) 
 BOX_SAMPLES = 2
 
 
-async def crop_face(photo_path: str | Path, transport: Transport, samples: int = BOX_SAMPLES) -> FaceCrop:
+async def crop_face(photo_path: str | Path, transport: Transport, samples: int = BOX_SAMPLES,
+                    subject: tuple[int, int, int, int] | None = None) -> FaceCrop:
     """The face crop of one photograph. When no head is found the crop is the
     subject box itself, marked visible=False, so the face call still has
-    something to look at and the log says why."""
+    something to look at and the log says why. `subject`: the animal's box
+    when the caller already has it (prepare_photo's cut), else rembg finds it."""
     image = Image.open(photo_path).convert("RGB")
     width, height = image.size
-    sx0, sy0, sx1, sy1 = subject_box(image)
+    sx0, sy0, sx1, sy1 = subject or subject_box(image)
     subject = image.crop((sx0, sy0, sx1, sy1))
 
     scale = FACE_QUERY_SIDE / max(subject.size)
