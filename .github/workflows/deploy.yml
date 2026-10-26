@@ -1,0 +1,34 @@
+# Push to main → pull and restart on the EC2 server.
+# Secrets: SSH_HOST (Elastic IP), SSH_USER (ubuntu), SSH_KEY (private key whose
+# .pub is in the server's ~/.ssh/authorized_keys).
+# A restart marks running jobs failed (api/server.py), so push when idle.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+    paths: ['api/**', 'requirements.txt', 'deploy/**']
+  workflow_dispatch:
+
+concurrency: deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            set -e
+            cd ~/pipeline
+            git pull --ff-only
+            source .venv/bin/activate
+            ~/.local/bin/uv pip install -r requirements.txt
+            sudo cp deploy/pet-pipeline.service /etc/systemd/system/
+            sudo systemctl daemon-reload
+            sudo systemctl restart pet-pipeline
+            sleep 3
+            curl -fsS localhost:8000/health
