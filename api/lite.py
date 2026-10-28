@@ -850,6 +850,7 @@ async def run_lite(
     fit_stop: bool = False,
     real_size: bool = True,
     pick_template: bool = True,
+    gate_readings: list[dict[str, Any]] | None = None,
 ) -> PipelineResult:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -872,7 +873,9 @@ async def run_lite(
 
         t = _now()
         gate_transport = None if reuse_appearance else (transport or default_transport())
-        prepared = await prepare_photo(gate_transport, photos[0], out_dir, species="dog", strict=strict_photo)
+        # gate_readings: /v1/fit already gated this photo (api/server.py), no second call
+        prepared = await prepare_photo(gate_transport, photos[0], out_dir, species="dog", strict=strict_photo,
+                                       gate_readings=gate_readings)
         photos = [prepared.path] + photos[1:]
         photo_notes = prepared.notes
         photo_quality = prepared.quality

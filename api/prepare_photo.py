@@ -247,12 +247,18 @@ async def gate_photo(transport: Transport, image: Image.Image, species: str = "d
             readings.append(await transport.complete(system=GATE_SYSTEM, blocks=blocks, schema=GATE_SCHEMA))
         except Exception as exc:  # noqa: BLE001 - one failed sample must not refuse a photo
             print(f"[prepare] gate sample failed ({type(exc).__name__}: {exc})")
+    reasons, notes = judge_gate(readings, species)
+    return reasons, notes, readings
+
+
+def judge_gate(readings: list[dict[str, Any]], species: str = "dog") -> tuple[list[str], list[str]]:
+    """(agreed rejection reasons, notes) from the gate's readings - the
+    ones just taken, or ones kept from an earlier /v1/fit on the same photo."""
     if not readings:
-        return [], [], []
+        return [], []
     per_sample = [set(reject_reasons(r, species)) for r in readings]
-    agreed = set.intersection(*per_sample) if per_sample else set()
-    reasons = [r for r in REJECT_RULES if r in agreed]
-    return reasons, gate_notes(readings), readings
+    agreed = set.intersection(*per_sample)
+    return [r for r in REJECT_RULES if r in agreed], gate_notes(readings)
 
 
 # --------------------------------------------------------------------------- cut
@@ -396,9 +402,12 @@ async def prepare_photo(
     species: str = "dog",
     gate: bool = True,
     strict: bool = True,
+    gate_readings: list[dict[str, Any]] | None = None,
 ) -> PreparedPhoto:
     """Gate (when a transport is given) then cut. With strict, an agreed
-    rejection raises PhotoRejected; otherwise the reasons are only logged."""
+    rejection raises PhotoRejected; otherwise the reasons are only logged.
+    `gate_readings`: the gate already ran on this photo (/v1/fit), so its
+    readings are judged again and no call is made."""
     photo_path = Path(photo_path)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -409,10 +418,13 @@ async def prepare_photo(
     reasons: list[str] = []
     notes: list[str] = []
     readings: list[dict[str, Any]] = []
-    if gate and transport is not None:
+    if gate and gate_readings:
+        readings = gate_readings
+        reasons, notes = judge_gate(readings, species)
+    elif gate and transport is not None:
         reasons, notes, readings = await gate_photo(transport, image, species)
-        if reasons and strict:
-            raise PhotoRejected(reasons, readings)
+    if reasons and strict:
+        raise PhotoRejected(reasons, readings)
     if watermarks:
         notes = notes + [WATERMARK_NOTE]
 
@@ -442,4 +454,4 @@ async def prepare_photo(
 
 
 __all__ = ["BARS_NOTE", "GATE_SCHEMA", "PhotoRejected", "PreparedPhoto", "bridge_bars", "choose_pieces", "cut_out",
-           "cut_out_with_mask", "gate_anchors", "gate_photo", "prepare_photo", "reject_reasons"]
+           "cut_out_with_mask", "gate_anchors", "gate_photo", "judge_gate", "prepare_photo", "reject_reasons"]

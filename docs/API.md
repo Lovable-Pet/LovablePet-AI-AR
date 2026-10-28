@@ -4,7 +4,7 @@ Spring 서버가 보호소 기록과 사진을 보내면, 파이프라인이 그
 한 마리에 1.5~4분이 걸리므로 **작업을 등록하고 나중에 결과를 받는 방식**이다.
 
 ```
-앱 ──(기록+사진)──▶ Spring ──POST /v1/fit──▶ 파이프라인   (선택, 5~20초, 약 $0.013)
+앱 ──(기록+사진)──▶ Spring ──POST /v1/fit──▶ 파이프라인   (선택, 5~20초, 약 $0.02 · 사진 거부면 약 $0.006)
                      │      ◀── 적합/주의/부적합 + 실제 크기
                      │
                      ├──POST /v1/jobs──▶ 파이프라인   202 {job_id, status: queued}
@@ -56,7 +56,14 @@ toypoodle, chihuahua, retriever; git에 없음, 따로 전달). 생김새 분류
 
 ## POST /v1/fit — 만들어도 되는 개인지 먼저 확인
 
-multipart: `record`, `photo` (jpeg/png/webp, 15MB 이하). 5~20초, 약 $0.013.
+multipart: `record`, `photo` (jpeg/png/webp, 15MB 이하). 5~20초, 약 $0.02.
+
+**사진 판정이 먼저**다(생성 작업의 사진 판정과 같은 것, 약 $0.006). 사람 손이 털을 가림, 여러 마리, 몸 위의 글자, 옷 등으로
+거부되면 템플릿 판정 없이 바로 `fit.level: "poor"`(부적합)로 답하고 비용은 거기서 끝난다. `fit.reasons`는 작업의
+`photo_rejected` 사유와 같은 한국어 문장, `fit.photo_rejected`는 사유 코드(`person_covers`, `several_animals`,
+`text_on_animal`, `clothing`, `object_covers`, `not_a_dog`; 통과하면 `[]`), `size`·`shape`·`photo`는 `null`이다.
+판정 결과는 서버가 24시간 기억해서, **같은 사진으로 `/v1/jobs`를 부르면 사진 판정을 다시 하지 않는다**(서버 재시작 전까지).
+한국동물구조관리협회 로고(1600×1200 사진 아래 가운데)는 판정 전에 지운다 — 생성 작업도 같다.
 
 ```json
 {
@@ -243,7 +250,7 @@ new THREE.GLTFLoader().load(pet.glbUrl, (gltf) => {
 
 | 단계 | 시간 | 비용 |
 |---|---|---|
-| `/v1/fit` | 5~20초 | 약 $0.013 |
+| `/v1/fit` | 5~20초 | 약 $0.02 (사진 판정 $0.006 + 체형 판정). 사진이 거부되면 약 $0.006 |
 | `/v1/jobs` 전체 (다듬기 포함) | 1.5~4분 | 중앙값 약 $0.075 (117회 실측) |
 | `refine=false` | 편집 시간만큼 짧음 | 약 $0.03 (비전 호출만, gpt-4o 기준) |
 
