@@ -175,8 +175,9 @@ multipart:
 
 ## Spring 쪽
 
-아래 세 파일은 Spring 서버 저장소(instagram-server)의 `com.example.instagram_server.petmodel` 패키지에 있다.
-instagram-server(Spring Boot 4.0.3, webmvc만)에서 컴파일하고, 실제 파이프라인 서버와 판정·조회·다운로드·콜백까지 돌려 확인했다.
+아래 세 파일을 Spring 서버 저장소의 `petmodel` 패키지에 넣어 쓴다.
+Spring Boot 4.0.3(webmvc만) 프로젝트에서 컴파일하고, 실제 파이프라인 서버와 판정·조회·다운로드·콜백까지 돌려 확인했다.
+Jackson 3(`tools.jackson`) 기준이라 Boot 3 프로젝트면 import를 `com.fasterxml.jackson`으로 바꾼다.
 
 | 파일 | 내용 |
 |---|---|
@@ -184,13 +185,13 @@ instagram-server(Spring Boot 4.0.3, webmvc만)에서 컴파일하고, 실제 파
 | `PetPipelineClient.java` | `fit()`, `createJob()`, `getJob()`, `download()`, `delete()` |
 | `PetModelCallbackController.java` | `POST /internal/pet-models/callback`: 키 확인 → done이면 GLB 받아 저장 (DB 저장은 TODO) |
 
-`application.yml` (CI가 `APPLICATION_PROPERTIES` 시크릿으로 만드므로 시크릿에 추가):
+`application.yml` (`api-key`는 비밀값이니 커밋하지 말고 시크릿이나 서버 `.env`로 넣는다):
 
 ```yaml
 pet-pipeline:
-  base-url: http://<파이프라인 호스트>:8000
+  base-url: http://pipeline:8000   # 같은 EC2, docker 네트워크 lovablepet의 파이프라인 컨테이너
   api-key: <PIPELINE_API_KEY와 같은 값>
-  callback-url: https://<Spring 공개 주소>/internal/pet-models/callback
+  callback-url: http://<Spring 컨테이너 이름>:8080/internal/pet-models/callback   # 같은 네트워크라 공개 주소가 필요 없다
   model-dir: models            # 콜백이 GLB를 저장할 폴더 (S3로 바꾸면 이 부분 교체)
 ```
 
