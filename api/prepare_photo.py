@@ -148,6 +148,9 @@ class PreparedPhoto:
     bars: bool = False               # seen through cage bars or a fence (pieces bridged)
     subject_box: tuple[int, int, int, int] | None = None   # the animal in `path`'s pixels (None: not cut)
     watermarks: list[str] = field(default_factory=list)   # shelter logos painted out (watermark.py)
+    # the animal in the ORIGINAL photo's pixels (None: not cut), so the colour
+    # measurement on the original reads only the animal (photo_colours.py)
+    animal_mask: np.ndarray | None = field(default=None, repr=False)
 
     def report(self) -> dict[str, Any]:
         return {
@@ -461,12 +464,15 @@ async def prepare_photo(
     quality = measure_quality(cut if cut is not None else image, mask)
     # the face crop's subject box, so it does not run the model again on the cut-out
     subject = None
+    animal = None
     if cut is not None and mask is not None and mask.any():
         rows, cols = np.nonzero(mask)
         subject = (int(cols.min()), int(rows.min()), int(cols.max()) + 1, int(rows.max()) + 1)
+        animal = np.zeros((image.size[1], image.size[0]), dtype=bool)
+        animal[box[1]:box[3], box[0]:box[2]] = mask
     return PreparedPhoto(path=target, original=photo_path, cut=cut is not None, box=box, coverage=coverage,
                          pieces_dropped=dropped, rejected=reasons, notes=notes, readings=readings, quality=quality,
-                         bars=bars, subject_box=subject, watermarks=watermarks)
+                         bars=bars, subject_box=subject, watermarks=watermarks, animal_mask=animal)
 
 
 __all__ = ["BARS_NOTE", "GATE_SCHEMA", "HAND_NOTE", "PhotoRejected", "PreparedPhoto", "bridge_bars", "choose_pieces", "cut_out",

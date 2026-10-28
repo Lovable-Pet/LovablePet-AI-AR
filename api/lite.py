@@ -868,6 +868,7 @@ async def run_lite(
     photo_quality: dict[str, Any] | None = None
     photo_bars = False
     photo_subject: tuple[int, int, int, int] | None = None   # the animal's box in the cut-out
+    photo_animal: np.ndarray | None = None   # the animal in the original photo's pixels
     if prepare:
         from .prepare_photo import prepare_photo
 
@@ -881,6 +882,7 @@ async def run_lite(
         photo_quality = prepared.quality
         photo_bars = prepared.bars
         photo_subject = prepared.subject_box
+        photo_animal = prepared.animal_mask
         log["steps"]["prepare"] = prepared.report()
         # a saturated backdrop's light in the fur: the calls read white as tan
         from .photo_colours import remove_backdrop_cast
@@ -1192,7 +1194,8 @@ async def run_lite(
 
         t = _now()
         try:
-            measured = await measure_region_colours(original_photo, transport or default_transport())
+            measured = await measure_region_colours(original_photo, transport or default_transport(),
+                                                    animal_mask=photo_animal)
         except Exception as exc:  # noqa: BLE001 - the table ramp is the fallback
             print(f"[lite] colour measurement failed ({type(exc).__name__}: {exc}); using the table ramps")
             measured = {}
