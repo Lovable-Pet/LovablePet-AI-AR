@@ -214,6 +214,12 @@ HAND_NOTE = ("A person's hand holds or touches the animal: ignore the hand, the 
              "treat the coat they hide as continuing the neighbouring coat.")
 
 
+def seen_from_above(readings: list[dict[str, Any]]) -> bool:
+    """Every gate sample saw the animal from above (view "top"): its legs
+    are foreshortened, and fit.py does not judge their length."""
+    return bool(readings) and all(r.get("view") == "top" for r in readings)
+
+
 def gate_notes(readings: list[dict[str, Any]]) -> list[str]:
     """Prompt lines for conditions EVERY sample reported that do not stop the
     run. A note goes into the reading and repaint prompts, so one sample
@@ -476,4 +482,5 @@ async def prepare_photo(
 
 
 __all__ = ["BARS_NOTE", "GATE_SCHEMA", "HAND_NOTE", "PhotoRejected", "PreparedPhoto", "bridge_bars", "choose_pieces", "cut_out",
-           "cut_out_with_mask", "gate_anchors", "gate_photo", "judge_gate", "prepare_photo", "reject_reasons"]
+           "cut_out_with_mask", "gate_anchors", "gate_photo", "judge_gate", "prepare_photo", "reject_reasons",
+           "seen_from_above"]

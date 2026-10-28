@@ -1155,10 +1155,12 @@ async def run_lite(
     #     measurement call and the image edit.
     from .fit import FitRejected, assess_fit
     from .fit import describe as describe_fit
+    from .prepare_photo import seen_from_above
     fit = assess_fit(meta.species, meta.weight_kg, meta.age_text,
                      (appearance.get("shape") or {}).get("answers"), appearance.get("pattern"),
                      votes=(log["steps"].get("shape") or {}).get("votes"), photo_quality=photo_quality,
-                     pick=pick, photo_bars=photo_bars)
+                     pick=pick, photo_bars=photo_bars,
+                     from_above=seen_from_above((log["steps"].get("prepare") or {}).get("gate") or []))
     log["steps"]["fit"] = fit
     _json(out_dir / "fit.json", fit)
     print(f"[lite] fit: {describe_fit(fit)}")

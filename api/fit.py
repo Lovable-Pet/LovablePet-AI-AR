@@ -72,7 +72,7 @@ def assess_fit(species: str, weight_kg: float, age_text: str = "",
                shape: dict[str, str] | None = None, pattern: str | None = None,
                today: _dt.date | None = None, votes: dict[str, Any] | None = None,
                photo_quality: dict[str, Any] | None = None, pick: dict[str, Any] | None = None,
-               photo_bars: bool = False) -> dict[str, Any]:
+               photo_bars: bool = False, from_above: bool = False) -> dict[str, Any]:
     """The verdict: level (good/fair/poor), its Korean label, a 0-100 score
     and every check that cost points, with its reason in Korean. `pick` is
     template_pick.combine's answer; without it the template is the adult
@@ -83,9 +83,17 @@ def assess_fit(species: str, weight_kg: float, age_text: str = "",
     from it is as unreliable as a coat the template cannot show.
     `photo_bars`: the dog was photographed through cage bars or a fence
     (prepare_photo.bridge_bars) - the coat behind the bars is guessed and
-    the colour measurement skipped, a caveat. The age is only carried into
-    the inputs."""
+    the colour measurement skipped, a caveat. `from_above`: every gate
+    sample saw the dog from above (prepare_photo.seen_from_above). The legs
+    are foreshortened then, so the leg answers and a "legs" difference are
+    not counted. On public shelter photos (2026-10-28) the two puppies seen
+    from above were read short-legged 1/3 and 3/3. The age is only carried
+    into the inputs."""
     shape = shape or {}
+    if from_above and pick and "legs" in (pick.get("differences") or []):
+        from .body_shape import match_from
+        rest = [d for d in pick["differences"] if d != "legs"]
+        pick = {**pick, "differences": rest, "match": match_from(rest) if pick.get("match") else pick.get("match")}
     built = (pick or {}).get("template") or "jindo"
     name = TEMPLATE_KO.get(built, built)
     # the vision call compared the dog with the model itself: its differences
@@ -138,7 +146,9 @@ def assess_fit(species: str, weight_kg: float, age_text: str = "",
 
     legs = shape.get("leg_length", "unknown")
     yes, n = tally("leg_length", "short")
-    if yes and yes == n:
+    if from_above:
+        notes.append("위에서 찍은 사진이라 다리 길이는 판단하지 않음")
+    elif yes and yes == n:
         hit("leg_length", "poor", f"단족(코기·닥스훈트형): 다리 길이가 {name} 템플릿과 크게 달라 비율이 어색함")
     elif yes:
         hit("leg_length", "fair", f"다리가 짧은 편({yes}/{n}표 단족): {name} 다리보다 짧아 보일 수 있음")

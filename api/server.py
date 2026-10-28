@@ -340,7 +340,7 @@ async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> d
     from .extract import photo_blocks
     from .fit import assess_fit
     from .pipeline import default_transport
-    from .prepare_photo import gate_photo
+    from .prepare_photo import gate_photo, seen_from_above
     from .size import scale_for
     from .template_pick import combine, pick_template, template_file
     from .watermark import remove_watermarks
@@ -378,7 +378,7 @@ async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> d
         shutil.rmtree(tmp, ignore_errors=True)
     pick = combine(looks, answers, meta.weight_kg)
     fit = assess_fit(meta.species, meta.weight_kg, meta.age_text, answers, None, votes=votes, photo_quality=quality,
-                     pick=pick)
+                     pick=pick, from_above=seen_from_above(readings))
     from .assets import template_paths
     from .metadata import process_metadata
     resolved = process_metadata(meta.pet_id, meta.species, meta.weight_kg, meta.coat_color)
