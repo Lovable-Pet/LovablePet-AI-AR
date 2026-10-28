@@ -455,6 +455,33 @@ def relative_cream(appearance: dict, palette: dict[str, tuple[str, str, str]]) -
     return {**palette, "cream": tuple(mixed)}
 
 
+# A warm ramp under a neutral border keeps at least this share of the table's
+# chroma, and its hue turns at most this many degrees from the table's.
+WARM_MIN_CHROMA_SHARE = 0.85
+WARM_MAX_HUE_TURN = 8.0
+
+
+def _warm_chroma_shift(mid: np.ndarray, target: np.ndarray, strength: float, max_shift_ab: float) -> np.ndarray:
+    """The a*/b* shift of a warm ramp (tan, red, fawn, chocolate) under a
+    neutral border: the usual shift, then held to the table's chroma and hue
+    within WARM_MIN_CHROMA_SHARE and WARM_MAX_HUE_TURN. A warm coat's
+    measured colour is greyed and turned by the room's light: on e20 (small
+    tan dog, beige-and-white room) the leg read a* -1, chroma 15 against the
+    table fawn's 28, and the free shift turned the whole fawn ramp
+    olive-grey (chroma 19, hue 86 against 76). The lightness still follows
+    the measurement, and a coat measured more saturated is still followed."""
+    free = np.clip((target[1:] - mid[1:]) * strength, -max_shift_ab, max_shift_ab)
+    table_chroma = float(np.hypot(mid[1], mid[2]))
+    if table_chroma < 1e-3:
+        return free.astype(np.float32)
+    ab = mid[1:] + free
+    chroma = max(float(np.hypot(ab[0], ab[1])), WARM_MIN_CHROMA_SHARE * table_chroma)
+    table_hue = float(np.arctan2(mid[2], mid[1]))
+    turn = (float(np.arctan2(ab[1], ab[0])) - table_hue + np.pi) % (2 * np.pi) - np.pi
+    hue = table_hue + float(np.clip(turn, -np.radians(WARM_MAX_HUE_TURN), np.radians(WARM_MAX_HUE_TURN)))
+    return (np.array([chroma * np.cos(hue), chroma * np.sin(hue)]) - mid[1:]).astype(np.float32)
+
+
 def ramps_from_measurement(
     appearance: dict, measured: dict, strength: float = MEASURED_STRENGTH,
     max_shift_l: float = MEASURED_MAX_SHIFT_L, max_shift_ab: float = MEASURED_MAX_SHIFT_AB,
@@ -503,7 +530,12 @@ def ramps_from_measurement(
         stop_labs = [linear_to_lab(hex_to_linear(stop)[None, None, :])[0, 0] for stop in stops]
         delta = (target - stop_labs[1]) * strength
         delta[0] = float(np.clip(delta[0], -max_shift_l, max_shift_l))
-        delta[1:] = 0.0 if tinted else np.clip(delta[1:], -max_shift_ab, max_shift_ab)
+        if tinted:
+            delta[1:] = 0.0
+        elif name in WARM_BASES:
+            delta[1:] = _warm_chroma_shift(stop_labs[1], target, strength, max_shift_ab)
+        else:
+            delta[1:] = np.clip(delta[1:], -max_shift_ab, max_shift_ab)
         moved = []
         for lab in stop_labs:
             rgb = to_srgb(lab_to_linear((lab + delta).astype(np.float32)[None, None, :])[0, 0])

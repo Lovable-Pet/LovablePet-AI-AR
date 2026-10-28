@@ -56,6 +56,11 @@ load_dotenv()
 app = FastAPI(title="Lovable Pet pipeline", version="1.0")
 _jobs: dict[str, dict[str, Any]] = {}
 _sem = asyncio.Semaphore(int(os.environ.get("PIPELINE_CONCURRENCY", "1")))
+# The photo gate's readings from /v1/fit, by the photo's SHA-256: a job on the same photo judges these
+# instead of calling the gate again. Kept in memory (one worker), so a restart costs one more gate call.
+_gates: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+GATE_KEEP_S = 24 * 3600
+GATE_KEEP_MAX = 1000
 
 
 def _now() -> str:
@@ -80,6 +85,27 @@ def _save(job: dict[str, Any]) -> None:
 
 def _public(job: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in job.items() if not k.startswith("_")}
+
+
+def _photo_digest(path: Path) -> str:
+    import hashlib
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _keep_gate(digest: str, readings: list[dict[str, Any]]) -> None:
+    import time
+    now = time.monotonic()
+    for key in [k for k, (at, _) in _gates.items() if now - at > GATE_KEEP_S]:
+        del _gates[key]
+    while len(_gates) >= GATE_KEEP_MAX:
+        del _gates[min(_gates, key=lambda k: _gates[k][0])]
+    _gates[digest] = (now, readings)
+
+
+def _kept_gate(digest: str) -> list[dict[str, Any]] | None:
+    import time
+    kept = _gates.get(digest)
+    return kept[1] if kept and time.monotonic() - kept[0] <= GATE_KEEP_S else None
 
 
 def _parse_record(record: str) -> PetMetadata:
@@ -146,7 +172,8 @@ def _run_job_sync(job: dict[str, Any]) -> dict[str, Any]:
     try:
         result = asyncio.run(run_lite(job["_record"], [job["_photo"]], run_dir, transport=transport,
                                       image_transport=image_transport,
-                                      refine=opts["refine"], render=opts["render"], fit_stop=opts["fit_stop"]))
+                                      refine=opts["refine"], render=opts["render"], fit_stop=opts["fit_stop"],
+                                      gate_readings=job.get("_gate")))
     except PhotoRejected as exc:
         return {"status": "photo_rejected", "error": str(exc), "reasons": list(exc.reasons)}
     except FitRejected as exc:
@@ -256,6 +283,11 @@ async def create_job(record: str = Form(..., description="shelter record JSON (K
         "_options": {"fit_stop": fit_stop, "refine": refine, "scripted": scripted,
                      "render": Path(BLENDER).exists() if render is None else render},
     }
+    # /v1/fit gated this photo already: the job judges those readings instead of calling again
+    # (not for scripted runs, which answer the gate from their script)
+    kept = None if scripted else _kept_gate(_photo_digest(photo_path))
+    if kept:
+        job["_gate"] = kept
     _jobs[job_id] = job
     _save(job)
     asyncio.create_task(_worker(job))
@@ -293,17 +325,25 @@ async def delete_job(job_id: str) -> None:
 
 @app.post("/v1/fit", dependencies=[Depends(_check_key)])
 async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> dict[str, Any]:
-    """Seconds, about $0.013: the body-shape call on the photo with the grey
-    model sheet (the outline and the closest model), the DINOv2 looks
-    (local), the verdict and the real size. No coat, no pattern
-    (the pattern only adds a caveat for brindle/merle/other layouts, read in
-    the full job)."""
+    """Seconds, about $0.02. The photo gate first (prepare_photo.py, about
+    $0.006): a photo it refuses (a hand over the coat, two animals, text on
+    the dog, ...) is answered at once as 부적합 with the gate's reasons and
+    fit.photo_rejected, and nothing more is spent. The gate's readings are
+    kept, so a job on the same photo does not call it again. Then the
+    body-shape call on the photo with the grey model sheet (the outline and
+    the closest model), the DINOv2 looks (local), the verdict and the real
+    size. No coat, no pattern (the pattern only adds a caveat for
+    brindle/merle/other layouts, read in the full job)."""
+    from PIL import Image, ImageOps
+
     from .body_shape import read_body_shape
     from .extract import photo_blocks
     from .fit import assess_fit
     from .pipeline import default_transport
+    from .prepare_photo import gate_photo, seen_from_above
     from .size import scale_for
     from .template_pick import combine, pick_template, template_file
+    from .watermark import remove_watermarks
 
     from .photo_quality import quality_of_file, quality_view
 
@@ -311,6 +351,19 @@ async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> d
     tmp = JOBS_DIR / "_fit" / uuid.uuid4().hex[:8]
     path = await _store_photo(photo, tmp)
     try:
+        transport = default_transport()
+        # the gate sees what a job's gate sees: the photo upright, a known shelter logo painted out
+        with Image.open(path) as opened:
+            image = ImageOps.exif_transpose(opened).convert("RGB")
+        image, watermarks = remove_watermarks(image)
+        rejected, _, readings = await gate_photo(transport, image)
+        if readings:
+            _keep_gate(_photo_digest(path), readings)
+        if rejected:
+            return _rejected_fit(meta.pet_id, rejected)
+        if watermarks:
+            path = tmp / "photo_clean.png"
+            image.save(path)
         # local: is the photograph big, sharp and exposed enough to read
         quality = await asyncio.to_thread(quality_of_file, path)
         try:
@@ -318,14 +371,14 @@ async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> d
         except Exception:  # noqa: BLE001 - no weights or no backbone: the vision call alone
             looks = None
         # the outline and the closest grey model in one call (body_shape.py)
-        answers, votes = await read_body_shape(default_transport(), photo_blocks([path]), models=True)
+        answers, votes = await read_body_shape(transport, photo_blocks([path]), models=True)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, f"vision call failed: {type(exc).__name__}: {exc}") from exc
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     pick = combine(looks, answers, meta.weight_kg)
     fit = assess_fit(meta.species, meta.weight_kg, meta.age_text, answers, None, votes=votes, photo_quality=quality,
-                     pick=pick)
+                     pick=pick, from_above=seen_from_above(readings))
     from .assets import template_paths
     from .metadata import process_metadata
     resolved = process_metadata(meta.pet_id, meta.species, meta.weight_kg, meta.coat_color)
@@ -335,8 +388,19 @@ async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> d
         size = _size_view(scale_for(meta.weight_kg, glb))
     except KeyError as exc:  # a mesh without the joints to measure its shape
         size = {"skipped": True, "reason": str(exc)}
-    return {"pet_id": meta.pet_id, "fit": _fit_view(fit), "size": size,
+    return {"pet_id": meta.pet_id, "fit": {**_fit_view(fit), "photo_rejected": []}, "size": size,
             "shape": answers, "photo": quality_view(quality)}
+
+
+def _rejected_fit(pet_id: str, reasons: list[str]) -> dict[str, Any]:
+    """/v1/fit for a photo the gate refused: the shape of a normal answer,
+    부적합 with the gate's Korean reasons (the job's photo_rejected ones)."""
+    from .prepare_photo import REJECT_RULES
+    return {"pet_id": pet_id,
+            "fit": {"level": "poor", "label": "부적합", "score": 0, "reasons": [REJECT_RULES[r] for r in reasons],
+                    "notes": [], "template": None, "picked_by": None, "match": None, "differences": [],
+                    "looks": None, "photo_rejected": reasons},
+            "size": None, "shape": None, "photo": None}
 
 
 __all__ = ["app"]
