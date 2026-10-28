@@ -6,7 +6,9 @@ the chest. Downstream every stage - the region agents, the image model's
 reference, the critic - takes the photograph at face value, so what is not
 the dog has to leave before any of them see it.
 
-Two parts, in this order:
+A known shelter logo stamped over the photograph is painted out first
+(watermark.py), so that the gate does not refuse it as text on the animal.
+Then two parts, in this order:
 
 1. GATE (one small vision call, two samples). The vision model answers a
    short factual form about the whole photograph: what the subject is, how
@@ -145,12 +147,14 @@ class PreparedPhoto:
     quality: dict[str, Any] | None = None   # photo_quality.measure_quality on the cut-out
     bars: bool = False               # seen through cage bars or a fence (pieces bridged)
     subject_box: tuple[int, int, int, int] | None = None   # the animal in `path`'s pixels (None: not cut)
+    watermarks: list[str] = field(default_factory=list)   # shelter logos painted out (watermark.py)
 
     def report(self) -> dict[str, Any]:
         return {
             "path": str(self.path), "original": str(self.original), "cut": self.cut,
             "box": list(self.box), "coverage": round(self.coverage, 3), "pieces_dropped": self.pieces_dropped,
             "bars": self.bars, "subject_box": list(self.subject_box) if self.subject_box else None,
+            "watermarks": self.watermarks,
             "rejected": self.rejected, "notes": self.notes, "gate": self.readings, "quality": self.quality,
         }
 
@@ -399,6 +403,8 @@ async def prepare_photo(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     image = Image.open(photo_path).convert("RGB")
+    from .watermark import WATERMARK_NOTE, remove_watermarks
+    image, watermarks = remove_watermarks(image)
 
     reasons: list[str] = []
     notes: list[str] = []
@@ -407,6 +413,8 @@ async def prepare_photo(
         reasons, notes, readings = await gate_photo(transport, image, species)
         if reasons and strict:
             raise PhotoRejected(reasons, readings)
+    if watermarks:
+        notes = notes + [WATERMARK_NOTE]
 
     seen_bars = bool(readings) and all(r.get("bars_in_front") for r in readings)
     cut, box, coverage, dropped, mask, bars = cut_out_with_mask(image, gate_anchors(readings, image.size),
@@ -430,7 +438,7 @@ async def prepare_photo(
         subject = (int(cols.min()), int(rows.min()), int(cols.max()) + 1, int(rows.max()) + 1)
     return PreparedPhoto(path=target, original=photo_path, cut=cut is not None, box=box, coverage=coverage,
                          pieces_dropped=dropped, rejected=reasons, notes=notes, readings=readings, quality=quality,
-                         bars=bars, subject_box=subject)
+                         bars=bars, subject_box=subject, watermarks=watermarks)
 
 
 __all__ = ["BARS_NOTE", "GATE_SCHEMA", "PhotoRejected", "PreparedPhoto", "bridge_bars", "choose_pieces", "cut_out",
