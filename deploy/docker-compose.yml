@@ -14,6 +14,13 @@ services:
       - ./cache:/cache          # DINOv2, rembg weights: downloaded once, kept across deploys
     ports:
       - "127.0.0.1:8000:8000"   # reachable from the server itself only (curl checks)
+    # docker's log file has no size limit by default, and every job prints
+    # its whole run: keep 3 x 10 MB, as the Spring compose does
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     networks:
       - lovablepet
 
