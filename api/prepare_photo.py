@@ -80,7 +80,7 @@ GATE_SCHEMA: dict[str, Any] = {
     "properties": {
         "subject": {"type": "string", "enum": ["dog", "cat", "other_animal", "none"]},
         "animals": {"type": "integer", "minimum": 0},
-        "person_covers_animal": {"type": "boolean"},
+        "person_covers": {"type": "string", "enum": ["none", "small", "large"]},
         "object_covers_animal": {"type": "boolean"},
         "bars_in_front": {"type": "boolean"},
         "text_on_animal": {"type": "boolean"},
@@ -95,7 +95,7 @@ GATE_SCHEMA: dict[str, Any] = {
         },
         "note": {"type": "string"},
     },
-    "required": ["subject", "animals", "person_covers_animal", "object_covers_animal", "bars_in_front",
+    "required": ["subject", "animals", "person_covers", "object_covers_animal", "bars_in_front",
                  "text_on_animal", "clothing", "harness", "view", "animal_cell"],
 }
 
@@ -103,7 +103,7 @@ GATE_SYSTEM = """You check whether a shelter photograph can be used to read one 
 
 - subject: the main animal in the photograph.
 - animals: how many animals are visible, in total (a reflection or a picture on the wall does not count).
-- person_covers_animal: true when a person's hand, arm, leg or body hides part of the main animal's coat (a person standing beside it, not touching, is false).
+- person_covers: how much of the main animal's coat a person's hand, arm, leg or body hides. none: no person touches or hides it (a person standing beside it, not touching, is none). small: only a hand or fingers hide a small part - under the chest or belly, at the scruff, on one side - and the head, the back and most of the body's coat are visible. large: the person hides a large part of the coat - the animal held in arms or against a body, a hand or arm across its back or head, or the animal only partly visible around the person.
 - object_covers_animal: true when a blanket, bowl, leash loop, a mesh so dense that little coat shows through, or another object hides a large part of the coat (a thin leash line is false; cage bars or a fence with the coat visible between them are false - answer them in bars_in_front).
 - bars_in_front: true when cage bars, a wire fence or a mesh stands between the camera and the animal, crossing its body (a fence behind the animal is false).
 - text_on_animal: true when printed text, a date stamp, a logo or a watermark lies over the animal's body (text over the background only is false).
@@ -177,13 +177,22 @@ def _shrink(image: Image.Image, side: int) -> Image.Image:
 
 # --------------------------------------------------------------------------- gate
 
+def _person_covers(reading: dict[str, Any]) -> str:
+    """none / small / large. Readings from before the three levels (a
+    true/false person_covers_animal, e.g. kept from an earlier /v1/fit)
+    count a true as large, which was its rule then."""
+    if "person_covers" in reading:
+        return str(reading["person_covers"])
+    return "large" if reading.get("person_covers_animal") else "none"
+
+
 def reject_reasons(reading: dict[str, Any], species: str = "dog") -> list[str]:
     reasons = []
     if reading.get("subject") != species:
         reasons.append("not_a_dog")
     if int(reading.get("animals") or 0) > 1:
         reasons.append("several_animals")
-    if reading.get("person_covers_animal"):
+    if _person_covers(reading) == "large":
         reasons.append("person_covers")
     if reading.get("object_covers_animal"):
         reasons.append("object_covers")
@@ -196,6 +205,10 @@ def reject_reasons(reading: dict[str, Any], species: str = "dog") -> list[str]:
 
 BARS_NOTE = ("The animal is photographed through cage bars or a fence: ignore the bars entirely and treat "
              "the coat behind each bar as continuing the coat on either side of it.")
+# A hand that hides only a little (person_covers "small") does not stop the run. The cut keeps it with the dog,
+# since it touches the dog, so the reading and repaint prompts are told to look past it.
+HAND_NOTE = ("A person's hand holds or touches the animal: ignore the hand, the skin and any glove entirely, and "
+             "treat the coat they hide as continuing the neighbouring coat.")
 
 
 def gate_notes(readings: list[dict[str, Any]]) -> list[str]:
@@ -209,6 +222,9 @@ def gate_notes(readings: list[dict[str, Any]]) -> list[str]:
                      "treat the fur beneath as continuing the neighbouring coat.")
     if readings and all(r.get("bars_in_front") for r in readings):
         notes.append(BARS_NOTE)
+    # every sample saw a hand: "small" in one and "large" in the other is still a hand
+    if readings and all(_person_covers(r) != "none" for r in readings):
+        notes.append(HAND_NOTE)
     views = [r.get("view") for r in readings]
     if views and all(v == "back" for v in views):
         notes.append("The photograph shows the animal from behind; the face and chest are not visible.")
@@ -453,5 +469,5 @@ async def prepare_photo(
                          bars=bars, subject_box=subject, watermarks=watermarks)
 
 
-__all__ = ["BARS_NOTE", "GATE_SCHEMA", "PhotoRejected", "PreparedPhoto", "bridge_bars", "choose_pieces", "cut_out",
+__all__ = ["BARS_NOTE", "GATE_SCHEMA", "HAND_NOTE", "PhotoRejected", "PreparedPhoto", "bridge_bars", "choose_pieces", "cut_out",
            "cut_out_with_mask", "gate_anchors", "gate_photo", "judge_gate", "prepare_photo", "reject_reasons"]

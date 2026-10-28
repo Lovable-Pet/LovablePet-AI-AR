@@ -103,10 +103,10 @@ def region_cells(cells: dict[str, tuple[str, int]]):
 BLACK_CELLS = region_cells({"back": ("E", 4), "chest": ("E", 6), "underside": ("E", 7),
                             "legs_lower": ("D", 8), "paws": ("D", 9), "skull": ("F", 3)})
 
-PHOTO_OK = {"subject": "dog", "animals": 1, "person_covers_animal": False, "object_covers_animal": False,
+PHOTO_OK = {"subject": "dog", "animals": 1, "person_covers": "none", "object_covers_animal": False,
             "bars_in_front": False, "text_on_animal": False, "clothing": False, "harness": False, "view": "front",
             "animal_cell": {"col": "E", "row": 5}, "note": ""}
-PHOTO_HELD = {**PHOTO_OK, "person_covers_animal": True, "harness": True}
+PHOTO_HELD = {**PHOTO_OK, "person_covers": "large", "harness": True}
 
 
 def critic(rounds: list[list[dict[str, Any]]], samples: int = 2):

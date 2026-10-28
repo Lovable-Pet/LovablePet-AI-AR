@@ -41,7 +41,7 @@ def call_kind(schema: dict[str, Any]) -> str:
         return "simple_critic"
     if "face_box" in props:
         return "face_box"
-    if "person_covers_animal" in props:
+    if "person_covers" in props or "person_covers_animal" in props:
         return "photo_gate"
     if "cells" in props:
         return "region_cells"

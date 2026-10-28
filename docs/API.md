@@ -140,7 +140,7 @@ multipart:
 | `queued` | | 앞 작업을 기다리는 중 | |
 | `running` | | 만드는 중 | `started_at` |
 | `done` | O | 완성 | 아래 전부 |
-| `photo_rejected` | O | 사진이 못 쓰는 사진 (개가 아님, 여러 마리, 사람이 가림, 옷 등) | `reasons` (한국어), `error` |
+| `photo_rejected` | O | 사진이 못 쓰는 사진 (개가 아님, 여러 마리, 사람이 털을 크게 가림, 옷 등). 손이 배 밑·옆을 조금 받치는 정도는 거부하지 않고 손을 무시하고 읽는다 | `reasons` (한국어), `error` |
 | `unsuitable` | O | `fit_stop=true`이고 부적합 | `fit` |
 | `failed` | O | 서버 오류, 또는 서버 재시작으로 중단 | `error` |
 
