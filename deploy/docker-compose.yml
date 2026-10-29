@@ -1,0 +1,29 @@
+# On the EC2 server in ~/lovablepet-ai/, next to .env, output/ and cache/.
+# The deploy workflow copies this file there and runs `docker compose up -d`.
+#
+# The Spring container joins the same external network "lovablepet" and calls
+# http://pipeline:8000 - port 8000 is never opened to the internet.
+services:
+  pipeline:
+    image: ${PIPELINE_IMAGE:-ghcr.io/lovable-pet/lovablepet-ai-ar:latest}
+    container_name: pipeline
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./output:/app/output    # templates (from the assets-v1 release) + output/jobs
+      - ./cache:/cache          # DINOv2, rembg weights: downloaded once, kept across deploys
+    ports:
+      - "127.0.0.1:8000:8000"   # reachable from the server itself only (curl checks)
+    # docker's log file has no size limit by default, and every job prints
+    # its whole run: keep 3 x 10 MB, as the Spring compose does
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    networks:
+      - lovablepet
+
+networks:
+  lovablepet:
+    external: true

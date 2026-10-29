@@ -4,7 +4,7 @@ Spring 서버가 보호소 기록과 사진을 보내면, 파이프라인이 그
 한 마리에 1.5~4분이 걸리므로 **작업을 등록하고 나중에 결과를 받는 방식**이다.
 
 ```
-앱 ──(기록+사진)──▶ Spring ──POST /v1/fit──▶ 파이프라인   (선택, 5~20초, 약 $0.013)
+앱 ──(기록+사진)──▶ Spring ──POST /v1/fit──▶ 파이프라인   (선택, 5~20초, 약 $0.02 · 사진 거부면 약 $0.006)
                      │      ◀── 적합/주의/부적합 + 실제 크기
                      │
                      ├──POST /v1/jobs──▶ 파이프라인   202 {job_id, status: queued}
@@ -56,7 +56,14 @@ toypoodle, chihuahua, retriever; git에 없음, 따로 전달). 생김새 분류
 
 ## POST /v1/fit — 만들어도 되는 개인지 먼저 확인
 
-multipart: `record`, `photo` (jpeg/png/webp, 15MB 이하). 5~20초, 약 $0.013.
+multipart: `record`, `photo` (jpeg/png/webp, 15MB 이하). 5~20초, 약 $0.02.
+
+**사진 판정이 먼저**다(생성 작업의 사진 판정과 같은 것, 약 $0.006). 사람 손이 털을 가림, 여러 마리, 몸 위의 글자, 옷 등으로
+거부되면 템플릿 판정 없이 바로 `fit.level: "poor"`(부적합)로 답하고 비용은 거기서 끝난다. `fit.reasons`는 작업의
+`photo_rejected` 사유와 같은 한국어 문장, `fit.photo_rejected`는 사유 코드(`person_covers`, `several_animals`,
+`text_on_animal`, `clothing`, `object_covers`, `not_a_dog`; 통과하면 `[]`), `size`·`shape`·`photo`는 `null`이다.
+판정 결과는 서버가 24시간 기억해서, **같은 사진으로 `/v1/jobs`를 부르면 사진 판정을 다시 하지 않는다**(서버 재시작 전까지).
+한국동물구조관리협회 로고(1600×1200 사진 아래 가운데)는 판정 전에 지운다 — 생성 작업도 같다.
 
 ```json
 {
@@ -133,7 +140,7 @@ multipart:
 | `queued` | | 앞 작업을 기다리는 중 | |
 | `running` | | 만드는 중 | `started_at` |
 | `done` | O | 완성 | 아래 전부 |
-| `photo_rejected` | O | 사진이 못 쓰는 사진 (개가 아님, 여러 마리, 사람이 가림, 옷 등) | `reasons` (한국어), `error` |
+| `photo_rejected` | O | 사진이 못 쓰는 사진 (개가 아님, 여러 마리, 사람이 털을 크게 가림, 옷 등). 손이 배 밑·옆을 조금 받치는 정도는 거부하지 않고 손을 무시하고 읽는다 | `reasons` (한국어), `error` |
 | `unsuitable` | O | `fit_stop=true`이고 부적합 | `fit` |
 | `failed` | O | 서버 오류, 또는 서버 재시작으로 중단 | `error` |
 
@@ -175,8 +182,9 @@ multipart:
 
 ## Spring 쪽
 
-아래 세 파일은 Spring 서버 저장소(instagram-server)의 `com.example.instagram_server.petmodel` 패키지에 있다.
-instagram-server(Spring Boot 4.0.3, webmvc만)에서 컴파일하고, 실제 파이프라인 서버와 판정·조회·다운로드·콜백까지 돌려 확인했다.
+아래 세 파일을 Spring 서버 저장소의 `petmodel` 패키지에 넣어 쓴다.
+Spring Boot 4.0.3(webmvc만) 프로젝트에서 컴파일하고, 실제 파이프라인 서버와 판정·조회·다운로드·콜백까지 돌려 확인했다.
+Jackson 3(`tools.jackson`) 기준이라 Boot 3 프로젝트면 import를 `com.fasterxml.jackson`으로 바꾼다.
 
 | 파일 | 내용 |
 |---|---|
@@ -184,13 +192,13 @@ instagram-server(Spring Boot 4.0.3, webmvc만)에서 컴파일하고, 실제 파
 | `PetPipelineClient.java` | `fit()`, `createJob()`, `getJob()`, `download()`, `delete()` |
 | `PetModelCallbackController.java` | `POST /internal/pet-models/callback`: 키 확인 → done이면 GLB 받아 저장 (DB 저장은 TODO) |
 
-`application.yml` (CI가 `APPLICATION_PROPERTIES` 시크릿으로 만드므로 시크릿에 추가):
+`application.yml` (`api-key`는 비밀값이니 커밋하지 말고 시크릿이나 서버 `.env`로 넣는다):
 
 ```yaml
 pet-pipeline:
-  base-url: http://<파이프라인 호스트>:8000
+  base-url: http://pipeline:8000   # 같은 EC2, docker 네트워크 lovablepet의 파이프라인 컨테이너
   api-key: <PIPELINE_API_KEY와 같은 값>
-  callback-url: https://<Spring 공개 주소>/internal/pet-models/callback
+  callback-url: http://<Spring 컨테이너 이름>:8080/internal/pet-models/callback   # 같은 네트워크라 공개 주소가 필요 없다
   model-dir: models            # 콜백이 GLB를 저장할 폴더 (S3로 바꾸면 이 부분 교체)
 ```
 
@@ -243,7 +251,7 @@ new THREE.GLTFLoader().load(pet.glbUrl, (gltf) => {
 
 | 단계 | 시간 | 비용 |
 |---|---|---|
-| `/v1/fit` | 5~20초 | 약 $0.013 |
+| `/v1/fit` | 5~20초 | 약 $0.02 (사진 판정 $0.006 + 체형 판정). 사진이 거부되면 약 $0.006 |
 | `/v1/jobs` 전체 (다듬기 포함) | 1.5~4분 | 중앙값 약 $0.075 (117회 실측) |
 | `refine=false` | 편집 시간만큼 짧음 | 약 $0.03 (비전 호출만, gpt-4o 기준) |
 

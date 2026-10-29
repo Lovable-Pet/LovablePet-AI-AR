@@ -6,7 +6,9 @@ the chest. Downstream every stage - the region agents, the image model's
 reference, the critic - takes the photograph at face value, so what is not
 the dog has to leave before any of them see it.
 
-Two parts, in this order:
+A known shelter logo stamped over the photograph is painted out first
+(watermark.py), so that the gate does not refuse it as text on the animal.
+Then two parts, in this order:
 
 1. GATE (one small vision call, two samples). The vision model answers a
    short factual form about the whole photograph: what the subject is, how
@@ -78,7 +80,7 @@ GATE_SCHEMA: dict[str, Any] = {
     "properties": {
         "subject": {"type": "string", "enum": ["dog", "cat", "other_animal", "none"]},
         "animals": {"type": "integer", "minimum": 0},
-        "person_covers_animal": {"type": "boolean"},
+        "person_covers": {"type": "string", "enum": ["none", "small", "large"]},
         "object_covers_animal": {"type": "boolean"},
         "bars_in_front": {"type": "boolean"},
         "text_on_animal": {"type": "boolean"},
@@ -93,7 +95,7 @@ GATE_SCHEMA: dict[str, Any] = {
         },
         "note": {"type": "string"},
     },
-    "required": ["subject", "animals", "person_covers_animal", "object_covers_animal", "bars_in_front",
+    "required": ["subject", "animals", "person_covers", "object_covers_animal", "bars_in_front",
                  "text_on_animal", "clothing", "harness", "view", "animal_cell"],
 }
 
@@ -101,7 +103,7 @@ GATE_SYSTEM = """You check whether a shelter photograph can be used to read one 
 
 - subject: the main animal in the photograph.
 - animals: how many animals are visible, in total (a reflection or a picture on the wall does not count).
-- person_covers_animal: true when a person's hand, arm, leg or body hides part of the main animal's coat (a person standing beside it, not touching, is false).
+- person_covers: how much of the main animal's coat a person's hand, arm, leg or body hides. none: no person touches or hides it (a person standing beside it, not touching, is none). small: only a hand or fingers hide a small part - under the chest or belly, at the scruff, on one side - and the head, the back and most of the body's coat are visible. large: the person hides a large part of the coat - the animal held in arms or against a body, a hand or arm across its back or head, or the animal only partly visible around the person.
 - object_covers_animal: true when a blanket, bowl, leash loop, a mesh so dense that little coat shows through, or another object hides a large part of the coat (a thin leash line is false; cage bars or a fence with the coat visible between them are false - answer them in bars_in_front).
 - bars_in_front: true when cage bars, a wire fence or a mesh stands between the camera and the animal, crossing its body (a fence behind the animal is false).
 - text_on_animal: true when printed text, a date stamp, a logo or a watermark lies over the animal's body (text over the background only is false).
@@ -144,12 +146,18 @@ class PreparedPhoto:
     readings: list[dict[str, Any]] = field(default_factory=list)
     quality: dict[str, Any] | None = None   # photo_quality.measure_quality on the cut-out
     bars: bool = False               # seen through cage bars or a fence (pieces bridged)
+    subject_box: tuple[int, int, int, int] | None = None   # the animal in `path`'s pixels (None: not cut)
+    watermarks: list[str] = field(default_factory=list)   # shelter logos painted out (watermark.py)
+    # the animal in the ORIGINAL photo's pixels (None: not cut), so the colour
+    # measurement on the original reads only the animal (photo_colours.py)
+    animal_mask: np.ndarray | None = field(default=None, repr=False)
 
     def report(self) -> dict[str, Any]:
         return {
             "path": str(self.path), "original": str(self.original), "cut": self.cut,
             "box": list(self.box), "coverage": round(self.coverage, 3), "pieces_dropped": self.pieces_dropped,
-            "bars": self.bars,
+            "bars": self.bars, "subject_box": list(self.subject_box) if self.subject_box else None,
+            "watermarks": self.watermarks,
             "rejected": self.rejected, "notes": self.notes, "gate": self.readings, "quality": self.quality,
         }
 
@@ -172,13 +180,22 @@ def _shrink(image: Image.Image, side: int) -> Image.Image:
 
 # --------------------------------------------------------------------------- gate
 
+def _person_covers(reading: dict[str, Any]) -> str:
+    """none / small / large. Readings from before the three levels (a
+    true/false person_covers_animal, e.g. kept from an earlier /v1/fit)
+    count a true as large, which was its rule then."""
+    if "person_covers" in reading:
+        return str(reading["person_covers"])
+    return "large" if reading.get("person_covers_animal") else "none"
+
+
 def reject_reasons(reading: dict[str, Any], species: str = "dog") -> list[str]:
     reasons = []
     if reading.get("subject") != species:
         reasons.append("not_a_dog")
     if int(reading.get("animals") or 0) > 1:
         reasons.append("several_animals")
-    if reading.get("person_covers_animal"):
+    if _person_covers(reading) == "large":
         reasons.append("person_covers")
     if reading.get("object_covers_animal"):
         reasons.append("object_covers")
@@ -191,6 +208,16 @@ def reject_reasons(reading: dict[str, Any], species: str = "dog") -> list[str]:
 
 BARS_NOTE = ("The animal is photographed through cage bars or a fence: ignore the bars entirely and treat "
              "the coat behind each bar as continuing the coat on either side of it.")
+# A hand that hides only a little (person_covers "small") does not stop the run. The cut keeps it with the dog,
+# since it touches the dog, so the reading and repaint prompts are told to look past it.
+HAND_NOTE = ("A person's hand holds or touches the animal: ignore the hand, the skin and any glove entirely, and "
+             "treat the coat they hide as continuing the neighbouring coat.")
+
+
+def seen_from_above(readings: list[dict[str, Any]]) -> bool:
+    """Every gate sample saw the animal from above (view "top"): its legs
+    are foreshortened, and fit.py does not judge their length."""
+    return bool(readings) and all(r.get("view") == "top" for r in readings)
 
 
 def gate_notes(readings: list[dict[str, Any]]) -> list[str]:
@@ -204,6 +231,9 @@ def gate_notes(readings: list[dict[str, Any]]) -> list[str]:
                      "treat the fur beneath as continuing the neighbouring coat.")
     if readings and all(r.get("bars_in_front") for r in readings):
         notes.append(BARS_NOTE)
+    # every sample saw a hand: "small" in one and "large" in the other is still a hand
+    if readings and all(_person_covers(r) != "none" for r in readings):
+        notes.append(HAND_NOTE)
     views = [r.get("view") for r in readings]
     if views and all(v == "back" for v in views):
         notes.append("The photograph shows the animal from behind; the face and chest are not visible.")
@@ -242,12 +272,18 @@ async def gate_photo(transport: Transport, image: Image.Image, species: str = "d
             readings.append(await transport.complete(system=GATE_SYSTEM, blocks=blocks, schema=GATE_SCHEMA))
         except Exception as exc:  # noqa: BLE001 - one failed sample must not refuse a photo
             print(f"[prepare] gate sample failed ({type(exc).__name__}: {exc})")
+    reasons, notes = judge_gate(readings, species)
+    return reasons, notes, readings
+
+
+def judge_gate(readings: list[dict[str, Any]], species: str = "dog") -> tuple[list[str], list[str]]:
+    """(agreed rejection reasons, notes) from the gate's readings - the
+    ones just taken, or ones kept from an earlier /v1/fit on the same photo."""
     if not readings:
-        return [], [], []
+        return [], []
     per_sample = [set(reject_reasons(r, species)) for r in readings]
-    agreed = set.intersection(*per_sample) if per_sample else set()
-    reasons = [r for r in REJECT_RULES if r in agreed]
-    return reasons, gate_notes(readings), readings
+    agreed = set.intersection(*per_sample)
+    return [r for r in REJECT_RULES if r in agreed], gate_notes(readings)
 
 
 # --------------------------------------------------------------------------- cut
@@ -391,21 +427,31 @@ async def prepare_photo(
     species: str = "dog",
     gate: bool = True,
     strict: bool = True,
+    gate_readings: list[dict[str, Any]] | None = None,
 ) -> PreparedPhoto:
     """Gate (when a transport is given) then cut. With strict, an agreed
-    rejection raises PhotoRejected; otherwise the reasons are only logged."""
+    rejection raises PhotoRejected; otherwise the reasons are only logged.
+    `gate_readings`: the gate already ran on this photo (/v1/fit), so its
+    readings are judged again and no call is made."""
     photo_path = Path(photo_path)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     image = Image.open(photo_path).convert("RGB")
+    from .watermark import WATERMARK_NOTE, remove_watermarks
+    image, watermarks = remove_watermarks(image)
 
     reasons: list[str] = []
     notes: list[str] = []
     readings: list[dict[str, Any]] = []
-    if gate and transport is not None:
+    if gate and gate_readings:
+        readings = gate_readings
+        reasons, notes = judge_gate(readings, species)
+    elif gate and transport is not None:
         reasons, notes, readings = await gate_photo(transport, image, species)
-        if reasons and strict:
-            raise PhotoRejected(reasons, readings)
+    if reasons and strict:
+        raise PhotoRejected(reasons, readings)
+    if watermarks:
+        notes = notes + [WATERMARK_NOTE]
 
     seen_bars = bool(readings) and all(r.get("bars_in_front") for r in readings)
     cut, box, coverage, dropped, mask, bars = cut_out_with_mask(image, gate_anchors(readings, image.size),
@@ -422,10 +468,19 @@ async def prepare_photo(
     # the animal's own pixels): no call, read by fit.py and the lite run
     from .photo_quality import measure_quality
     quality = measure_quality(cut if cut is not None else image, mask)
+    # the face crop's subject box, so it does not run the model again on the cut-out
+    subject = None
+    animal = None
+    if cut is not None and mask is not None and mask.any():
+        rows, cols = np.nonzero(mask)
+        subject = (int(cols.min()), int(rows.min()), int(cols.max()) + 1, int(rows.max()) + 1)
+        animal = np.zeros((image.size[1], image.size[0]), dtype=bool)
+        animal[box[1]:box[3], box[0]:box[2]] = mask
     return PreparedPhoto(path=target, original=photo_path, cut=cut is not None, box=box, coverage=coverage,
                          pieces_dropped=dropped, rejected=reasons, notes=notes, readings=readings, quality=quality,
-                         bars=bars)
+                         bars=bars, subject_box=subject, watermarks=watermarks, animal_mask=animal)
 
 
-__all__ = ["BARS_NOTE", "GATE_SCHEMA", "PhotoRejected", "PreparedPhoto", "bridge_bars", "choose_pieces", "cut_out",
-           "cut_out_with_mask", "gate_anchors", "gate_photo", "prepare_photo", "reject_reasons"]
+__all__ = ["BARS_NOTE", "GATE_SCHEMA", "HAND_NOTE", "PhotoRejected", "PreparedPhoto", "bridge_bars", "choose_pieces", "cut_out",
+           "cut_out_with_mask", "gate_anchors", "gate_photo", "judge_gate", "prepare_photo", "reject_reasons",
+           "seen_from_above"]

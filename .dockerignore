@@ -1,0 +1,9 @@
+# Only these go into the build context (the server image, and the Lambda image's files)
+*
+!requirements.txt
+!api/
+!tests/scripts.py
+!lambda/rembg/handler.py
+!lambda/rembg/slim_model.py
+**/__pycache__
+**/*.pyc

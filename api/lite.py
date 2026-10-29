@@ -850,6 +850,7 @@ async def run_lite(
     fit_stop: bool = False,
     real_size: bool = True,
     pick_template: bool = True,
+    gate_readings: list[dict[str, Any]] | None = None,
 ) -> PipelineResult:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -866,16 +867,22 @@ async def run_lite(
     photo_notes: list[str] = []
     photo_quality: dict[str, Any] | None = None
     photo_bars = False
+    photo_subject: tuple[int, int, int, int] | None = None   # the animal's box in the cut-out
+    photo_animal: np.ndarray | None = None   # the animal in the original photo's pixels
     if prepare:
         from .prepare_photo import prepare_photo
 
         t = _now()
         gate_transport = None if reuse_appearance else (transport or default_transport())
-        prepared = await prepare_photo(gate_transport, photos[0], out_dir, species="dog", strict=strict_photo)
+        # gate_readings: /v1/fit already gated this photo (api/server.py), no second call
+        prepared = await prepare_photo(gate_transport, photos[0], out_dir, species="dog", strict=strict_photo,
+                                       gate_readings=gate_readings)
         photos = [prepared.path] + photos[1:]
         photo_notes = prepared.notes
         photo_quality = prepared.quality
         photo_bars = prepared.bars
+        photo_subject = prepared.subject_box
+        photo_animal = prepared.animal_mask
         log["steps"]["prepare"] = prepared.report()
         # a saturated backdrop's light in the fur: the calls read white as tan
         from .photo_colours import remove_backdrop_cast
@@ -983,7 +990,7 @@ async def run_lite(
             from .face_crop import crop_block, crop_face
             from .pattern_classify import BROW_FEATURES, CHEEK_FEATURES, EAR_FEATURES, MUZZLE_FEATURES
             try:
-                crop = await crop_face(photos[0], transport)
+                crop = await crop_face(photos[0], transport, subject=photo_subject)
                 face_log["box"], face_log["frontal"], face_log["visible"] = list(crop.box), crop.frontal, crop.visible
                 if crop.visible:
                     crop.image.save(out_dir / "face_crop.png")
@@ -1148,10 +1155,12 @@ async def run_lite(
     #     measurement call and the image edit.
     from .fit import FitRejected, assess_fit
     from .fit import describe as describe_fit
+    from .prepare_photo import seen_from_above
     fit = assess_fit(meta.species, meta.weight_kg, meta.age_text,
                      (appearance.get("shape") or {}).get("answers"), appearance.get("pattern"),
                      votes=(log["steps"].get("shape") or {}).get("votes"), photo_quality=photo_quality,
-                     pick=pick, photo_bars=photo_bars)
+                     pick=pick, photo_bars=photo_bars,
+                     from_above=seen_from_above((log["steps"].get("prepare") or {}).get("gate") or []))
     log["steps"]["fit"] = fit
     _json(out_dir / "fit.json", fit)
     print(f"[lite] fit: {describe_fit(fit)}")
@@ -1187,7 +1196,8 @@ async def run_lite(
 
         t = _now()
         try:
-            measured = await measure_region_colours(original_photo, transport or default_transport())
+            measured = await measure_region_colours(original_photo, transport or default_transport(),
+                                                    animal_mask=photo_animal)
         except Exception as exc:  # noqa: BLE001 - the table ramp is the fallback
             print(f"[lite] colour measurement failed ({type(exc).__name__}: {exc}); using the table ramps")
             measured = {}
