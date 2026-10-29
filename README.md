@@ -108,7 +108,7 @@ AWS 준비 (한 번, 서울 리전 ap-northeast-2):
    ```
 3. Actions에서 "rembg Lambda"를 수동 실행한다. 함수가 아직 없으니 이미지만 ECR에 올라간다(태그 = 커밋 SHA).
 4. Lambda → 함수 생성 → 컨테이너 이미지, 이름 `lovablepet-rembg`, 위 이미지, x86_64. 구성:
-   메모리 3008 MB(새 계정 상한, 이것으로 충분), 제한 시간 3분, 환경 변수 `REMBG_KEY`(`openssl rand -hex 32`), 함수 URL(인증 유형 NONE),
+   메모리 3008 MB(새 계정 상한, 이것으로 충분), 제한 시간 5분(`api/bria.py` `TIMEOUT_S`와 같게), 환경 변수 `REMBG_KEY`(`openssl rand -hex 32`), 함수 URL(인증 유형 NONE),
    예약된 동시성 3(URL이 공개라 남용 상한).
 5. 서버 `.env`에 `REMBG_URL=<함수 URL>`, `REMBG_KEY=<같은 값>`을 넣고 `docker compose up -d`.
 
