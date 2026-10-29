@@ -66,6 +66,10 @@ def session(model_path: str):
     # same masks, ~1 GB less at the peak (the arena keeps freed blocks)
     opts.enable_cpu_mem_arena = False
     opts.enable_mem_pattern = False
+    # onnxruntime starts a thread per core of the machine, also in a container
+    # held to fewer CPUs: 6 threads on 2 CPUs ran 3x slower
+    if hasattr(os, "sched_getaffinity"):
+        opts.intra_op_num_threads = len(os.sched_getaffinity(0))
     return ort.InferenceSession(model_path, opts, providers=["CPUExecutionProvider"])
 
 
