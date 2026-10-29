@@ -32,7 +32,10 @@ from PIL import Image
 SIDE = 1024                                   # the exported graph only runs at 1024x1024
 MEAN = (0.485, 0.456, 0.406)
 STD = (0.229, 0.224, 0.225)
-TIMEOUT_S = 180                               # a cold Lambda loads the 1 GB model first
+# a cold Lambda loads the 1 GB model first; the first call after a new image
+# ran past 180 s once. Keep this at the function's timeout (5 min): giving up
+# sooner retries while the first call still runs, on a second cold instance.
+TIMEOUT_S = 300
 ATTEMPTS = 3
 
 
