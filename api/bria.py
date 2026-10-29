@@ -1,12 +1,13 @@
 """The animal's mask from BRIA RMBG 2.0, here or on the Lambda behind REMBG_URL.
 
-One 1024x1024 pass of the model needs about 8 GB of memory on CPU (measured
+One 1024x1024 pass of rembg's model needs about 8 GB of memory on CPU (measured
 2026-10-27: 9.5 GB through rembg, 8.6 GB with the CPU memory arena off), more
 than the server should hold for the ten seconds it runs. With REMBG_URL set
-the pass runs on AWS Lambda (lambda/rembg/), which only bills while it runs.
-The split is rembg's own computation cut in two, so both places give the same
-mask: the caller resizes the photo to 1024x1024 and the mask back to the
-photo's size, the model step in between is predict() on either side.
+the pass runs on AWS Lambda (lambda/rembg/), which only bills while it runs,
+on the same model rewritten to peak at ~1.9 GB (lambda/rembg/slim_model.py;
+masks within 1/255). The split is rembg's own computation cut in two: the
+caller resizes the photo to 1024x1024 and the mask back to the photo's size,
+the model step in between is predict() on either side.
 
 This module is copied into the Lambda image as it is: it imports nothing from
 api/, and rembg (model download) and httpx (the call) only where used.
@@ -66,6 +67,10 @@ def session(model_path: str):
     # same masks, ~1 GB less at the peak (the arena keeps freed blocks)
     opts.enable_cpu_mem_arena = False
     opts.enable_mem_pattern = False
+    # onnxruntime starts a thread per core of the machine, also in a container
+    # held to fewer CPUs: 6 threads on 2 CPUs ran 3x slower
+    if hasattr(os, "sched_getaffinity"):
+        opts.intra_op_num_threads = len(os.sched_getaffinity(0))
     return ort.InferenceSession(model_path, opts, providers=["CPUExecutionProvider"])
 
 
