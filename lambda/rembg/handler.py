@@ -20,6 +20,17 @@ MODEL = "/opt/bria-rmbg.onnx"
 _session = None
 
 
+def _drop_page_cache(path: str) -> None:
+    """Let the kernel drop the model file's cached pages: the session holds its
+    own copy of the weights, and Lambda counts the ~1 GB cache as used memory
+    (2,871 of 3,000 MB on the first calls, 2026-10-30)."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+    finally:
+        os.close(fd)
+
+
 def _reply(status: int, payload: dict) -> dict:
     return {"statusCode": status, "headers": {"Content-Type": "application/json"}, "body": json.dumps(payload)}
 
@@ -41,5 +52,6 @@ def handler(event, context):
         return _reply(400, {"error": f"expected {bria.SIDE}x{bria.SIDE} RGB, got {pixels.shape} {pixels.dtype}"})
     if _session is None:
         _session = bria.session(MODEL)
+        _drop_page_cache(MODEL)
     mask = bria.predict(_session, pixels)
     return _reply(200, {"mask": bria.png_b64(mask)})
