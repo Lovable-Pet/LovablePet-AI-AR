@@ -114,5 +114,12 @@ jobs:
             docker compose pull
             docker compose up -d --remove-orphans
             docker logout ghcr.io
+            # a hand-run `docker compose up -d` has no PIPELINE_IMAGE and falls
+            # back to :latest - tag it here, or compose pulls it and GHCR says unauthorized
+            docker tag "$PIPELINE_IMAGE" "ghcr.io/${REPO,,}:latest"
+            # older deploys keep their SHA tag, which prune -f (untagged only) leaves
+            docker images "ghcr.io/${REPO,,}" --format '{{.Repository}}:{{.Tag}}' \
+              | grep -vxF -e "$PIPELINE_IMAGE" -e "ghcr.io/${REPO,,}:latest" \
+              | xargs -r docker rmi || true
             docker image prune -f
             curl -fsS --retry 15 --retry-delay 2 --retry-all-errors localhost:8000/health
