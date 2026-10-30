@@ -64,6 +64,9 @@ Spring 컨테이너는 외부 네트워크 `lovablepet`에 붙어 `http://pipeli
 
 로그: `docker logs -f pipeline`
 
+`.env`를 고친 뒤엔 서버에서 `docker compose up -d`(`restart`는 `.env`를 다시 읽지 않는다). 배포가 실행 중인 이미지에 `:latest` 태그를 붙여 두어서
+손으로 띄워도 같은 이미지를 쓴다. 그 태그가 없으면 compose가 GHCR에서 `:latest`를 받으려다 `unauthorized`로 멈춘다.
+
 ## 배경 제거 Lambda
 
 배경 제거(BRIA RMBG 2.0, rembg 기본 모델)는 1024×1024 한 번에 CPU 메모리 약 8 GB를 쓴다. 작업 하나 동안 서버 최고치 10.5 GB 중 이 단계가
