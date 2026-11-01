@@ -1294,6 +1294,18 @@ async def run_lite(
                 and dark_share >= DARK_BRINDLE_SHARE and decision.base_color not in ("chocolate", "gray")):
             face_log["dark_brindle"] = f"base {decision.base_color} -> black (dark fur {dark_share})"
             decision.base_color, decision.second_color = "black", None
+        # a plain coat read white by a split vote, one sample saying cream,
+        # on a dog whose face reads cream: cream (shelter maltese 3, a cream
+        # puppy read white 2-1 with a cream face 5/5). The face call says
+        # cream for most white dogs too, so it decides only when the pattern
+        # vote itself was not unanimous (no white dog on file had a cream
+        # sample)
+        crown_votes = (face_log.get("votes") or {}).get("crown") or {}
+        solid_bases = [s.get("base_color") for s in decision.samples if s.get("pattern") == "solid"]
+        if (decision.pattern == "solid" and decision.base_color == "white" and "cream" in solid_bases
+                and crown_votes and max(crown_votes, key=crown_votes.get) == "cream"):
+            face_log["white_to_cream"] = f"pattern bases {solid_bases}, crown {crown_votes}"
+            decision.base_color = "cream"
         region_colors = apply_features(decision.pattern, decision.base_color, decision.second_color, features,
                                        consensus=decision.layout)
         face_log["crown_applied"] = crown_on_skull(region_colors, face_log.get("crown"),
