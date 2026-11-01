@@ -58,6 +58,18 @@ LAYOUT_IOU_FLOOR = 0.7
 # 1.0, real repaints 0.61-0.91, the atlas shifted 20 px 0.38, rescaled 5%
 # 0.10, a drawing of a dog 0.00.
 FEATURE_SSIM_FLOOR = 0.5
+# Each island is compared with this much of its surroundings (texels at the
+# 2048 atlas): the jindo puppy's eye islands are near-flat black eyeballs, and
+# on a dark coat their own box held no structure but the highlight specks -
+# every dark puppy's refine scored 0.21-0.50 and was thrown away, though the
+# eyes had not moved (10-31, 14 shelter puppies; two rolls paid each). With
+# the margin: real rolls 0.52-0.77, the same rolls shifted 20 px 0.25 or
+# less, rescaled 5% 0.25 or less.
+FEATURE_MARGIN_PX = 24
+# ... and a window flatter than this (luminance standard deviation of the
+# build) says nothing either way and is left out: a black puppy's eye in
+# black fur (0.03). The layout check still guards those.
+FEATURE_MIN_STD = 0.1
 CACHE_DIR = Path("output/cache/uv_paint")
 
 COLOUR_WORDS = {
@@ -203,8 +215,10 @@ def layout_iou(painted: Image.Image, valid: np.ndarray, base: Image.Image) -> fl
 
 def feature_alignment(painted: Image.Image, base: Image.Image, masks_dir: str | Path) -> float | None:
     """SSIM between the repaint and the template inside the whole protected
-    feature islands (eyeballs, nose leather, mouth), at the atlas size.
-    Colour is free there too, so luminance is normalised per island."""
+    feature islands (eyeballs, nose leather, mouth), each seen with
+    FEATURE_MARGIN_PX of its surroundings, at the atlas size. Colour is free
+    there too, so luminance is normalised per island. None when no island
+    has the contrast to judge (FEATURE_MIN_STD)."""
     from skimage.metrics import structural_similarity
 
     from .eyes import feature_islands, WHOLE_SHARE
@@ -217,14 +231,18 @@ def feature_alignment(painted: Image.Image, base: Image.Image, masks_dir: str | 
     _, labels, count = feature_islands(masks_dir, size)
     a = np.asarray(painted.convert("L").resize(size, Image.LANCZOS), dtype=np.float32) / 255.0
     b = np.asarray(base.convert("L"), dtype=np.float32) / 255.0
+    margin = int(round(FEATURE_MARGIN_PX * size[0] / 2048))
     scores, weights = [], []
     for index in range(1, count + 1):
         island = labels == index
         if island.sum() < 500 or protect[island].mean() < WHOLE_SHARE:
             continue
         rows, cols = np.nonzero(island)
-        y0, y1, x0, x1 = rows.min(), rows.max() + 1, cols.min(), cols.max() + 1
+        y0, y1 = max(rows.min() - margin, 0), rows.max() + 1 + margin
+        x0, x1 = max(cols.min() - margin, 0), cols.max() + 1 + margin
         wa, wb = a[y0:y1, x0:x1], b[y0:y1, x0:x1]
+        if float(wb.std()) < FEATURE_MIN_STD:
+            continue
         wa = (wa - wa.mean()) / (wa.std() + 1e-3)
         wb = (wb - wb.mean()) / (wb.std() + 1e-3)
         rng = float(max(wa.max() - wa.min(), wb.max() - wb.min(), 1e-3))
