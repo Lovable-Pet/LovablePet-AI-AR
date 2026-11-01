@@ -115,6 +115,12 @@ FEATHER_PX = 9
 # (Off by default now: a coat's colour regions have clear edges. What blurs
 # them in a photograph is lighting, not the coat.)
 FEATHER_ALL_PX = 14
+# ... between texels this close on the surface per texel apart in the atlas
+# (a texel is ~0.8 mm on the templates), and fading out where the feather's
+# window drifts this far off the texel's own place (m): the window crossed a
+# chart edge onto another part of the dog
+FEATHER_ALL_SEAM_M = 0.003
+FEATHER_ALL_DRIFT_M = (0.003, 0.008)
 
 # STYLE - "hard boundary, fur-level blending, a touch of illustration"
 # ----------------------------------------------------------------------
@@ -1060,14 +1066,37 @@ def compose_body(
                 names.append(colour)
             index[mask > 0.5] = names.index(colour)
         reach = FEATHER_ALL_PX // 2
+        valid_here = index >= 0
+        if masks.valid is not None and masks.valid.shape == gray.shape:
+            valid_here &= masks.valid
+        position = (landmarks.position if landmarks is not None and landmarks.position is not None
+                    and landmarks.position.shape[:2] == gray.shape else None)
         boundary = np.zeros(gray.shape, dtype=bool)
         for shift in (1, reach):
-            boundary |= (index != np.roll(index, shift, axis=0)) & (index >= 0) & (np.roll(index, shift, axis=0) >= 0)
-            boundary |= (index != np.roll(index, shift, axis=1)) & (index >= 0) & (np.roll(index, shift, axis=1) >= 0)
+            for axis in (0, 1):
+                other = np.roll(index, shift, axis=axis)
+                change = (index != other) & valid_here & np.roll(valid_here, shift, axis=axis)
+                if position is not None:
+                    # ... between texels that are neighbours on the dog too
+                    # (FEATHER_ALL_SEAM_M per texel of shift): two charts packed
+                    # edge to edge in the atlas are not
+                    apart = np.linalg.norm(position - np.roll(position, shift, axis=axis), axis=-1)
+                    change &= apart < FEATHER_ALL_SEAM_M * shift
+                boundary |= change
         band = ndimage.binary_dilation(boundary, iterations=reach)
-        valid_here = index >= 0
         soft = _blur(band.astype(np.float32), FEATHER_ALL_PX / 3.0) * valid_here
-        composed = _blend(composed, _blur_inside(composed, FEATHER_ALL_PX / 2.0, valid_here), np.clip(soft * 1.5, 0, 1))
+        blurred = _blur_inside(composed, FEATHER_ALL_PX / 2.0, valid_here)
+        if position is not None:
+            # ... and only where the blur stayed on this part of the surface:
+            # its window crossed a chart edge, or a gutter, onto a place 15 cm
+            # away - a white bib chart packed against the black shoulder chart
+            # blurred into it as a white zigzag (the jindo puppy 2, user:
+            # "앞다리 바깥쪽 번개무늬"). The blurred position tells: it drifts
+            # off the texel's own where the window took in far surfaces.
+            drift = np.linalg.norm(_blur_inside(position, FEATHER_ALL_PX / 2.0, valid_here) - position, axis=-1)
+            low, high = FEATHER_ALL_DRIFT_M
+            soft *= np.clip((high - drift) / (high - low), 0.0, 1.0)
+        composed = _blend(composed, blurred, np.clip(soft * 1.5, 0, 1))
         report["feather_all_texels"] = int(band.sum())
         if debug:
             _save_debug(debug, "04_feather_all", np.clip(soft * 1.5, 0, 1))
