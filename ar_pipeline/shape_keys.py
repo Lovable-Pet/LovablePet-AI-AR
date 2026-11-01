@@ -33,13 +33,23 @@ auto-rig gave the ear bones 70 vertices out of the ~1500 in the ears
 Geometry is measured on the jindo (mesh space: y up, z forward, x to the
 dog's left); the constants below are in metres in that space.
 
+The ear constants below are the jindo's; another template's ears are
+measured on its own mesh (measure_ears, from its ear-base joint), which
+gives back the jindo's constants on the jindo. --only ears writes the ear
+targets alone: the tail, build and muzzle constants are the jindo's body and
+another template's would need measuring too (the jindo puppy 2's ears stand,
+and ear_drop / ear_fold give one model both kinds of puppy).
+
 Usage:
     python -m ar_pipeline.shape_keys output/skeleton_jindo_small.glb output/skeleton_jindo_small_shaped.glb
+    python -m ar_pipeline.shape_keys SRC.glb DST.glb --only ears
+    python -m ar_pipeline.shape_keys SRC.glb DST.glb --only ear_fold --template output/templates/jindo_puppy_small
 """
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -69,6 +79,8 @@ EAR_DROP_LENGTHEN = 1.3
 # turned whole, the ear's inner root (x 0.03) crossed the crown and stretched
 # a flat shelf over the top of the head
 EAR_DROP_GATHER = 0.35
+# ears picked by the template's masks take the fur fringe within this of them
+EAR_FRINGE_M = 0.012
 
 # --- tail: behind the rump at z -0.29 and above the hocks (y 0.44)
 TAIL_ROOT_Z = -0.285
@@ -110,9 +122,41 @@ def _rotate(pos: np.ndarray, weight: np.ndarray, pivot: np.ndarray, rotation: np
     return pos + weight[:, None] * (turned - pos)
 
 
-def ear_weight(pos: np.ndarray, side: float, from_y: float) -> np.ndarray:
+@dataclass
+class Ears:
+    root_y: float = EAR_ROOT_Y
+    fold_y: float = EAR_FOLD_Y
+    z: tuple[float, float] = EAR_Z
+    min_x: float = EAR_MIN_X
+    hinge_x: float = EAR_DROP_HINGE_X
+
+
+# measured: the root sits this far under the crown (the skull's top on the
+# midline at the ears), the fold this share of the way from the crown to the
+# ears' top, the forward band this much past the ears either way, the hinge
+# this much outside the ears' outer edge - the jindo's constants above
+EAR_ROOT_BELOW_CROWN = 0.006
+EAR_FOLD_SHARE = 0.44
+EAR_Z_PAD = 0.03
+EAR_HINGE_OUT = 0.003
+
+
+def measure_ears(pos: np.ndarray, base: np.ndarray) -> Ears:
+    """The ears of this mesh (y up, z forward), found round the left ear-base
+    joint `base`: what rises above the crown beside it."""
+    beside = (pos[:, 0] > 0.02) & (np.abs(pos[:, 2] - base[2]) < 0.07)
+    midline = (np.abs(pos[:, 0]) < 0.012) & (np.abs(pos[:, 2] - base[2]) < 0.05)
+    crown = float(pos[midline, 1].max())
+    ear = beside & (pos[:, 1] > crown)
+    top = float(pos[ear, 1].max())
+    return Ears(root_y=crown - EAR_ROOT_BELOW_CROWN, fold_y=crown + EAR_FOLD_SHARE * (top - crown),
+                z=(float(pos[ear, 2].min()) - EAR_Z_PAD, float(pos[ear, 2].max()) + EAR_Z_PAD),
+                min_x=float(pos[ear, 0].min()) - 0.001, hinge_x=float(pos[ear, 0].max()) + EAR_HINGE_OUT)
+
+
+def ear_weight(pos: np.ndarray, side: float, from_y: float, ears: Ears = Ears()) -> np.ndarray:
     x, y, z = pos[:, 0], pos[:, 1], pos[:, 2]
-    inside = (side * x > EAR_MIN_X) & (z > EAR_Z[0]) & (z < EAR_Z[1])
+    inside = (side * x > ears.min_x) & (z > ears.z[0]) & (z < ears.z[1])
     return np.where(inside, _smooth((y - from_y) / EAR_RAMP), 0.0)
 
 
@@ -141,31 +185,54 @@ def _tail_centre(pos: np.ndarray, weight: np.ndarray) -> np.ndarray:
     return centre[which]
 
 
-def targets(pos: np.ndarray) -> dict[str, np.ndarray]:
-    """name -> deformed positions (same order as pos)."""
-    out: dict[str, np.ndarray] = {}
-
-    # ears
+def ear_targets(pos: np.ndarray, ears: Ears = Ears(), mask: np.ndarray | None = None) -> dict[str, np.ndarray]:
+    """ear_fold and ear_drop. `mask` is each vertex's ear membership read
+    from the template's ear masks (ear_mask); without it the ears are the
+    geometric band above the root (the jindo)."""
     fold = pos.copy()
     drop = pos.copy()
     for side in (1.0, -1.0):
-        ear = pos[ear_weight(pos, side, EAR_ROOT_Y) > 0]
-        root = np.array([side * np.percentile(side * ear[:, 0], 50), EAR_ROOT_Y, np.median(ear[:, 2])])
-        upper = ear_weight(pos, side, EAR_FOLD_Y)
-        hinge = np.array([root[0], EAR_FOLD_Y, root[2]])
+        if mask is not None:
+            # the ear moves whole, faded in from its root by height only: the
+            # masks' soft edge moved neighbouring vertices of one flap by
+            # different amounts and shredded it
+            inside = (side * pos[:, 0] > 0) & (mask > 0.5)
+            # ... with the fur fringe round its edge, which the masks leave
+            # to the skull: left behind it stood up in spikes where the ear
+            # had been
+            from scipy.spatial import cKDTree
+            near, _ = cKDTree(pos[inside]).query(pos, distance_upper_bound=EAR_FRINGE_M)
+            root_y = float(np.percentile(pos[inside, 1], 3))
+            inside = (side * pos[:, 0] > 0) & np.isfinite(near) & (pos[:, 1] > root_y - EAR_RAMP)
+            ear = pos[inside]
+            fold_y = root_y + EAR_FOLD_SHARE * (float(ear[:, 1].max()) - root_y)
+            hinge_x = float((side * ear[:, 0]).max()) + EAR_HINGE_OUT
+            whole = np.where(inside, _smooth((pos[:, 1] - root_y + EAR_RAMP) / EAR_RAMP), 0.0)
+            upper = np.where(inside, _smooth((pos[:, 1] - fold_y) / EAR_RAMP), 0.0)
+        else:
+            ear = pos[ear_weight(pos, side, ears.root_y, ears) > 0]
+            root_y, fold_y, hinge_x = ears.root_y, ears.fold_y, ears.hinge_x
+            whole = ear_weight(pos, side, root_y, ears)
+            upper = ear_weight(pos, side, fold_y, ears)
+        root = np.array([side * np.percentile(side * ear[:, 0], 50), root_y, np.median(ear[:, 2])])
+        hinge = np.array([root[0], fold_y, root[2]])
         # +x rotation turns +y toward +z: up toward forward, then down
         fold = _rotate(fold, upper, hinge, _rot_x(EAR_FOLD_DEG))
-        whole = ear_weight(pos, side, EAR_ROOT_Y)
-        hinge = np.array([side * EAR_DROP_HINGE_X, EAR_ROOT_Y, root[2]])
+        hinge = np.array([side * hinge_x, root_y, root[2]])
         longer = pos.copy()
-        longer[:, 1] = EAR_ROOT_Y + (pos[:, 1] - EAR_ROOT_Y) * EAR_DROP_LENGTHEN
+        longer[:, 1] = root_y + (pos[:, 1] - root_y) * EAR_DROP_LENGTHEN
         longer[:, 0] = hinge[0] + (pos[:, 0] - hinge[0]) * EAR_DROP_GATHER
         # about +z, a positive angle turns +y toward -x: outward on the +x side
         # is a negative angle there
         outward = _rot_z(-side * EAR_DROP_DEG)
         turned = (longer - hinge) @ (_rot_x(EAR_DROP_FORWARD_DEG) @ outward).T + hinge
         drop = drop + whole[:, None] * (turned - pos)
-    out["ear_fold"], out["ear_drop"] = fold, drop
+    return {"ear_fold": fold, "ear_drop": drop}
+
+
+def targets(pos: np.ndarray, ears: Ears = Ears()) -> dict[str, np.ndarray]:
+    """name -> deformed positions (same order as pos)."""
+    out: dict[str, np.ndarray] = ear_targets(pos, ears)
 
     # tail
     tail = tail_weight(pos)
@@ -286,7 +353,43 @@ def _read(gltf: GLTF2, blob: bytes, index: int) -> np.ndarray:
     return np.frombuffer(blob, dtype=dtype, count=accessor.count * width, offset=offset).reshape(accessor.count, width)
 
 
-def add_targets(src: str | Path, dst: str | Path, append_only: bool = False) -> list[str]:
+def ear_mask(template: str | Path, uv: np.ndarray) -> np.ndarray | None:
+    """Each vertex's ear membership (0..1): the template's ear source masks
+    (ears_outer, ears_inner) at its UV. The puppy 2's ears sit on the
+    corners of its skull and reach 2 cm below the crown there, so no height
+    band picks them without taking the skull's corners too; the masks are
+    the auto-rig's own ear part, cut along its seams."""
+    from PIL import Image
+    paths = [Path(template) / "masks_source" / f"{name}.png" for name in ("ears_outer", "ears_inner")]
+    if not all(p.exists() for p in paths):
+        return None
+    masks = [np.asarray(Image.open(p).convert("L"), dtype=np.float32) / 255.0 for p in paths]
+    h, w = masks[0].shape
+    col = np.clip((uv[:, 0] * w).astype(int), 0, w - 1)
+    row = np.clip((uv[:, 1] * h).astype(int), 0, h - 1)
+    return np.maximum(masks[0][row, col], masks[1][row, col])
+
+
+def template_ears(src: str | Path, pos: np.ndarray) -> Ears:
+    """The template's ears measured round its left ear-base joint (Blender
+    space x, -z, y -> mesh space x, y, z); the jindo's constants without one."""
+    try:
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from api.mesh import TemplateMesh
+        joint = TemplateMesh.load(src, (2048, 2048)).joints.get("L_ear_base_jnt")
+    except Exception:  # noqa: BLE001 - a GLB the loader cannot read keeps the constants
+        joint = None
+    if joint is None:
+        return Ears()
+    ears = measure_ears(pos, np.array([joint[0], joint[2], -joint[1]]))
+    print(f"[shape] ears: root y {ears.root_y:.3f}, fold y {ears.fold_y:.3f}, z {ears.z[0]:.3f}..{ears.z[1]:.3f}, "
+          f"x > {ears.min_x:.3f}, hinge x {ears.hinge_x:.3f}")
+    return ears
+
+
+def add_targets(src: str | Path, dst: str | Path, append_only: bool = False, only: str | None = None,
+                template: str | Path | None = None) -> list[str]:
     gltf = GLTF2().load(str(src))
     blob = bytearray(gltf.binary_blob())
     if len(gltf.meshes) != 1 or len(gltf.meshes[0].primitives) != 1:
@@ -316,7 +419,17 @@ def add_targets(src: str | Path, dst: str | Path, append_only: bool = False) -> 
     names: list[str] = list(existing) if append_only else []
     if not append_only:
         primitive.targets = []
-    made = more_targets(pos, tri) if append_only else {**targets(pos), **more_targets(pos, tri)}
+    ears = template_ears(src, pos)
+    mask = None
+    if template is not None:
+        mask = ear_mask(template, _read(gltf, bytes(blob), primitive.attributes.TEXCOORD_0).astype(np.float64))
+        print(f"[shape] ears from the template's masks: {int((mask > 0.5).sum()) if mask is not None else 0} vertices")
+    if only in ("ears", "ear_fold"):
+        made = ear_targets(pos, ears, mask)
+        if only == "ear_fold":
+            made = {"ear_fold": made["ear_fold"]}
+    else:
+        made = more_targets(pos, tri) if append_only else {**targets(pos, ears), **more_targets(pos, tri)}
     for name, moved in made.items():
         if name in names:
             raise ValueError(f"{src} already has a target {name}")
@@ -344,8 +457,13 @@ def main() -> None:
     parser.add_argument("dst")
     parser.add_argument("--append", action="store_true",
                         help="add only the second set to a GLB that already has the first")
+    parser.add_argument("--only", choices=("ears", "ear_fold"), default=None,
+                        help="write these targets alone (ear_fold: a template whose ear_drop does not read; "
+                             "api/shape.STAND_INS shows a dropped ear as the fold)")
+    parser.add_argument("--template", default=None,
+                        help="the template folder: its ear masks pick the ear vertices (ear_mask)")
     args = parser.parse_args()
-    names = add_targets(args.src, args.dst, append_only=args.append)
+    names = add_targets(args.src, args.dst, append_only=args.append, only=args.only, template=args.template)
     print(f"[shape] wrote {args.dst} with {len(names)} targets: {names}")
 
 

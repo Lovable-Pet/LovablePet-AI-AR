@@ -1322,9 +1322,8 @@ async def run_lite(
     glb = replace_base_texture(template_glb, finished, final_dir / f"{resolved.pet_id}.glb")
     weights = (appearance.get("shape") or {}).get("weights") or {}
     if weights:
-        from .shape import set_shape, target_names
-        known = set(target_names(glb))
-        applied = {name: value for name, value in weights.items() if name in known}
+        from .shape import fit_to_template, set_shape, target_names
+        applied = fit_to_template(weights, set(target_names(glb)))
         if applied:
             set_shape(glb, applied)
         log["steps"]["shape_applied"] = applied
