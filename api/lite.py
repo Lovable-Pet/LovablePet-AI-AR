@@ -1286,10 +1286,12 @@ async def run_lite(
         # with brown hairs mixed in (texture._brindle_mottle). Read on a fawn
         # base it came out a leopard-spotted puppy (shelter puppy 8). Its base
         # goes through the grey test below with the plain coats: the grey-
-        # brown of its own fur, not black
+        # brown of its own fur, not black. Read on a black base too: the same
+        # puppy's next reading said black/tan, skipped this, and the refine
+        # lifted the black-and-tan mottle to a chestnut coat
         dark_share = (face_log.get("face_dark") or [None])[0]
         if (decision.overlay == "brindle" and face_log.get("crown") == "dark" and dark_share is not None
-                and dark_share >= DARK_BRINDLE_SHARE and color_family(decision.base_color) != "dark"):
+                and dark_share >= DARK_BRINDLE_SHARE and decision.base_color not in ("chocolate", "gray")):
             face_log["dark_brindle"] = f"base {decision.base_color} -> black (dark fur {dark_share})"
             decision.base_color, decision.second_color = "black", None
         region_colors = apply_features(decision.pattern, decision.base_color, decision.second_color, features,
