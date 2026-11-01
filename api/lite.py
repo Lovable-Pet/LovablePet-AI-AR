@@ -609,6 +609,13 @@ BLOT_LIGHT_L = 70.0
 BLOT_DARKER_L = 35.0
 BLOT_MIN_TEXELS = 150
 BLOT_EDGE_MARGIN_PX = 20
+# ... and on a mid-tone build (tan, fawn: L* over BLOT_MID_L) a blot at less
+# than BLOT_MID_SHARE of the build's lightness, away from the build's dark
+# parts: the model drew a black band round both wrists of a black-and-tan
+# puppy's tan legs (L* 16 on 45, shelter puppy 9), which the light-only test
+# let through.
+BLOT_MID_L = 35.0
+BLOT_MID_SHARE = 0.5
 
 
 def restore_in_region(build_lab: np.ndarray, painted_lab: np.ndarray, masks: MaskLibrary,
@@ -707,6 +714,9 @@ def restore_in_region(build_lab: np.ndarray, painted_lab: np.ndarray, masks: Mas
     dark_build = ndimage.binary_dilation(build_lab[..., 0] < BLOT_LIGHT_L - 20.0, iterations=BLOT_EDGE_MARGIN_PX)
     blot = (valid & ~dark_build & (build_lab[..., 0] > BLOT_LIGHT_L)
             & (out[..., 0] < build_lab[..., 0] - BLOT_DARKER_L))
+    near_dark = ndimage.binary_dilation(build_lab[..., 0] < BLOT_MID_L - 10.0, iterations=BLOT_EDGE_MARGIN_PX)
+    blot |= (valid & ~near_dark & (build_lab[..., 0] > BLOT_MID_L) & (build_lab[..., 0] <= BLOT_LIGHT_L)
+             & (out[..., 0] < build_lab[..., 0] * (1.0 - BLOT_MID_SHARE)))
     labels, count = ndimage.label(blot)
     blots = 0
     if count:
