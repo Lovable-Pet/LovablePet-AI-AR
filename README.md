@@ -136,6 +136,23 @@ AWS 준비 (한 번, 서울 리전 ap-northeast-2):
 
 ## 템플릿 자산 갱신
 
+부위 마스크를 다시 자를 때(생성 모델 템플릿)는 이 순서로 돌리고 앵커를 다시 렌더한다:
+
+```
+python ar_pipeline/refine_masks.py --template <slug>_small --glb output/skeleton_<slug>_small.glb \
+    --geometry output/templates/<slug>_small/geometry --label-smooth 14 --edge-clean 8
+python ar_pipeline/refine_face_masks.py --template <slug>_small --glb output/skeleton_<slug>_small.glb \
+    --geometry output/templates/<slug>_small/geometry
+python -m ar_pipeline.open_face_masks --slug <slug>
+python -m ar_pipeline.smooth_masks --slug <slug>
+python -m ar_pipeline.tidy_regions --slug <slug>
+python ar_pipeline/render_anchors.py --template <slug>_small
+```
+
+새 템플릿을 만든 뒤 한 번: UV가 다른 곳 섬에 놓인 삼각형을 제자리 표면으로(`python -m ar_pipeline.fix_uv_overlaps --slug <slug>`),
+눈·코 보호 영역만 다시(`python ar_pipeline/build_landmarks.py <glb> <템플릿 폴더> <geometry> --protect-only`).
+위 순서를 다시 돌리지 않은 템플릿에 눈 둘레 마스크(`_eye_ring.png`)만 만들려면 `python -m ar_pipeline.open_face_masks --slug <slug> --eye-ring-only`.
+
 ```
 tar -czf dist/tpl_<slug>.tar.gz output/skeleton_<slug>_small.glb output/templates/<slug>_small
 tar -czf dist/model_sheet.tar.gz output/model_sheet
