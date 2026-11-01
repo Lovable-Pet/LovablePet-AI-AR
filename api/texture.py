@@ -102,7 +102,20 @@ PLACEABLE_MARKINGS = frozenset({"socks", "blaze", "stripe", "mask"})
 # A blaze is the strip up the middle of the face: half its width in eye
 # distances. With geometry it is placed on the world midline (see
 # _blaze_strip); without, _restrict takes the middle columns of the mask.
-BLAZE_HALF_WIDTH_EYES = {"small": 0.13, "medium": 0.2, "large": 0.3}
+# (half widths in face sizes; a shelter puppy's blaze is a thin line - medium
+# 0.2 painted a broad white bar, user)
+BLAZE_HALF_WIDTH_EYES = {"small": 0.08, "medium": 0.12, "large": 0.25}
+# ... BLAZE_MUZZLE_WIDEN times as wide a face size under the eyes, narrowing
+# above them to nothing BLAZE_ABOVE_EYES face sizes up (a large blaze - a
+# white face's - runs on up the forehead)
+BLAZE_MUZZLE_WIDEN = 1.8
+BLAZE_ABOVE_EYES = {"small": 0.45, "medium": 0.55, "large": 1.1}
+# The face's size for the blaze: the eye radius (90th percentile of the eye
+# feature texels' distance from the eye centre, times EYE_RIM_TO_RADIUS) over
+# EYE_RADIUS - ar_pipeline/refine_face_masks.eye_radius, which gives the
+# jindo's own eye distance back on the jindo
+FACE_EYE_RIM_TO_RADIUS = 0.88
+FACE_EYE_RADIUS = 0.2
 
 # How far the proximity field reaches, in pixels of the 2048 map, when growing
 # an unplaceable marking out of a neighbouring region of the same colour.
@@ -427,18 +440,64 @@ def _restrict(mask: np.ndarray, marking_type: str, min_pixels: int = 0) -> np.nd
     return limited
 
 
+def _face_scale(landmarks: Any, template_dir: Path) -> float | None:
+    """The eye distance a jindo with this template's eyes would have
+    (FACE_EYE_*); None without the eye feature mask."""
+    path = template_dir / "masks" / "_features.png"
+    eyes = landmarks.anchor_points("eye")
+    if not path.exists() or len(eyes) != 2 or landmarks.valid is None:
+        return None
+    image = Image.open(path).convert("L")
+    if image.size != (landmarks.position.shape[1], landmarks.position.shape[0]):
+        return None
+    rim = landmarks.position[(np.asarray(image) > 127) & landmarks.valid]
+    radii = []
+    for name in eyes:
+        distance = np.linalg.norm(rim - landmarks.world(name), axis=1)
+        near = distance[distance < 0.4 * landmarks.eye_distance]
+        if near.size >= 100:
+            radii.append(float(np.percentile(near, 90)))
+    if len(radii) != 2:
+        return None
+    return FACE_EYE_RIM_TO_RADIUS * float(np.mean(radii)) / FACE_EYE_RADIUS
+
+
 def _blaze_strip(landmarks: Any, mask: np.ndarray, size: str, noise: np.ndarray) -> np.ndarray | None:
-    """The blaze as a band along the face's midline in WORLD space, from
-    the nose up between the eyes to the ear bases. The skull mask holds the
-    ears' islands too, so the mask's own column percentiles (_restrict) are
-    not the middle of the face; the geometry's x = 0 is."""
+    """The blaze as a band along the face's midline in WORLD space, from the
+    nose up between the eyes onto the forehead: widest on the muzzle,
+    narrowing to a point above the eyes. The skull mask holds the ears'
+    islands too, so the mask's own column percentiles (_restrict) are not
+    the middle of the face; the geometry's x = 0 is."""
     ears = landmarks.anchor_points("ear_base")
-    if not ears:
+    eyes = landmarks.anchor_points("eye")
+    if not ears or not eyes or landmarks.position is None:
         return None
     y_back = float(np.mean([landmarks.world(name)[1] for name in ears]))
-    half = BLAZE_HALF_WIDTH_EYES.get(size, BLAZE_HALF_WIDTH_EYES["medium"]) * landmarks.eye_distance
-    strip = landmarks.midline_strip(mask, half, y_max=y_back)
-    if strip is None or int((strip > 0.5).sum()) < 30:
+    z_eyes = float(np.mean([landmarks.world(name)[2] for name in eyes]))
+    # in the face's own size (face_scale: the eye distance a jindo with this
+    # template's eyes would have): the puppy 2's eyes sit 11 cm apart against
+    # the jindo's 6.4, and its blaze came out 4.5 cm wide
+    scale = float(getattr(landmarks, "face_scale", None) or landmarks.eye_distance)
+    half = BLAZE_HALF_WIDTH_EYES.get(size, BLAZE_HALF_WIDTH_EYES["medium"]) * scale
+    inside = (mask > 0.5) & (landmarks.position[..., 1] < y_back)
+    rows, cols = np.nonzero(inside)
+    if rows.size == 0:
+        return None
+    pos = landmarks.position[rows, cols]
+    # the width by height: BLAZE_MUZZLE_WIDEN times `half` a face size under
+    # the eyes, `half` at the eyes, narrowing to nothing BLAZE_ABOVE_EYES face
+    # sizes above them. Cut by how far back it ran, the band ran up the
+    # puppy's near-vertical forehead to the top of the head and read as a
+    # ruler-straight white line (user: "머리에 흰줄 자꾸 왜")
+    rise = (pos[:, 2] - z_eyes) / scale
+    above = BLAZE_ABOVE_EYES.get(size, BLAZE_ABOVE_EYES["medium"])
+    width = half * np.where(rise < 0.0, 1.0 + (BLAZE_MUZZLE_WIDEN - 1.0) * np.clip(-rise, 0.0, 1.0),
+                            np.clip(1.0 - rise / above, 0.0, 1.0))
+    lateral = np.abs(pos[:, 0])
+    weight = np.clip(1.0 - (lateral - 0.6 * width) / np.maximum(0.4 * width, 1e-6), 0.0, 1.0) * (width > 1e-6)
+    strip = np.zeros(mask.shape, dtype=np.float32)
+    strip[rows, cols] = weight
+    if int((strip > 0.5).sum()) < 30:
         return None
     # a natural outline: solid inside, the edge broken by the noise
     return np.clip((strip * (0.7 + 0.6 * noise) - 0.15) * 2.0, 0.0, 1.0) * (mask > 0.5)
@@ -1038,7 +1097,11 @@ def compose_body(
             blob = _select(mask, field, area)
             placed.append(f"patches:{region}")
         if blob is None and marking_type == "blaze" and landmarks is not None:
-            blob = _blaze_strip(landmarks, mask, size, noise)
+            # down the top of the muzzle as well: a blaze runs from the nose
+            # up between the eyes, and on the skull alone it was a white bar
+            # on the forehead above a dark bridge (shelter puppy 8)
+            bridge = masks.get("muzzle_bridge") if region == "skull" else None
+            blob = _blaze_strip(landmarks, np.maximum(mask, bridge) if bridge is not None else mask, size, noise)
             if blob is not None:
                 placed.append(f"blaze:{region}@midline")
         if blob is None and region in shaped_regions:
@@ -1368,6 +1431,8 @@ def compose_texture(
         if landmarks.position is None:
             print("[texture] landmarks.json found but no geometry; gradients and placed markings off")
             landmarks = None
+        else:
+            landmarks.face_scale = _face_scale(landmarks, template_dir)
     else:
         print("[texture] no landmarks.json; gradients and placed markings off")
 

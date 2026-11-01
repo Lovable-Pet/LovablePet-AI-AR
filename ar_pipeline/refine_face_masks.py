@@ -75,9 +75,33 @@ CHEEK_BEHIND_EAR = 0.02
 MUZZLE_TOP_HALF_WIDTH = 0.25
 MUZZLE_TOP_FACING_UP = 0.3
 # the eye's radius as a share of the eye distance. The socket feature island
-# is the whole eyelid rim, half again the eye's size, so it is not used.
+# is the whole eyelid rim, half again the eye's size, so it is not used
+# directly - only as the fallback below and to scale it.
 EYE_RADIUS = 0.2
+# The eye's radius measured on the template: the 90th-percentile distance of
+# the eye's feature texels (the eyelid rim) from its centre, times this. A
+# share of the eye distance fits the jindo, but the puppy's and the
+# chihuahua's eyes sit wide apart (11-12 cm against 6.4) without being any
+# bigger - the rim is 1.4-1.8 cm on all six templates - and 0.2 E made their
+# brow pips four to seven times the jindo's area. The factor keeps the jindo
+# where it was (0.2 E / rim).
+EYE_RIM_TO_RADIUS = 0.88
 FEATHER_PX = 2
+
+
+def eye_radius(template_dir: Path, position: np.ndarray, valid: np.ndarray,
+               eye_points: list[np.ndarray], eye_dist: float) -> float:
+    """The eye's radius from the eyelid-rim feature texels (EYE_RIM_TO_RADIUS);
+    EYE_RADIUS of the eye distance when an eye has too few of them."""
+    features = np.asarray(Image.open(template_dir / "masks" / "_features.png").convert("L")) > 127
+    rim = position[features & valid]
+    radii = []
+    for centre in eye_points:
+        distance = np.linalg.norm(rim - centre, axis=1)
+        near = distance[distance < 0.4 * eye_dist]
+        if near.size >= 100:
+            radii.append(float(np.percentile(near, 90)))
+    return EYE_RIM_TO_RADIUS * float(np.mean(radii)) if len(radii) == 2 else EYE_RADIUS * eye_dist
 
 
 def save_mask(path: Path, mask: np.ndarray) -> None:
@@ -123,7 +147,8 @@ def main() -> None:
     eye_points = [np.array(landmarks["points"][k]["world"], dtype=np.float32) for k in ("left_eye", "right_eye")]
     eye_dist = float(landmarks.get("eye_distance_world") or np.linalg.norm(eye_points[0] - eye_points[1]))
     nose = np.array(landmarks["points"]["nose"]["world"], dtype=np.float32)
-    eyes = [(centre, EYE_RADIUS * eye_dist) for centre in eye_points]
+    radius = eye_radius(template_dir, position, valid, eye_points, eye_dist)
+    eyes = [(centre, radius) for centre in eye_points]
     ear_y = float(np.mean([joints[name][1] for name in EAR_BASE_JOINTS]))
 
     x, y, z = position[..., 0], position[..., 1], position[..., 2]
