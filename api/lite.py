@@ -997,7 +997,15 @@ async def run_lite(
                     cheeks, brows, muzzle, ears, blaze, votes = await read_face_colours(
                         transport, crop_block(crop), samples=max(samples, FACE_SAMPLES))
                     face_log.update({"asked": True, "cheeks": cheeks, "brows": brows, "muzzle": muzzle, "ears": ears,
-                                     "blaze": blaze, "crown": votes.get("crown_answer"), "votes": votes})
+                                     "blaze": blaze, "crown": votes.get("crown_answer"),
+                                     "eye_ring": votes.get("eye_ring_answer"), "votes": votes})
+                    # cheeks the colour of tan brow spots are the tan points,
+                    # whatever the cheek question said: beside a black crown
+                    # it read a puppy's tan cheeks cream and painted a white
+                    # mask (shelter puppies 9, 10; face_colours CHEEK_BROW_ANSWERS)
+                    if votes.get("cheeks_vs_brows_answer") == "same" and brows == "tan" and cheeks in ("cream", "white"):
+                        face_log["cheeks_from_brows"] = f"cheeks {cheeks} -> tan (as deep as the brow spots)"
+                        cheeks = face_log["cheeks"] = "tan"
                     for name in (*CHEEK_FEATURES.get(cheeks, ()), *BROW_FEATURES.get(brows, ()),
                                  *MUZZLE_FEATURES.get(muzzle, ()), *EAR_FEATURES.get(ears, ())):
                         if name not in features:
@@ -1134,6 +1142,9 @@ async def run_lite(
             "features": features, "feature_votes": decision.feature_votes,
             "region_colors": region_colors, "markings": markings, "shape": shape,
             "cream_share": cream_share,
+            # light or dark round the eyes (face_colours.EYE_RING_ANSWERS);
+            # on dark texture.compose_body leaves out the cream spectacles
+            "eye_ring": face_log.get("eye_ring") if face_log.get("eye_ring") in ("light", "dark") else None,
             "inferred_regions": [e["region"] for e in region_colors
                                  if str(e.get("source", "")).startswith("pattern")],
         }

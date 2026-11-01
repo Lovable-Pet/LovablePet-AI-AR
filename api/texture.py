@@ -995,12 +995,26 @@ def compose_body(
         colours = {str(e.get("region")): str(e.get("color", "")) for e in entries}
         cheek, skull_colour = colours.get("cheeks", ""), colours.get("skull", base_color)
         # ... under a DARK head only: on a tan head (urajiro, sable) the cream
-        # stops below the eyes, and spectacles whitened e09's face
+        # stops below the eyes, and spectacles whitened e09's face. And not
+        # where the head close-up saw the eyes in the head colour
+        # (face_colours eye_ring): a black shiba is black round the eyes and
+        # cream below them, the same reading as e08 everywhere else.
         if (cheek in FUR_COLORS and color_family(cheek) == "light" and cheek != skull_colour
                 and color_family(skull_colour) == "dark"
-                and str(appearance.get("pattern", "")) != "piebald"):
+                and str(appearance.get("pattern", "")) != "piebald"
+                and appearance.get("eye_ring") != "dark"):
             composed = _blend(composed, paint_region(gray, cheek, spectacle, palette), np.clip(spectacle, 0, 1))
             gradients_drawn.append(f"spectacle:{cheek}")
+    # ... and for that dark-eyed dog the cheeks' top, which reaches eye level
+    # on the templates, round and just under each eye takes the head colour
+    # (open_face_masks EYE_RING_*): the cream starts below the eye
+    eye_ring = masks.extra("_eye_ring") if appearance.get("eye_ring") == "dark" else None
+    if eye_ring is not None:
+        colours = {str(e.get("region")): str(e.get("color", "")) for e in entries}
+        skull_colour = colours.get("skull", base_color)
+        if skull_colour in FUR_COLORS and colours.get("cheeks", skull_colour) != skull_colour:
+            composed = _blend(composed, paint_region(gray, skull_colour, eye_ring, palette), np.clip(eye_ring, 0, 1))
+            gradients_drawn.append(f"eye_ring:{skull_colour}")
     report["gradients"] = gradients_drawn
 
     # the masks do not tile the surface exactly, and a jittered edge opens
