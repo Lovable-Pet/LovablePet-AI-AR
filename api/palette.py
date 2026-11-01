@@ -390,7 +390,9 @@ def palette_for(appearance: dict, photo_paths: list[str | Path]) -> tuple[dict, 
 # turn a fawn coat chocolate. Neutral names (white, black, gray) keep the
 # table: a white bib in shadow is still white.
 MEASURED_STRENGTH = 0.7
-MEASURED_MAX_SHIFT_L = 18.0
+# (18 until 11-01: a yellow puppy's cells, in the shade of its own coat, read
+# L 52 against its photo's coat at 63 and the coat went muddy)
+MEASURED_MAX_SHIFT_L = 10.0
 MEASURED_MAX_SHIFT_AB = 10.0
 # cream is a light name: the cell pointed at for a cream chest or cheek on a
 # tan dog lands on the tan beside it or in the shadow under the chin (eval
@@ -430,6 +432,144 @@ CREAM_ON_WARM = 0.6
 WARM_BASES = ("tan", "red", "fawn", "chocolate")
 
 
+# "cream" cheeks under a dark crown run from beige to near white: measured in
+# the head close-ups, a black-and-tan puppy's L 55, e08's 67, a black shiba's
+# 83, while the cream ramp sits at L 88 - the puppy's beige cheeks came out a
+# white husky mask (user, 11-01). On such a dog the cream ramp takes the
+# colour of the light fur in the lower half of its own face crop (no call;
+# face_light_lab), FACE_CREAM_STRENGTH of the way: at most
+# FACE_CREAM_MAX_SHIFT_L darker and never lighter than the table, its a*/b*
+# at most FACE_CREAM_MAX_SHIFT_AB warmer - darkened alone, at cream's chroma,
+# the puppy's cheeks came out olive grey.
+FACE_CREAM_STRENGTH = 0.85
+FACE_CREAM_MAX_SHIFT_L = 30.0
+FACE_CREAM_MAX_SHIFT_AB = 8.0
+FACE_CREAM_MIN_PIXELS = 400
+# the face between the eyes and the mouth in the crop, as shares of its
+# height and width: down to 0.85 and out to the edges it took in the white
+# chest under a black puppy's chin, and a black face read white (shelter
+# puppy 11, user: "얼굴 검은색인 것 같고")
+FACE_LOWER = ((0.40, 0.72), (0.18, 0.82))
+
+
+def face_light(crop: Image.Image) -> tuple[float | None, list[float] | None]:
+    """(share, lab) of the light fur in the lower face of a head crop - L*
+    over 40, not plainly blue (a glove, a backdrop; a cool white coat is
+    kept) - among the dog's pixels there (the cut-out's flat grey fill left
+    out): its share, and its median CIE LAB (None with too few such
+    pixels)."""
+    from .fur import to_linear
+    from .projection import linear_to_lab
+
+    rgb = np.asarray(crop.convert("RGB"), dtype=np.float32)
+    h, w = rgb.shape[:2]
+    (y0, y1), (x0, x1) = FACE_LOWER
+    rgb = rgb[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)]
+    lab = linear_to_lab(to_linear(rgb))
+    fill = (np.abs(rgb - rgb.mean(axis=-1, keepdims=True)).max(axis=-1) < 1.0)
+    # cool pixels count only as a white coat: bright and near grey. A black
+    # coat's sheen under daylight is blue-grey at L* 45-60 (shelter puppy 10),
+    # a glove or backdrop plainly blue
+    cool = lab[..., 2] < -2.0
+    white = (lab[..., 0] > 65.0) & (np.hypot(lab[..., 1], lab[..., 2]) <= 8.0)
+    light = (lab[..., 0] > 40.0) & ~fill & (~cool | white)
+    dog = int((~fill).sum())
+    share = round(float(light.sum()) / dog, 3) if dog else None
+    if int(light.sum()) < FACE_CREAM_MIN_PIXELS:
+        return share, None
+    return share, [round(float(v), 1) for v in np.median(lab[light], axis=0)]
+
+
+# The light cheeks of a dark-headed dog checked against its own face crop
+# (face_light): the face call said "cream" for a black-and-tan puppy's tan
+# cheeks (photo L 56, a* 3, b* 17) and for one whose lower face is dark grey
+# with a tan streak, and both came out with a pale mask (user, 11-01: "흰색이
+# 애초에 아닌데 얼굴이"). Measured on nine dark-headed dogs (FACE_LOWER):
+# light fur under FACE_LIGHT_MIN_SHARE of the face is a dark face (0.015-0.17;
+# tan faces 0.20, cream and white 0.22-0.53 - a narrow margin, ten dogs), and
+# light fur nearer the tan ramp than cream or white is tan.
+FACE_LIGHT_MIN_SHARE = 0.18
+
+
+# The crown in the upper face of a head crop (shares of its height and
+# width), and the dark fur there: a smoky grey cap (shelter puppy 14,
+# median L* 27) against black heads (8-20). A crown with dark fur on at
+# least FACE_DARK_MIN_SHARE of the dog's pixels there and a median L* of
+# FACE_GRAY_MIN_L or more is grey, not black.
+FACE_UPPER = ((0.05, 0.40), (0.15, 0.85))
+FACE_DARK_MIN_SHARE = 0.3
+FACE_GRAY_MIN_L = 24.0
+# ... read only on a cut-out crop (this share of it the cut's flat grey
+# fill): an uncut crop's background shadows counted as dark fur, and a
+# black puppy photographed in front of white clothes measured L* 35 and
+# came out grey (shelter puppy 10)
+FACE_CUT_MIN_SHARE = 0.05
+
+
+def face_dark(crop: Image.Image) -> tuple[float | None, float | None, float]:
+    """(share, median L*, cut) of the dark fur (L* under 55) in the upper
+    face of a head crop, among the dog's pixels there; `cut` is the share of
+    the whole crop that is the cut-out's flat grey fill."""
+    from .fur import to_linear
+    from .projection import linear_to_lab
+
+    whole = np.asarray(crop.convert("RGB"), dtype=np.float32)
+    cut = round(float(((np.abs(whole - whole.mean(axis=-1, keepdims=True)).max(axis=-1) < 1.0)
+                       & (np.abs(whole.mean(axis=-1) - 128.0) < 3.0)).mean()), 3)
+    h, w = whole.shape[:2]
+    (y0, y1), (x0, x1) = FACE_UPPER
+    rgb = whole[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)]
+    lab = linear_to_lab(to_linear(rgb))
+    fill = (np.abs(rgb - rgb.mean(axis=-1, keepdims=True)).max(axis=-1) < 1.0)
+    dark = (lab[..., 0] < 55.0) & ~fill
+    dog = int((~fill).sum())
+    if not dog or not dark.any():
+        return None, None, cut
+    return round(float(dark.sum()) / dog, 3), round(float(np.median(lab[..., 0][dark])), 1), cut
+
+
+def cheeks_from_photo(cheeks: str, share: float | None, lab: list[float] | None) -> str:
+    """The cheek colour the face crop supports: "dark", "tan", or `cheeks`."""
+    from .fur import hex_to_linear
+    from .projection import linear_to_lab
+
+    if share is not None and share < FACE_LIGHT_MIN_SHARE:
+        return "dark"
+    if lab is None:
+        return cheeks
+    def distance(name: str) -> float:
+        mid = linear_to_lab(hex_to_linear(FUR_PALETTE[name][1])[None, None, :])[0, 0]
+        return float(np.linalg.norm(np.asarray(lab, dtype=np.float32) - mid))
+    return "tan" if distance("tan") < min(distance("cream"), distance("white")) else cheeks
+
+
+def cream_from_face(appearance: dict, palette: dict[str, tuple[str, str, str]]) -> dict[str, tuple[str, str, str]]:
+    """The palette with the cream ramp moved to the face's own light fur
+    (appearance["face_light_lab"], set for a dark-crowned dog with cream
+    cheeks); unchanged without it."""
+    from .fur import hex_to_linear, to_srgb
+    from .projection import lab_to_linear, linear_to_lab
+
+    target = appearance.get("face_light_lab")
+    if not target:
+        return palette
+    stops = palette.get("cream") or FUR_PALETTE["cream"]
+    labs = [linear_to_lab(hex_to_linear(stop)[None, None, :])[0, 0] for stop in stops]
+    delta = (np.asarray(target, dtype=np.float32) - labs[1]) * FACE_CREAM_STRENGTH
+    delta[0] = float(np.clip(delta[0], -FACE_CREAM_MAX_SHIFT_L, 0.0))
+    # warmer only: a cooler reading is the grey of a muzzle or a white glove,
+    # and cream turned grey read as dirt
+    delta[1:] = np.clip(delta[1:], 0.0, FACE_CREAM_MAX_SHIFT_AB)
+    if delta[0] == 0.0:
+        return palette
+    moved = []
+    for lab in labs:
+        lab = (lab + delta).astype(np.float32)
+        rgb = to_srgb(lab_to_linear(lab[None, None, :])[0, 0])
+        moved.append(_rgb_to_hex(tuple(int(round(float(c) * 255)) for c in rgb)))
+    return {**palette, "cream": tuple(moved)}
+
+
 def relative_cream(appearance: dict, palette: dict[str, tuple[str, str, str]]) -> dict[str, tuple[str, str, str]]:
     """The palette with a cream between the base and the table's cream, when
     the base is warm and some region is cream; unchanged otherwise."""
@@ -457,8 +597,13 @@ def relative_cream(appearance: dict, palette: dict[str, tuple[str, str, str]]) -
 
 # A warm ramp under a neutral border keeps at least this share of the table's
 # chroma, and its hue turns at most this many degrees from the table's.
-WARM_MIN_CHROMA_SHARE = 0.85
-WARM_MAX_HUE_TURN = 8.0
+# Neither, now (11-01): the measured cells of yellow shelter puppies read hue
+# 78-79 and chroma 20 where the photos' coats measure hue 67-69 and chroma
+# 20-30 (pixels of the whole coat), and the turn plus the greying painted
+# the golden puppies khaki beige; the table's hue and chroma are kept and the
+# lightness alone follows the measurement.
+WARM_MIN_CHROMA_SHARE = 1.0
+WARM_MAX_HUE_TURN = 0.0
 
 
 def _warm_chroma_shift(mid: np.ndarray, target: np.ndarray, strength: float, max_shift_ab: float) -> np.ndarray:

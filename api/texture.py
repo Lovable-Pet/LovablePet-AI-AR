@@ -12,7 +12,9 @@ composited here.
 
 THE PASSES, IN ORDER
 --------------------
-  1. base coat       the brightness map through the base colour's ramp
+  1. base coat       the base colour times the template's own shading
+                     (TEMPLATE_SHADING), or the brightness map through
+                     the colour's ramp
   2. regions         each region's colour, or its gradient (landmarks.py
                      distance fields), observed regions before inferred
   2b. shapes         where generated views were read (views_prior.py):
@@ -38,6 +40,12 @@ is mapped through a three-stop fur ramp instead, which can lighten as well as
 darken and gives the undercoat and the guard hairs different colours rather
 than one colour at two exposures. See api/fur.py.
 
+The generated templates changed that: their base colour holds all their
+shading (no normal or occlusion map ships with them), and a coat that
+dropped it read as paint next to the template. TEMPLATE_SHADING multiplies
+each region's mid stop by the template's brightness over its coat's median -
+1 at the median, so it lightens lit fur as well as darkening the hollows.
+
 WHY THE PATTERNS ARE SEEDED FROM petId
 --------------------------------------
 The noise shaping a partial region or a marking is drawn from a generator
@@ -49,6 +57,7 @@ animal to whoever adopted it.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -93,7 +102,20 @@ PLACEABLE_MARKINGS = frozenset({"socks", "blaze", "stripe", "mask"})
 # A blaze is the strip up the middle of the face: half its width in eye
 # distances. With geometry it is placed on the world midline (see
 # _blaze_strip); without, _restrict takes the middle columns of the mask.
-BLAZE_HALF_WIDTH_EYES = {"small": 0.13, "medium": 0.2, "large": 0.3}
+# (half widths in face sizes; a shelter puppy's blaze is a thin line - medium
+# 0.2 painted a broad white bar, user)
+BLAZE_HALF_WIDTH_EYES = {"small": 0.08, "medium": 0.12, "large": 0.25}
+# ... BLAZE_MUZZLE_WIDEN times as wide a face size under the eyes, narrowing
+# above them to nothing BLAZE_ABOVE_EYES face sizes up (a large blaze - a
+# white face's - runs on up the forehead)
+BLAZE_MUZZLE_WIDEN = 1.8
+BLAZE_ABOVE_EYES = {"small": 0.45, "medium": 0.55, "large": 1.1}
+# The face's size for the blaze: the eye radius (90th percentile of the eye
+# feature texels' distance from the eye centre, times EYE_RIM_TO_RADIUS) over
+# EYE_RADIUS - ar_pipeline/refine_face_masks.eye_radius, which gives the
+# jindo's own eye distance back on the jindo
+FACE_EYE_RIM_TO_RADIUS = 0.88
+FACE_EYE_RADIUS = 0.2
 
 # How far the proximity field reaches, in pixels of the 2048 map, when growing
 # an unplaceable marking out of a neighbouring region of the same colour.
@@ -107,6 +129,12 @@ FEATHER_PX = 9
 # (Off by default now: a coat's colour regions have clear edges. What blurs
 # them in a photograph is lighting, not the coat.)
 FEATHER_ALL_PX = 14
+# ... between texels this close on the surface per texel apart in the atlas
+# (a texel is ~0.8 mm on the templates), and fading out where the feather's
+# window drifts this far off the texel's own place (m): the window crossed a
+# chart edge onto another part of the dog
+FEATHER_ALL_SEAM_M = 0.003
+FEATHER_ALL_DRIFT_M = (0.003, 0.008)
 
 # STYLE - "hard boundary, fur-level blending, a touch of illustration"
 # ----------------------------------------------------------------------
@@ -128,6 +156,38 @@ HAIR_CONTRAST = 0.45
 # noise: even fur everywhere, the same on every region.
 SYNTHETIC_HAIR = True
 SYNTHETIC_HAIR_SPREAD = 0.10
+# ... with the template's own fine detail laid over it: strands, curls and
+# the dark crevices between them, at the scale of TEMPLATE_DETAIL_SIGMA
+# texels and smaller. Without it every generated template came out as flat
+# paint with even streaks (the maltese's and the poodle's curls, the
+# retriever's feathering gone; user: "덮어씌워진 느낌"). The template's own
+# colour edges (the chihuahua's white blaze and bib) are the "painted edges"
+# the synthetic hair was brought in to avoid; where the template's
+# brightness changes this much across TEMPLATE_EDGE_SIGMA texels, the detail
+# fades out (TEMPLATE_EDGE_RANGE, relative change per texel).
+TEMPLATE_DETAIL = 1.0
+TEMPLATE_DETAIL_SIGMA = 8.0
+TEMPLATE_DETAIL_CLIP = (0.55, 1.5)
+TEMPLATE_EDGE_SIGMA = 8.0
+TEMPLATE_EDGE_RANGE = (0.010, 0.025)
+# Template style (on by default; it replaces the two above): each region's
+# colour times the template's own brightness relative to its coat - the
+# template recoloured. The generated templates carry their shading in the
+# base colour (no normal or occlusion map ships), so the ear hollows, the
+# shadow round the eyes, the curls and the whisker dots are all in it; the
+# synthetic hair threw them away and next to the template it read as paint
+# (user, 10-31: "기본 템플릿 텍스처는 어색함이 없는데 입히니 이상해진다").
+# The ratio is to the coat's median, so the median texel gets the region's
+# mid stop and lit fur goes above it - not the darkening-only multiply.
+TEMPLATE_SHADING = True
+# The template's own colour pattern is not shading: the chihuahua's white
+# blaze, bib and feet on fawn would come out as light patches. When the
+# template's fur saturation (1 - min/max, which shading leaves alone) spreads
+# wider than this between its 5th and 95th percentiles, the brightness is
+# taken relative to the median of texels of the same saturation instead.
+# A white template (spread 0.10 on the jindo) is one colour.
+TEMPLATE_PATTERN_SPREAD = 0.2
+TEMPLATE_SHADING_CLIP = (0.15, 1.3)
 # A light belly on a dark coat reaches about this far up the flank, as a
 # share of the height from the belly line to the top of the back. The
 # underside mask runs higher than that (it holds the lower flank), so a
@@ -161,8 +221,14 @@ CHEST_FACING = 0.45
 # legs_lower faces inward (> 0.2) or forward (> CHEST_FACING).
 LEG_INNER_FACING = 0.2
 
-# The protect mask's edge is softened over this many texels.
-PROTECT_FEATHER_PX = 3
+# The protect mask's edge is softened inward over this many texels.
+PROTECT_FEATHER_PX = 1.2
+# The template's eyelid line is dark grey: black against its white coat,
+# lighter than a black one - a grey ring round each eye (user). In a band
+# this wide along the inside of the protected eye (within EYE_LID_REACH_M of
+# an eye landmark) the darker of the template and the coat is kept.
+EYE_LID_BAND_PX = 3
+EYE_LID_REACH_M = 0.03
 
 # Where a gradient's fade begins and ends, as percentiles of the distance
 # field inside the region; so a gradient always spans the region.
@@ -190,9 +256,13 @@ GRADIENT_REACH = {"eye": (5.0, 35.0)}
 GRADIENT_CAP = {"ear_base": 0.6}
 
 # Overlays.
-BRINDLE_PERIOD_PX = 36
+# (36 drew broad tiger bands; a brindle's streaks are fine)
+BRINDLE_PERIOD_PX = 20
 BRINDLE_COVER = 0.4
 MERLE_COVER = 0.35
+# ... and fur painted lighter than this (CIE L*, faded over the range) is left
+# without them: the white markings (cream mid L 88, white 93; fawn 68, tan 56)
+OVERLAY_SKIP_L = (76.0, 82.0)
 
 LUMA = (0.2126, 0.7152, 0.0722)
 
@@ -215,6 +285,52 @@ def seed_for(pet_id: str) -> int:
 # --------------------------------------------------------------------------
 # the brightness map
 # --------------------------------------------------------------------------
+
+def template_detail(image: Image.Image, valid: np.ndarray) -> np.ndarray:
+    """The template's fine brightness detail as a ratio around 1: its luma
+    over its own blur at TEMPLATE_DETAIL_SIGMA (inside the islands), faded
+    to 1 across the template's own colour edges."""
+    luma = to_linear(np.asarray(image, dtype=np.float32)) @ np.asarray(LUMA, dtype=np.float32)
+    ratio = luma / np.maximum(_blur_inside(luma, TEMPLATE_DETAIL_SIGMA, valid), 1e-4)
+    ratio = np.clip(ratio, *TEMPLATE_DETAIL_CLIP)
+    broad = _blur_inside(luma, TEMPLATE_EDGE_SIGMA, valid)
+    gy, gx = np.gradient(broad)
+    edge = np.hypot(gx, gy) / np.maximum(broad, 1e-3)
+    low, high = TEMPLATE_EDGE_RANGE
+    keep = np.clip((high - edge) / (high - low), 0.0, 1.0)
+    return np.where(valid, 1.0 + (ratio - 1.0) * keep, 1.0).astype(np.float32)
+
+
+def template_shading(image: Image.Image, valid: np.ndarray, protect: np.ndarray | None) -> np.ndarray:
+    """The template's brightness over its coat's (TEMPLATE_SHADING): 1 at
+    the coat's median, below in its hollows, above on lit fur; 1 outside
+    the islands."""
+    linear = to_linear(np.asarray(image, dtype=np.float32))
+    luma = linear @ np.asarray(LUMA, dtype=np.float32)
+    fur = valid & (protect < 0.1 if protect is not None else True)
+    if not fur.any():
+        return np.ones(luma.shape, dtype=np.float32)
+    saturation = _blur_inside(1.0 - linear.min(-1) / np.maximum(linear.max(-1), 1e-4), 2.0, fur)
+    low, high = np.percentile(saturation[fur], [5, 95])
+    if high - low > TEMPLATE_PATTERN_SPREAD:
+        # the coat's brightness per saturation: 50 bins, each the median of
+        # its texels, the sparse ones interpolated
+        edges = np.linspace(0.0, 1.0, 51)
+        index = np.clip(np.digitize(saturation, edges) - 1, 0, 49)
+        level = np.full(50, np.nan)
+        for b in range(50):
+            members = fur & (index == b)
+            if members.sum() > 400:
+                level[b] = np.median(luma[members])
+        known = ~np.isnan(level)
+        centres = (edges[:-1] + edges[1:]) / 2
+        level = ndimage.gaussian_filter1d(np.interp(centres, centres[known], level[known]), 1.5)
+        coat = level[index]
+    else:
+        coat = np.full(luma.shape, float(np.median(luma[fur])), dtype=np.float32)
+    shading = np.clip(luma / np.maximum(coat, 1e-4), *TEMPLATE_SHADING_CLIP)
+    return np.where(valid, shading, 1.0).astype(np.float32)
+
 
 def brightness_map(image: Image.Image) -> np.ndarray:
     """Strip the template's own coat from its texture, keeping only the fur.
@@ -328,18 +444,64 @@ def _restrict(mask: np.ndarray, marking_type: str, min_pixels: int = 0) -> np.nd
     return limited
 
 
+def _face_scale(landmarks: Any, template_dir: Path) -> float | None:
+    """The eye distance a jindo with this template's eyes would have
+    (FACE_EYE_*); None without the eye feature mask."""
+    path = template_dir / "masks" / "_features.png"
+    eyes = landmarks.anchor_points("eye")
+    if not path.exists() or len(eyes) != 2 or landmarks.valid is None:
+        return None
+    image = Image.open(path).convert("L")
+    if image.size != (landmarks.position.shape[1], landmarks.position.shape[0]):
+        return None
+    rim = landmarks.position[(np.asarray(image) > 127) & landmarks.valid]
+    radii = []
+    for name in eyes:
+        distance = np.linalg.norm(rim - landmarks.world(name), axis=1)
+        near = distance[distance < 0.4 * landmarks.eye_distance]
+        if near.size >= 100:
+            radii.append(float(np.percentile(near, 90)))
+    if len(radii) != 2:
+        return None
+    return FACE_EYE_RIM_TO_RADIUS * float(np.mean(radii)) / FACE_EYE_RADIUS
+
+
 def _blaze_strip(landmarks: Any, mask: np.ndarray, size: str, noise: np.ndarray) -> np.ndarray | None:
-    """The blaze as a band along the face's midline in WORLD space, from
-    the nose up between the eyes to the ear bases. The skull mask holds the
-    ears' islands too, so the mask's own column percentiles (_restrict) are
-    not the middle of the face; the geometry's x = 0 is."""
+    """The blaze as a band along the face's midline in WORLD space, from the
+    nose up between the eyes onto the forehead: widest on the muzzle,
+    narrowing to a point above the eyes. The skull mask holds the ears'
+    islands too, so the mask's own column percentiles (_restrict) are not
+    the middle of the face; the geometry's x = 0 is."""
     ears = landmarks.anchor_points("ear_base")
-    if not ears:
+    eyes = landmarks.anchor_points("eye")
+    if not ears or not eyes or landmarks.position is None:
         return None
     y_back = float(np.mean([landmarks.world(name)[1] for name in ears]))
-    half = BLAZE_HALF_WIDTH_EYES.get(size, BLAZE_HALF_WIDTH_EYES["medium"]) * landmarks.eye_distance
-    strip = landmarks.midline_strip(mask, half, y_max=y_back)
-    if strip is None or int((strip > 0.5).sum()) < 30:
+    z_eyes = float(np.mean([landmarks.world(name)[2] for name in eyes]))
+    # in the face's own size (face_scale: the eye distance a jindo with this
+    # template's eyes would have): the puppy 2's eyes sit 11 cm apart against
+    # the jindo's 6.4, and its blaze came out 4.5 cm wide
+    scale = float(getattr(landmarks, "face_scale", None) or landmarks.eye_distance)
+    half = BLAZE_HALF_WIDTH_EYES.get(size, BLAZE_HALF_WIDTH_EYES["medium"]) * scale
+    inside = (mask > 0.5) & (landmarks.position[..., 1] < y_back)
+    rows, cols = np.nonzero(inside)
+    if rows.size == 0:
+        return None
+    pos = landmarks.position[rows, cols]
+    # the width by height: BLAZE_MUZZLE_WIDEN times `half` a face size under
+    # the eyes, `half` at the eyes, narrowing to nothing BLAZE_ABOVE_EYES face
+    # sizes above them. Cut by how far back it ran, the band ran up the
+    # puppy's near-vertical forehead to the top of the head and read as a
+    # ruler-straight white line (user: "머리에 흰줄 자꾸 왜")
+    rise = (pos[:, 2] - z_eyes) / scale
+    above = BLAZE_ABOVE_EYES.get(size, BLAZE_ABOVE_EYES["medium"])
+    width = half * np.where(rise < 0.0, 1.0 + (BLAZE_MUZZLE_WIDEN - 1.0) * np.clip(-rise, 0.0, 1.0),
+                            np.clip(1.0 - rise / above, 0.0, 1.0))
+    lateral = np.abs(pos[:, 0])
+    weight = np.clip(1.0 - (lateral - 0.6 * width) / np.maximum(0.4 * width, 1e-6), 0.0, 1.0) * (width > 1e-6)
+    strip = np.zeros(mask.shape, dtype=np.float32)
+    strip[rows, cols] = weight
+    if int((strip > 0.5).sum()) < 30:
         return None
     # a natural outline: solid inside, the edge broken by the noise
     return np.clip((strip * (0.7 + 0.6 * noise) - 0.15) * 2.0, 0.0, 1.0) * (mask > 0.5)
@@ -372,6 +534,9 @@ def paint_region(
         dark, mid, light = (hex_to_linear(stop) for stop in palette[key])
     else:
         dark, mid, light = ramp_for(key)
+    if TEMPLATE_SHADING:
+        # gray is template_shading(): the mid stop at the coat's median
+        return (mid * gray[..., None]).astype(np.float32)
     painted = gradient_map(gray, dark, mid, light, region)
     # a touch of illustration: the ramp's spread compressed toward its mid stop
     return (mid + (painted - mid) * HAIR_CONTRAST).astype(np.float32)
@@ -389,23 +554,18 @@ def _blend(composed: np.ndarray, painted: np.ndarray, mask: np.ndarray) -> np.nd
 # tan-point shiba's photo shows a black rim about a fifth of the ear's width
 # on each side, and painting the whole front tan made the ears read as
 # orange leaves. So the inner ear is pulled in from its boundary with the
-# other regions by this many texels and the band goes to skull (the head
-# colour, which already carries the ear's back). Measured to the nearest
-# texel of another REGION, not to the island edge, so a UV seam through the
-# cup does not put a dark line down its middle. On the shiba template (two
-# ~13.8k-texel cups, ~54 px half-width) 14 px keeps 60% of the cup.
-EAR_RIM_PX = 14
-# The rim's inner edge is softened over this share of the rim's width (at
-# least 1 px). A 1 px step left the kept cup as a hard-edged, jagged
-# island of pale colour inside the dark ear; on the jindo (rim ~8.6 px)
-# this is a 4 px feather, on the shiba ~7 px.
-EAR_RIM_RAMP_SHARE = 0.5
-EAR_RIM_RAMP_PX = 1
-# ... on a cup of this many texels. Another template's cup is a different
-# size on its atlas (the jindo's is 4.9k texels, half the width), and the
-# same 14 px ate most of it, leaving a blob in the middle of the ear; the
-# rim scales with the cup's width (the square root of its texel count).
-EAR_RIM_REF_TEXELS = 13800
+# other regions and the band goes to skull (the head colour, which already
+# carries the ear's back). Measured to the nearest texel of another REGION on
+# the cup's own UV island, not to the island edge, so a UV seam through the
+# cup does not put a dark line down its middle. The band is this share of the
+# cup's depth (the 95th percentile of that distance over the cup, so it
+# scales with the cup on every template's atlas).
+EAR_RIM_SHARE = 0.2
+# ... and the inner colour fades in over a further share of the depth. The
+# earlier rim (0.34 of the depth, faded over 0.17) left the inner colour as a
+# hard-edged patch in the middle of the cup on every template (user: "귀쪽
+# 털영역도 잘 안되있다").
+EAR_RIM_RAMP_SHARE = 0.25
 
 
 class MaskLibrary:
@@ -417,8 +577,8 @@ class MaskLibrary:
     put. The same field jitters every mask, so two neighbouring regions'
     edges move together and leave no gap.
 
-    ears_inner comes back pulled in by EAR_RIM_PX and skull gains the band
-    that was taken (see EAR_RIM_PX); every consumer of the masks - the
+    ears_inner comes back pulled in by its rim and skull gains the band
+    that was taken (see EAR_RIM_SHARE); every consumer of the masks - the
     build, the refinement's per-region restore, the projection - sees the
     same shapes."""
 
@@ -432,6 +592,11 @@ class MaskLibrary:
         self.jitter = jitter
         self.valid: np.ndarray | None = None
         self.ear_rim_texels = 0
+        # ar_pipeline/tidy_regions.py already cut the chest mask to the part
+        # that faces forward (the _chest_front test, without the jitter)
+        settings = self.dir.parent / "template.json"
+        self.chest_trimmed = bool(settings.exists()
+                                  and json.loads(settings.read_text(encoding="utf-8")).get("regions_tidied"))
 
     def _raw_mask(self, region: str) -> np.ndarray | None:
         """The mask as stage 1 baked it, resized, before the rim rule and
@@ -447,13 +612,24 @@ class MaskLibrary:
                 self._raw[region] = np.asarray(image, dtype=np.float32) / 255.0
         return self._raw[region]
 
+    def _islands(self) -> np.ndarray | None:
+        """The atlas's UV islands, labelled; from the geometry's valid map
+        (set by the caller, or beside the masks), None without one."""
+        valid = self.valid
+        path = self.dir.parent / "geometry" / "valid.npy"
+        if valid is None and path.exists():
+            valid = np.load(path) > 0.5
+        if valid is None or valid.shape != (self.size[1], self.size[0]):
+            return None
+        return ndimage.label(valid)[0]
+
     def _ear_rim(self) -> np.ndarray | None:
-        """The band of ears_inner within EAR_RIM_PX of another region, as a
+        """The band of ears_inner near another region (EAR_RIM_SHARE), as a
         soft 0..1 weight; None when there is no inner-ear mask."""
         if "ear_rim" in self._cache:
             return self._cache["ear_rim"]
         inner = self._raw_mask("ears_inner")
-        if inner is None or EAR_RIM_PX <= 0:
+        if inner is None or EAR_RIM_SHARE <= 0:
             self._cache["ear_rim"] = None
             return None
         # a texel is "another region's" where that region's mask outweighs
@@ -467,12 +643,26 @@ class MaskLibrary:
             mask = self._raw_mask(name)
             if mask is not None:
                 other |= (mask > 0.5) & (mask > inner)
-        distance = ndimage.distance_transform_edt(~other)
-        labels, count = ndimage.label(inner > 0.5)
-        cup = int(np.bincount(labels.ravel())[1:].max()) if count else EAR_RIM_REF_TEXELS
-        rim_px = EAR_RIM_PX * float(np.sqrt(cup / EAR_RIM_REF_TEXELS))
-        ramp_px = max(EAR_RIM_RAMP_PX, rim_px * EAR_RIM_RAMP_SHARE)
-        inside = np.clip((distance - rim_px) / max(ramp_px, 1e-6), 0.0, 1.0).astype(np.float32)
+        distance = ndimage.distance_transform_edt(~other).astype(np.float32)
+        islands = self._islands()
+        if islands is not None:
+            # ... on the cup's own island: the nearest other-region texel in
+            # the atlas was often across a gutter, on another island, and bit
+            # circles out of the cup - a scalloped pale blob in the ear
+            # (user: "귀쪽 털영역"). A splinter island with no other region
+            # on it (a fringe piece at the ear's edge) keeps the atlas distance.
+            for index in np.unique(islands[(inner > 0.5) & (islands > 0)]):
+                rows, cols = np.nonzero(islands == index)
+                box = (slice(rows.min(), rows.max() + 1), slice(cols.min(), cols.max() + 1))
+                sources = other[box] & (islands[box] == index)
+                if not sources.any():
+                    continue
+                own = islands[box] == index
+                distance[box][own] = ndimage.distance_transform_edt(~sources)[own]
+        depths = distance[(inner > 0.5) & np.isfinite(distance)]
+        depth = float(np.percentile(depths, 95)) if depths.size else 0.0
+        rim_px, ramp_px = EAR_RIM_SHARE * depth, max(EAR_RIM_RAMP_SHARE * depth, 1.0)
+        inside = np.clip((distance - rim_px) / ramp_px, 0.0, 1.0).astype(np.float32)
         rim = inner * (1.0 - inside)
         self.ear_rim_texels = int((rim > 0.5).sum())
         self._cache["ear_rim"] = rim
@@ -764,8 +954,11 @@ def compose_body(
             field = _proximity(neighbour) if neighbour is not None else noise
             applied = _select(mask, field, keep)
 
+        # ... and on a tidied template the mask is that already: the test
+        # again, with its jitter, only scattered base-coat specks where the
+        # fur's normals hover at the threshold (the retriever's bib)
         if (region == "chest" and landmarks is not None and landmarks.normal is not None
-                and color_name != base_color):
+                and color_name != base_color and not masks.chest_trimmed):
             applied = applied * _chest_front(landmarks, masks.jitter)
             if debug:
                 _save_debug(debug, f"02_{order:02d}_chest_front", applied)
@@ -806,12 +999,26 @@ def compose_body(
         colours = {str(e.get("region")): str(e.get("color", "")) for e in entries}
         cheek, skull_colour = colours.get("cheeks", ""), colours.get("skull", base_color)
         # ... under a DARK head only: on a tan head (urajiro, sable) the cream
-        # stops below the eyes, and spectacles whitened e09's face
+        # stops below the eyes, and spectacles whitened e09's face. And not
+        # where the head close-up saw the eyes in the head colour
+        # (face_colours eye_ring): a black shiba is black round the eyes and
+        # cream below them, the same reading as e08 everywhere else.
         if (cheek in FUR_COLORS and color_family(cheek) == "light" and cheek != skull_colour
                 and color_family(skull_colour) == "dark"
-                and str(appearance.get("pattern", "")) != "piebald"):
+                and str(appearance.get("pattern", "")) != "piebald"
+                and appearance.get("eye_ring") != "dark"):
             composed = _blend(composed, paint_region(gray, cheek, spectacle, palette), np.clip(spectacle, 0, 1))
             gradients_drawn.append(f"spectacle:{cheek}")
+    # ... and for that dark-eyed dog the cheeks' top, which reaches eye level
+    # on the templates, round and just under each eye takes the head colour
+    # (open_face_masks EYE_RING_*): the cream starts below the eye
+    eye_ring = masks.extra("_eye_ring") if appearance.get("eye_ring") == "dark" else None
+    if eye_ring is not None:
+        colours = {str(e.get("region")): str(e.get("color", "")) for e in entries}
+        skull_colour = colours.get("skull", base_color)
+        if skull_colour in FUR_COLORS and colours.get("cheeks", skull_colour) != skull_colour:
+            composed = _blend(composed, paint_region(gray, skull_colour, eye_ring, palette), np.clip(eye_ring, 0, 1))
+            gradients_drawn.append(f"eye_ring:{skull_colour}")
     report["gradients"] = gradients_drawn
 
     # the masks do not tile the surface exactly, and a jittered edge opens
@@ -908,7 +1115,11 @@ def compose_body(
             blob = _select(mask, field, area)
             placed.append(f"patches:{region}")
         if blob is None and marking_type == "blaze" and landmarks is not None:
-            blob = _blaze_strip(landmarks, mask, size, noise)
+            # down the top of the muzzle as well: a blaze runs from the nose
+            # up between the eyes, and on the skull alone it was a white bar
+            # on the forehead above a dark bridge (shelter puppy 8)
+            bridge = masks.get("muzzle_bridge") if region == "skull" else None
+            blob = _blaze_strip(landmarks, np.maximum(mask, bridge) if bridge is not None else mask, size, noise)
             if blob is not None:
                 placed.append(f"blaze:{region}@midline")
         if blob is None and region in shaped_regions:
@@ -945,14 +1156,37 @@ def compose_body(
                 names.append(colour)
             index[mask > 0.5] = names.index(colour)
         reach = FEATHER_ALL_PX // 2
+        valid_here = index >= 0
+        if masks.valid is not None and masks.valid.shape == gray.shape:
+            valid_here &= masks.valid
+        position = (landmarks.position if landmarks is not None and landmarks.position is not None
+                    and landmarks.position.shape[:2] == gray.shape else None)
         boundary = np.zeros(gray.shape, dtype=bool)
         for shift in (1, reach):
-            boundary |= (index != np.roll(index, shift, axis=0)) & (index >= 0) & (np.roll(index, shift, axis=0) >= 0)
-            boundary |= (index != np.roll(index, shift, axis=1)) & (index >= 0) & (np.roll(index, shift, axis=1) >= 0)
+            for axis in (0, 1):
+                other = np.roll(index, shift, axis=axis)
+                change = (index != other) & valid_here & np.roll(valid_here, shift, axis=axis)
+                if position is not None:
+                    # ... between texels that are neighbours on the dog too
+                    # (FEATHER_ALL_SEAM_M per texel of shift): two charts packed
+                    # edge to edge in the atlas are not
+                    apart = np.linalg.norm(position - np.roll(position, shift, axis=axis), axis=-1)
+                    change &= apart < FEATHER_ALL_SEAM_M * shift
+                boundary |= change
         band = ndimage.binary_dilation(boundary, iterations=reach)
-        valid_here = index >= 0
         soft = _blur(band.astype(np.float32), FEATHER_ALL_PX / 3.0) * valid_here
-        composed = _blend(composed, _blur_inside(composed, FEATHER_ALL_PX / 2.0, valid_here), np.clip(soft * 1.5, 0, 1))
+        blurred = _blur_inside(composed, FEATHER_ALL_PX / 2.0, valid_here)
+        if position is not None:
+            # ... and only where the blur stayed on this part of the surface:
+            # its window crossed a chart edge, or a gutter, onto a place 15 cm
+            # away - a white bib chart packed against the black shoulder chart
+            # blurred into it as a white zigzag (the jindo puppy 2, user:
+            # "앞다리 바깥쪽 번개무늬"). The blurred position tells: it drifts
+            # off the texel's own where the window took in far surfaces.
+            drift = np.linalg.norm(_blur_inside(position, FEATHER_ALL_PX / 2.0, valid_here) - position, axis=-1)
+            low, high = FEATHER_ALL_DRIFT_M
+            soft *= np.clip((high - drift) / (high - low), 0.0, 1.0)
+        composed = _blend(composed, blurred, np.clip(soft * 1.5, 0, 1))
         report["feather_all_texels"] = int(band.sum())
         if debug:
             _save_debug(debug, "04_feather_all", np.clip(soft * 1.5, 0, 1))
@@ -1112,6 +1346,13 @@ def apply_overlay(composed: np.ndarray, gray: np.ndarray, appearance: dict[str, 
     second = appearance.get("second_color") or ("black" if overlay == "brindle" else "chocolate")
     if second not in FUR_COLORS:
         second = "black"
+    base = str(appearance.get("base_color") or "").lower()
+    if overlay == "brindle" and color_family(base) == "dark" and color_family(second) == "dark":
+        # a dark brindle is black over brown: black stripes on a black base
+        # drew nothing, and the brindle puppy came out plain black (shelter
+        # puppy 8); its brown shows as the stripes instead - dark brown, tan
+        # stripes made a tiger
+        second = "chocolate"
     shape = gray.shape
     if overlay == "brindle" and direction is not None:
         # stripes run across the hair: smear noise along the perpendicular
@@ -1124,6 +1365,13 @@ def apply_overlay(composed: np.ndarray, gray: np.ndarray, appearance: dict[str, 
         cover = MERLE_COVER
     threshold = float(np.quantile(field[valid], 1.0 - cover))
     weight = np.clip((field - threshold) / 0.06 + 0.5, 0.0, 1.0) * valid
+    # a brindle's or a merle's white markings carry no stripes: drawn over
+    # everything, the stripes showed only on the white chest and legs of a
+    # dark brindle and made zebra legs (shelter puppy, user). By the painted
+    # lightness, so a white blaze placed as a marking is spared too.
+    lightness = 116.0 * np.cbrt(np.clip(composed @ np.asarray(LUMA, dtype=np.float32), 0.0, 1.0)) - 16.0
+    low, high = OVERLAY_SKIP_L
+    weight = weight * np.clip((high - lightness) / (high - low), 0.0, 1.0)
     return _blend(composed, paint_region(gray, second, None, palette), weight), overlay
 
 
@@ -1178,14 +1426,22 @@ def compose_texture(
     else:
         jitter = (noise_field(gray.shape, seed + 5) - 0.5) * 4.0
 
-    if SYNTHETIC_HAIR:
+    if TEMPLATE_SHADING:
+        pass  # template_shading(), below, once the islands are loaded
+    elif SYNTHETIC_HAIR:
         # even, drawn fur: hair streaks of one amplitude everywhere, no
         # painted edges, no shading blotches
         hair0 = (anisotropic_noise(gray.shape, direction0, seed + 9, streak=8, grain=1.2)
                  if direction0 is not None else jitter)
-        gray = normalize_brightness(
-            np.clip(1.0 + SYNTHETIC_HAIR_SPREAD * np.clip(hair0, -2.5, 2.5) / 2.5, 0.0, 2.0)
-        ).astype(np.float32)
+        hair = np.clip(1.0 + SYNTHETIC_HAIR_SPREAD * np.clip(hair0, -2.5, 2.5) / 2.5, 0.0, 2.0)
+        if TEMPLATE_DETAIL > 0:
+            # ... and the template's own strands and curls on top (TEMPLATE_DETAIL)
+            valid_path = (Path(geometry_dir) if geometry_dir is not None else template_dir / "geometry") / "valid.npy"
+            island = (np.load(valid_path) > 0.5 if valid_path.exists()
+                      else np.ones(gray.shape, dtype=bool))
+            if island.shape == gray.shape:
+                hair = hair * template_detail(base_image, island) ** TEMPLATE_DETAIL
+        gray = normalize_brightness(np.clip(hair, 0.0, 2.0)).astype(np.float32)
     else:
         gray = (float(gray.mean()) + (gray - float(gray.mean())) * HAIR_CONTRAST).astype(np.float32)
     masks = MaskLibrary(masks_dir, base_image.size, jitter=np.clip(jitter, -2.5, 2.5).astype(np.float32))
@@ -1193,6 +1449,10 @@ def compose_texture(
         geometry_dir = Path("output/geometry")
     if geometry_dir is not None and (Path(geometry_dir) / "valid.npy").exists():
         masks.valid = np.load(Path(geometry_dir) / "valid.npy") > 0.5
+    if TEMPLATE_SHADING:
+        island = (masks.valid if masks.valid is not None and masks.valid.shape == gray.shape
+                  else np.ones(gray.shape, dtype=bool))
+        gray = template_shading(base_image, island, masks.extra("protect"))
 
     landmarks = None
     if geometry_dir is None and Path("output/geometry/geometry.json").exists():
@@ -1203,6 +1463,8 @@ def compose_texture(
         if landmarks.position is None:
             print("[texture] landmarks.json found but no geometry; gradients and placed markings off")
             landmarks = None
+        else:
+            landmarks.face_scale = _face_scale(landmarks, template_dir)
     else:
         print("[texture] no landmarks.json; gradients and placed markings off")
 
@@ -1276,8 +1538,16 @@ def compose_texture(
     # 8
     template = to_linear(np.asarray(base_image, dtype=np.float32))
     if protect is not None:
-        weight = _blur(protect, PROTECT_FEATHER_PX / 2.0)
-        weight = np.maximum(weight, protect)
+        # the mask's own soft fringe cut to its middle, and feathered inward:
+        # at half weight several texels out, and with the blur's outer half,
+        # the template's fur came back round every protected edge - a light
+        # ring round a black dog's nose (the chihuahua, user) and the grey eye
+        # shadow round its eyes
+        core = np.clip((protect - 0.35) / 0.3, 0.0, 1.0)
+        core = core * core * (3.0 - 2.0 * core)
+        if landmarks is not None:
+            core = _clear_lid_band(core, composed, template, landmarks)
+        weight = np.minimum(_blur(core, PROTECT_FEATHER_PX / 2.0), core)
         composed = _blend(composed, template, np.clip(weight, 0, 1))
         report["protect_texels"] = int((protect > 0.5).sum())
     else:
@@ -1336,6 +1606,21 @@ def feature_core(features: np.ndarray, base_image: Image.Image) -> np.ndarray:
     image = image.filter(ImageFilter.GaussianBlur(radius=1.0))
     grown = np.asarray(image, dtype=np.float32) / 255.0
     return np.minimum(grown, features)
+
+
+def _clear_lid_band(core: np.ndarray, composed: np.ndarray, template: np.ndarray, landmarks) -> np.ndarray:
+    """The protect weight with the band along the inside of each eye
+    (EYE_LID_BAND_PX) cleared where the coat is darker than the template."""
+    if landmarks.position is None or landmarks.position.shape[:2] != core.shape or EYE_LID_BAND_PX <= 0:
+        return core
+    inside = core > 0.5
+    band = inside & ~ndimage.binary_erosion(inside, iterations=EYE_LID_BAND_PX)
+    near = np.zeros_like(inside)
+    for name in landmarks.anchor_points("eye"):
+        near |= np.linalg.norm(landmarks.position - landmarks.world(name), axis=-1) < EYE_LID_REACH_M
+    luma = np.asarray(LUMA, dtype=np.float32)
+    darker = (composed @ luma) < (template @ luma)
+    return np.where(band & near & darker, 0.0, core).astype(np.float32)
 
 
 def keep_features(final: np.ndarray, base_image: Image.Image, masks: MaskLibrary) -> np.ndarray:

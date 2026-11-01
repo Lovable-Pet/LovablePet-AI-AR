@@ -22,11 +22,15 @@ carries to another template:
     marking);
   - the four face masks are then smoothed on the surface (FACE_SIGMA_M) so
     their edges, the brows' included, are soft, and every mask is
-    renormalised.
+    renormalised;
+  - the cheek texels round and just under each eye are written as
+    _eye_ring.png, painted the skull's colour by the texture build for a dog
+    the head close-up saw dark round the eyes (EYE_RING_BELOW).
 
 Usage:
-    python -m ar_pipeline.open_face_masks --slug jindo --size small
+    python -m ar_pipeline.open_face_masks --slug jindo --size small [--eye-ring-only]
 Back up output/templates/<slug>_<size>/masks first; this rewrites it.
+--eye-ring-only writes _eye_ring.png from the masks as they are and nothing else.
 """
 
 from __future__ import annotations
@@ -54,12 +58,48 @@ MUZZLE_HALF_E = 0.22            # the dark strip down the nose: +-1.4 cm on the 
 ABOVE_EYES_E = 0.08
 FACE_REGIONS = ("skull", "cheeks", "muzzle_bridge", "eyebrows")
 FACE_SIGMA_M = 0.005
+# A dog dark round the eyes (face_colours eye_ring "dark": a black shiba) has
+# the head colour above, beside and just under each eye; its light cheeks
+# start below the eye. The templates' cheeks reach eye level (59% of the
+# jindo's texels up to 0.15 E above the eye centre are cheek), so the face
+# within EYE_RING_REACH eye radii of an eye (across the face) and above
+# EYE_RING_BELOW eye radii under its centre goes to _eye_ring.png, faded over
+# EYE_RING_SOFT eye radii - all but the brow spots and the muzzle strip,
+# which keep their own colours. Not the cheek mask times that: the cheeks
+# are soft (0.8 at eye level), and the ring painted at 0.8 left the cream
+# showing through grey.
+EYE_RING_REACH = 3.0
+EYE_RING_BELOW = 1.3
+EYE_RING_SOFT = 0.4
+
+
+def eye_ring(position: np.ndarray, valid: np.ndarray, masks: dict[str, np.ndarray], eyes: list[np.ndarray],
+             radius: float) -> np.ndarray:
+    """The face round and just under the eyes but the brows and the muzzle
+    strip (EYE_RING_*), soft, the padding filled from the nearest island
+    texel."""
+    from scipy import ndimage
+    ring = np.zeros(valid.shape, dtype=np.float32)
+    soft = EYE_RING_SOFT * radius
+    for eye in eyes:
+        across = np.linalg.norm(position[..., :2] - eye[:2], axis=-1)
+        near = np.clip((EYE_RING_REACH * radius - across) / soft + 0.5, 0.0, 1.0)
+        high = np.clip((position[..., 2] - (eye[2] - EYE_RING_BELOW * radius)) / soft + 0.5, 0.0, 1.0)
+        ring = np.maximum(ring, (near * high).astype(np.float32))
+    own = np.clip(1.0 - masks["eyebrows"] - masks["muzzle_bridge"], 0.0, 1.0)
+    ring = np.where(valid, ring * own, 0.0)
+    reach = (EYE_RING_REACH + 2.0) * radius
+    head = valid & (np.min([np.linalg.norm(position - eye, axis=-1) for eye in eyes], axis=0) < reach)
+    ring = np.where(head, smooth_channels(ring[..., None], position, head, FACE_SIGMA_M, stride=2)[..., 0], ring)
+    nearest = ndimage.distance_transform_edt(~valid, return_distances=False, return_indices=True)
+    return np.clip(ring, 0.0, 1.0)[nearest[0], nearest[1]]
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--slug", required=True)
     parser.add_argument("--size", default="small")
+    parser.add_argument("--eye-ring-only", action="store_true", help="write _eye_ring.png only")
     args = parser.parse_args()
     template = ROOT / "output" / "templates" / f"{args.slug}_{args.size}"
     masks_dir = template / "masks"
@@ -69,9 +109,20 @@ def main() -> None:
     left, right = np.array(points["left_eye"]["world"]), np.array(points["right_eye"]["world"])
     eye = (left + right) / 2.0
     e = float(np.linalg.norm(left - right))
+    # the muzzle's width goes with the size of the face, not with how far
+    # apart the eyes sit: the eye distance the measured eye would have on
+    # the jindo (refine_face_masks.eye_radius)
+    from ar_pipeline.refine_face_masks import EYE_RADIUS, eye_radius
+    face_e = eye_radius(template, position, valid, [left, right], e) / EYE_RADIUS
 
     names = sorted(p.stem for p in masks_dir.glob("*.png") if not p.stem.startswith("_"))
     masks = {n: np.asarray(Image.open(masks_dir / f"{n}.png").convert("L"), dtype=np.float32) / 255.0 for n in names}
+    radius = face_e * EYE_RADIUS
+    if args.eye_ring_only:
+        ring = eye_ring(position, valid, masks, [left, right], radius)
+        Image.fromarray((ring * 255 + 0.5).astype(np.uint8), mode="L").save(masks_dir / "_eye_ring.png")
+        print(f"[open_face_masks] eye radius {radius * 100:.2f} cm; eye ring texels {int((ring > 0.5).sum())}")
+        return
     x, y, z = position[..., 0], position[..., 1], position[..., 2]
     ax = np.abs(x)
     # blender space: -y is forward (the nose), z up
@@ -87,7 +138,7 @@ def main() -> None:
 
     bridge = masks["muzzle_bridge"]
     above = z > eye[2] + ABOVE_EYES_E * e
-    wide = valid & (ax > MUZZLE_HALF_E * e)
+    wide = valid & (ax > MUZZLE_HALF_E * face_e)
     to_cheek = bridge * (wide & ~above)
     to_skull = bridge * (valid & above)
     moved_bridge = (int((to_cheek > 0.5).sum()), int((to_skull > 0.5).sum()))
@@ -115,6 +166,8 @@ def main() -> None:
         Image.fromarray(np.clip(masks[n] * 255 + 0.5, 0, 255).astype(np.uint8), mode="L").save(masks_dir / f"{n}.png")
     spectacle = np.clip(spectacle, 0.0, 1.0)[nearest[0], nearest[1]]
     Image.fromarray((spectacle * 255 + 0.5).astype(np.uint8), mode="L").save(masks_dir / "_spectacle.png")
+    ring = eye_ring(position, valid, masks, [left, right], radius)
+    Image.fromarray((ring * 255 + 0.5).astype(np.uint8), mode="L").save(masks_dir / "_eye_ring.png")
     print(f"[open_face_masks] E {e * 100:.1f} cm; spectacle texels to cheeks {moved_spectacle}; "
           f"muzzle_bridge to cheeks {moved_bridge[0]}, to skull {moved_bridge[1]}")
 

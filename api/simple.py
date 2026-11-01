@@ -203,6 +203,11 @@ LEG_TOP_REACH = (82.0, 100.0)
 LEG_TOP_CAP = 0.75
 
 
+# a dark muzzle's reach onto the cheeks: percentiles of the cheeks' distance
+# from the nose (texture gradient_reach)
+MASK_CHEEK_REACH = (5.0, 60.0)
+
+
 def default_gradients(appearance: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     """The appearance with default gradients on the regions that blend, and
     the list of what was added. Entries that already carry a gradient (an
@@ -284,6 +289,18 @@ def default_gradients(appearance: dict[str, Any]) -> tuple[dict[str, Any], list[
     if (muzzle.get("color") and muzzle["color"] != skull and skull in FUR_COLORS
             and color_family(muzzle["color"]) != color_family(skull)):
         fade("muzzle_bridge", muzzle["color"], skull, "nose")
+    # ... and on the sides of the muzzle too: a masked fawn puppy's whole
+    # muzzle is dark, and the dark bridge alone drew a black bar down the
+    # middle of a fawn face (shelter puppy 6). Not on a dark head (a
+    # black-and-tan's muzzle sides are its tan cheeks).
+    cheek_colour = str(cheeks.get("color", ""))
+    if (color_family(str(muzzle.get("color", ""))) == "dark" and color_family(skull) != "dark"
+            and cheek_colour in FUR_COLORS and color_family(cheek_colour) != "dark"):
+        fade("cheeks", muzzle["color"], cheek_colour, "nose")
+        if "cheeks" in entries and entries["cheeks"].get("gradient_anchor") == "nose":
+            # the muzzle's sides only: over the cheeks' whole span it was a
+            # black box across a fawn face
+            entries["cheeks"]["gradient_reach"] = list(MASK_CHEEK_REACH)
     ears = entries.get("ears_inner", {})
     if color_family(ears.get("color", "")) == "point":
         fade("ears_inner", ears["color"], "cream", "ear_base")

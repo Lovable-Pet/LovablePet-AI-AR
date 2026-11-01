@@ -62,6 +62,7 @@ from .assets import BLENDER, BuiltAsset, template_paths
 from .fur import to_linear, to_srgb
 from .glb import animation_names, extract_base_texture, replace_base_texture
 from .metadata import process_metadata
+from .palette import FACE_CUT_MIN_SHARE, FACE_DARK_MIN_SHARE, FACE_GRAY_MIN_L
 from .behavior import resolve_behavior
 from .pipeline import PipelineResult, _json, default_transport, load_dotenv
 from .regions import REGIONS
@@ -268,6 +269,19 @@ def _lowpass_on_islands(x: np.ndarray, valid: np.ndarray, sigma: float) -> np.nd
 # beside a black shard) and rimmed in grey
 TINY_ISLAND_TEXELS = 6000
 
+# A thin strip of one UV chart packed inside another: fewer than
+# SLIVER_SAME_SHARE of the island texels on a ring SLIVER_RADIUS_PX round it
+# lie on the same part of the dog (baked positions within SLIVER_NEAR_M).
+# Every step that works in the atlas reads the other chart into it - the
+# masks' edge jitter, the refine model, the seam pass's vertex samples. The
+# jindo puppy 2's shoulder seam is a 2-6 texel strip wedged into the white
+# bib, and it drew a grey zigzag down the black shoulder (shelter puppy 11,
+# user: "앞다리 바깥에 번개무늬"). Such texels take the colour of the surface
+# round them (_fill_from_surface) before the finish and again after it.
+SLIVER_RADIUS_PX = 3
+SLIVER_NEAR_M = 0.01
+SLIVER_SAME_SHARE = 0.5
+
 
 # an island whose mean L moved further than this from the build (or whose
 # a/b moved further than ISLAND_DRIFT_AB) was recoloured, not refined
@@ -419,6 +433,25 @@ def _fill_from_surface(image: np.ndarray, fill: np.ndarray, valid: np.ndarray,
     out = image.copy()
     out[fr, fc] = (np.einsum("nk,nkc->nc", weight, values[nearest]) / weight.sum(axis=1)[:, None]).astype(image.dtype)
     return out
+
+
+def _atlas_slivers(valid: np.ndarray, position: np.ndarray | None) -> np.ndarray:
+    """The island texels on a thin strip packed inside another chart
+    (SLIVER_*); none without a position map."""
+    if position is None or position.shape[:2] != valid.shape:
+        return np.zeros(valid.shape, dtype=bool)
+    same = np.zeros(valid.shape, dtype=np.float32)
+    total = np.zeros(valid.shape, dtype=np.float32)
+    r = SLIVER_RADIUS_PX
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            if max(abs(dy), abs(dx)) != r:
+                continue
+            there = np.roll(valid, (dy, dx), (0, 1))
+            apart = np.linalg.norm(position - np.roll(position, (dy, dx), (0, 1)), axis=-1)
+            same += there & (apart < SLIVER_NEAR_M)
+            total += there
+    return valid & (total > 0) & (same < SLIVER_SAME_SHARE * total)
 
 
 def _tiny_islands(valid: np.ndarray, max_texels: int) -> np.ndarray:
@@ -813,6 +846,85 @@ async def refine_coat(
 # the run
 # --------------------------------------------------------------------------
 
+def crown_on_skull(region_colors: list[dict[str, Any]], crown: str | None, base: str | None,
+                   second: str | None) -> str | None:
+    """The skull painted the crown's colour when the head close-up saw a
+    coloured crown and the layout left the skull light: a white-and-tan irish
+    puppy with a brown head came out all white (shelter puppy 13, user) - the
+    layout puts the base on the skull, and the face call's crown answer was
+    used only to demote a piebald. Returns the colour written, or None."""
+    from .patterns import color_family
+
+    words = {"tan": ("tan", "red", "fawn", "chocolate"), "dark": ("black", "chocolate"), "gray": ("gray",)}
+    if crown not in words:
+        return None
+    skull = next((e for e in region_colors if e.get("region") == "skull"), None)
+    if skull is None or color_family(str(skull.get("color", ""))) != "light":
+        return None
+    colour = next((c for c in (second, base) if c in words[crown]), words[crown][0])
+    skull.update({"color": colour, "coverage": "full", "source": f"face:crown {crown}",
+                  "note": f"the crown seen {crown} on the head close-up"})
+    return colour
+
+
+def cheeks_to_head(region_colors: list[dict[str, Any]]) -> str | None:
+    """The cheeks painted the skull's colour (the face crop saw a dark face
+    under a dark crown, palette.cheeks_from_photo). On a piebald the base is
+    the white body, and "the base colour" painted a black-headed puppy's
+    face white."""
+    skull = next((e for e in region_colors if e.get("region") == "skull"), None)
+    cheeks = next((e for e in region_colors if e.get("region") == "cheeks"), None)
+    if skull is None or cheeks is None:
+        return None
+    cheeks.update({"color": skull.get("color"), "source": "face:crop dark",
+                   "note": "a dark face in the head close-up"})
+    for key in ("gradient_to", "gradient_anchor"):
+        cheeks.pop(key, None)
+    return str(skull.get("color"))
+
+
+# dark fur on this share of the crown in the face crop (palette.face_dark)
+# makes a brindle a dark one
+DARK_BRINDLE_SHARE = 0.6
+
+
+# A skull painted the crown's warm colour (crown_on_skull) that the photo
+# measures darker than this (CIE L*) is chocolate: a dark brown head read
+# "tan" came out orange (shelter puppy 13, measured L 26).
+CHOCOLATE_CROWN_MAX_L = 35.0
+
+
+def chocolate_crown(region_colors: list[dict[str, Any]], measured: dict[str, Any]) -> str | None:
+    skull = next((e for e in region_colors if e.get("region") == "skull"), None)
+    reading = (measured or {}).get("skull")
+    if (skull is None or not str(skull.get("source", "")).startswith("face:crown")
+            or str(skull.get("color")) not in ("tan", "red", "fawn") or not isinstance(reading, dict)
+            or not reading.get("lab") or float(reading["lab"][0]) >= CHOCOLATE_CROWN_MAX_L):
+        return None
+    warm = skull["color"]
+    skull["color"] = "chocolate"
+    skull["note"] = f"{skull.get('note', '')}; measured L {reading['lab'][0]:.0f}".lstrip("; ")
+    # ... and the cheeks read the same warm colour (cheeks_vs_brows): an
+    # orange face under a brown crown otherwise
+    for entry in region_colors:
+        if entry.get("region") == "cheeks" and entry.get("color") == warm:
+            entry["color"] = "chocolate"
+    return "chocolate"
+
+
+def gray_for_black(region_colors: list[dict[str, Any]], markings: list[dict[str, Any]]) -> int:
+    """Every black region and marking painted gray: the head close-up saw a
+    grey crown, and the layout call has no word between black and white for
+    a smoky coat (shelter puppy 14). Returns how many entries changed."""
+    changed = 0
+    for entry in [*region_colors, *markings]:
+        if str(entry.get("color", "")).lower() == "black":
+            entry["color"] = "gray"
+            entry["note"] = f"{entry.get('note', '')}; gray crown on the close-up".lstrip("; ")
+            changed += 1
+    return changed
+
+
 def upright_photo(path: Path, out_dir: Path) -> Path:
     """The photo with its EXIF rotation applied. Phone photos store the
     pixels sideways plus an orientation tag; rembg honours the tag and PIL's
@@ -997,16 +1109,60 @@ async def run_lite(
                     cheeks, brows, muzzle, ears, blaze, votes = await read_face_colours(
                         transport, crop_block(crop), samples=max(samples, FACE_SAMPLES))
                     face_log.update({"asked": True, "cheeks": cheeks, "brows": brows, "muzzle": muzzle, "ears": ears,
-                                     "blaze": blaze, "crown": votes.get("crown_answer"), "votes": votes})
+                                     "blaze": blaze, "crown": votes.get("crown_answer"),
+                                     "eye_ring": votes.get("eye_ring_answer"), "votes": votes})
+                    # cheeks the colour of tan brow spots are the tan points,
+                    # whatever the cheek question said: beside a black crown
+                    # it read a puppy's tan cheeks cream and painted a white
+                    # mask (shelter puppies 9, 10; face_colours CHEEK_BROW_ANSWERS)
+                    if votes.get("cheeks_vs_brows_answer") == "same" and brows == "tan" and cheeks in ("cream", "white"):
+                        face_log["cheeks_from_brows"] = f"cheeks {cheeks} -> tan (as deep as the brow spots)"
+                        cheeks = face_log["cheeks"] = "tan"
+                    # light cheeks under a dark crown, checked against this
+                    # face's own crop (palette.cheeks_from_photo): a dark face,
+                    # tan cheeks, or cream taking the light fur's colour
+                    # (palette.cream_from_face)
+                    if votes.get("crown_answer") == "dark":
+                        from .palette import face_dark
+                        face_log["face_dark"] = list(face_dark(crop.image))
+                    # ... on a cut-out crop only, as the grey test: in an uncut
+                    # crop the "light fur" was the white clothes and gloves round
+                    # a black-and-tan puppy (shelter puppy 10: L* 69, a* b* 0)
+                    crop_cut = (face_log.get("face_dark") or [None, None, 0.0])[2]
+                    light_cheeks = votes.get("crown_answer") == "dark" and cheeks in ("cream", "white")
+                    if light_cheeks and crop_cut < FACE_CUT_MIN_SHARE:
+                        face_log["face_light"] = {"skipped": f"uncut crop (cut {crop_cut})"}
+                    elif light_cheeks:
+                        from .palette import cheeks_from_photo, face_light
+                        share, light_lab = face_light(crop.image)
+                        verdict = cheeks_from_photo(cheeks, share, light_lab)
+                        face_log["face_light"] = {"share": share, "lab": light_lab, "cheeks": verdict}
+                        if verdict != cheeks:
+                            face_log["cheeks_from_photo"] = f"cheeks {cheeks} -> {verdict}"
+                            cheeks = face_log["cheeks"] = verdict
+                            if verdict == "tan":
+                                features.append("tan_cheeks")
+                        elif cheeks == "cream":
+                            face_log["face_light_lab"] = light_lab
                     for name in (*CHEEK_FEATURES.get(cheeks, ()), *BROW_FEATURES.get(brows, ()),
                                  *MUZZLE_FEATURES.get(muzzle, ()), *EAR_FEATURES.get(ears, ())):
                         if name not in features:
                             features.append(name)
                     # a blaze up the forehead is not a region: the skull is one
                     # piece. It is a placed marking - a band on the face's
-                    # midline from the muzzle to the ear bases (texture._blaze_strip)
-                    if blaze in ("white", "cream"):
-                        markings.append({"type": "blaze", "region": "skull", "color": blaze, "size": "medium",
+                    # midline from the nose up the forehead (texture._blaze_strip).
+                    # Only with the muzzle top read the same colour: a blaze IS
+                    # the light muzzle top running on up between the eyes, and
+                    # the samples said "white blaze" for a puppy's paler bridge
+                    # under a dark or cream muzzle answer (shelter puppies 6-8,
+                    # no blaze in the photo; user: "머리에 흰줄 자꾸 왜")
+                    if blaze in ("white", "cream") and muzzle != blaze:
+                        face_log["blaze_dropped"] = f"blaze {blaze} but muzzle {muzzle}"
+                    elif blaze in ("white", "cream"):
+                        # wide on a white face (cheeks and muzzle light): a
+                        # piebald puppy's white face between dark eye patches
+                        markings.append({"type": "blaze", "region": "skull", "color": blaze,
+                                         "size": "large" if cheeks in ("white", "cream") else "medium",
                                          "anchor": "none",
                                          "note": f"a {blaze} blaze up the forehead between the eyes"})
             except Exception as exc:  # noqa: BLE001 - the face then keeps the layout's colours
@@ -1063,6 +1219,14 @@ async def run_lite(
             # a split none keeps the layout's full sable: e09's dark back at
             # part strength was paler than the photo (eval v4)
             sable_by_back = DARK_BACK_SABLE
+        if decision.pattern == "saddle" and tipping == "none":
+            # a saddle is a black back over a lighter flank; the back question
+            # saw the back the flank's colour (a majority): a fawn puppy with
+            # a dark muzzle came out with a black saddle (shelter puppy 6,
+            # user). The dark muzzle is its own feature and stays.
+            body_log["saddle_dropped"] = f"back_tipping none {tipping_votes}"
+            decision.pattern = "solid"
+            decision.second_color = None
         if plain_back and "dark_back" in features:
             # the layout call's dark back, which every sample of the back
             # question denied (e20: a sable shade on a plain fawn back)
@@ -1087,7 +1251,26 @@ async def run_lite(
                 and not unanimous_mask):
             features = [f for f in features if f != "dark_muzzle"]
             sable_extra["muzzle_bridge"] = SABLE_MUZZLE_SHARE
+        # a brindle under a mostly dark crown is a dark brindle: black with
+        # brown streaks (texture.apply_overlay). Read on a fawn base it came
+        # out a leopard-spotted puppy (shelter puppy 8)
+        dark_share = (face_log.get("face_dark") or [None])[0]
+        if (decision.overlay == "brindle" and face_log.get("crown") == "dark" and dark_share is not None
+                and dark_share >= DARK_BRINDLE_SHARE and color_family(decision.base_color) != "dark"):
+            face_log["dark_brindle"] = f"base {decision.base_color} -> black (dark fur {dark_share})"
+            decision.base_color, decision.second_color = "black", None
         region_colors = apply_features(decision.pattern, decision.base_color, decision.second_color, features)
+        face_log["crown_applied"] = crown_on_skull(region_colors, face_log.get("crown"),
+                                                   decision.base_color, decision.second_color)
+        if (face_log.get("face_light") or {}).get("cheeks") == "dark":
+            face_log["cheeks_to_head"] = cheeks_to_head(region_colors)
+        # a crown read dark whose dark fur is lighter than black in the crop
+        # (palette.face_dark): a smoky grey cap, not a black one
+        dark_share, dark_l, cut = (list(face_log.get("face_dark") or []) + [None, None, 0.0])[:3]
+        if face_log.get("crown") == "gray" or (
+                face_log.get("crown") == "dark" and decision.overlay != "brindle" and dark_l is not None
+                and cut >= FACE_CUT_MIN_SHARE and dark_share >= FACE_DARK_MIN_SHARE and dark_l >= FACE_GRAY_MIN_L):
+            face_log["gray_for_black"] = gray_for_black(region_colors, markings)
         # patches are placed at random over the body, so only on a body the
         # photograph shows from the side: seen from the front the flank is
         # a guess, and a plain coat is the usual one (eval v2 e02: black
@@ -1134,6 +1317,11 @@ async def run_lite(
             "features": features, "feature_votes": decision.feature_votes,
             "region_colors": region_colors, "markings": markings, "shape": shape,
             "cream_share": cream_share,
+            # light or dark round the eyes (face_colours.EYE_RING_ANSWERS);
+            # on dark texture.compose_body leaves out the cream spectacles
+            "eye_ring": face_log.get("eye_ring") if face_log.get("eye_ring") in ("light", "dark") else None,
+            # the light face fur's LAB on a dark-crowned, cream-cheeked dog
+            "face_light_lab": face_log.get("face_light_lab"),
             "inferred_regions": [e["region"] for e in region_colors
                                  if str(e.get("source", "")).startswith("pattern")],
         }
@@ -1215,8 +1403,12 @@ async def run_lite(
                 if isinstance(reading, dict):
                     reading.setdefault("border", kind)
         palette, palette_report = ramps_from_measurement(appearance, measured)
-    from .palette import relative_cream
+    chocolate = chocolate_crown(appearance.get("region_colors") or [], measured)
+    if chocolate:
+        log["steps"].setdefault("face", {})["crown_chocolate"] = chocolate
+    from .palette import cream_from_face, relative_cream
     palette = relative_cream(appearance, palette or {})
+    palette = cream_from_face(appearance, palette)
     if "cream" in palette:
         palette_report["cream_relative"] = list(palette["cream"])
     log["steps"]["measure"] = {"regions": {r: v["lab"] for r, v in measured.items()}, "ramps": palette_report}
@@ -1279,9 +1471,20 @@ async def run_lite(
     # and the finish step's rim measurement - the outer three texels against
     # 4-10 px in - read the model's outline at 4-10 px as the reference and
     # darkened the correct rim toward it by 4.6 L, a line along every seam
+    # thin strips packed inside another chart take the surface's colour, so
+    # the seam pass samples the right one (SLIVER_*)
+    surface = _surface_position(masks_dir)
+    slivers = _atlas_slivers(valid, surface)
+    if (Path(masks_dir).parent / "protect.png").exists():
+        # not the template's eyes, nose and pads
+        slivers &= ~(np.asarray(Image.open(Path(masks_dir).parent / "protect.png").convert("L")
+                                .resize(texture.size)) > 127)
+    if slivers.any():
+        texture = Image.fromarray(_fill_from_surface(np.asarray(texture.convert("RGB")).copy(), slivers, valid, surface))
     finished, finish_report = finish_painted(texture, base, masks_dir, template_glb, valid,
                                              eye_colour=appearance.get("eye_color"),
                                              flatten_rims=not refined)
+    finish_report["slivers_from_surface"] = int(slivers.sum())
     # confetti islands (claws, eyelid shells, seam fringe on a generated
     # mesh) come out of the finish as grey shards: the seam ring is wider
     # than the island, so the whole island is blended with whatever lies
@@ -1303,12 +1506,12 @@ async def run_lite(
             finished = Image.fromarray(np.clip(out * (1 - weight) + src * weight, 0, 255).astype(np.uint8))
             finish_report["protect_from_build"] = int((keep > 0.5).sum())
     tiny = _tiny_islands(valid, TINY_ISLAND_TEXELS)
-    if tiny.any():
+    if tiny.any() or slivers.any():
         protect_path = Path(masks_dir).parent / "protect.png"
         if protect_path.exists():
             tiny &= ~(np.asarray(Image.open(protect_path).convert("L").resize(finished.size)) > 127)
-        out = _fill_from_surface(np.asarray(finished.convert("RGB")).copy(), tiny, valid,
-                                 _surface_position(masks_dir))
+        # ... and the slivers again: the seam ring repainted their edges
+        out = _fill_from_surface(np.asarray(finished.convert("RGB")).copy(), tiny | slivers, valid, surface)
         # ... and the padding is refilled from the islands, or the grey rim
         # the finish left around a small island stays in the texels the
         # renderer samples just past its edge
@@ -1322,9 +1525,8 @@ async def run_lite(
     glb = replace_base_texture(template_glb, finished, final_dir / f"{resolved.pet_id}.glb")
     weights = (appearance.get("shape") or {}).get("weights") or {}
     if weights:
-        from .shape import set_shape, target_names
-        known = set(target_names(glb))
-        applied = {name: value for name, value in weights.items() if name in known}
+        from .shape import fit_to_template, set_shape, target_names
+        applied = fit_to_template(weights, set(target_names(glb)))
         if applied:
             set_shape(glb, applied)
         log["steps"]["shape_applied"] = applied
