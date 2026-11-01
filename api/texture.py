@@ -12,7 +12,9 @@ composited here.
 
 THE PASSES, IN ORDER
 --------------------
-  1. base coat       the brightness map through the base colour's ramp
+  1. base coat       the base colour times the template's own shading
+                     (TEMPLATE_SHADING), or the brightness map through
+                     the colour's ramp
   2. regions         each region's colour, or its gradient (landmarks.py
                      distance fields), observed regions before inferred
   2b. shapes         where generated views were read (views_prior.py):
@@ -37,6 +39,12 @@ was given and a black coat collapsed to a silhouette. The template's brightness
 is mapped through a three-stop fur ramp instead, which can lighten as well as
 darken and gives the undercoat and the guard hairs different colours rather
 than one colour at two exposures. See api/fur.py.
+
+The generated templates changed that: their base colour holds all their
+shading (no normal or occlusion map ships with them), and a coat that
+dropped it read as paint next to the template. TEMPLATE_SHADING multiplies
+each region's mid stop by the template's brightness over its coat's median -
+1 at the median, so it lightens lit fur as well as darkening the hollows.
 
 WHY THE PATTERNS ARE SEEDED FROM petId
 --------------------------------------
@@ -128,6 +136,38 @@ HAIR_CONTRAST = 0.45
 # noise: even fur everywhere, the same on every region.
 SYNTHETIC_HAIR = True
 SYNTHETIC_HAIR_SPREAD = 0.10
+# ... with the template's own fine detail laid over it: strands, curls and
+# the dark crevices between them, at the scale of TEMPLATE_DETAIL_SIGMA
+# texels and smaller. Without it every generated template came out as flat
+# paint with even streaks (the maltese's and the poodle's curls, the
+# retriever's feathering gone; user: "덮어씌워진 느낌"). The template's own
+# colour edges (the chihuahua's white blaze and bib) are the "painted edges"
+# the synthetic hair was brought in to avoid; where the template's
+# brightness changes this much across TEMPLATE_EDGE_SIGMA texels, the detail
+# fades out (TEMPLATE_EDGE_RANGE, relative change per texel).
+TEMPLATE_DETAIL = 1.0
+TEMPLATE_DETAIL_SIGMA = 8.0
+TEMPLATE_DETAIL_CLIP = (0.55, 1.5)
+TEMPLATE_EDGE_SIGMA = 8.0
+TEMPLATE_EDGE_RANGE = (0.010, 0.025)
+# Template style (on by default; it replaces the two above): each region's
+# colour times the template's own brightness relative to its coat - the
+# template recoloured. The generated templates carry their shading in the
+# base colour (no normal or occlusion map ships), so the ear hollows, the
+# shadow round the eyes, the curls and the whisker dots are all in it; the
+# synthetic hair threw them away and next to the template it read as paint
+# (user, 10-31: "기본 템플릿 텍스처는 어색함이 없는데 입히니 이상해진다").
+# The ratio is to the coat's median, so the median texel gets the region's
+# mid stop and lit fur goes above it - not the darkening-only multiply.
+TEMPLATE_SHADING = True
+# The template's own colour pattern is not shading: the chihuahua's white
+# blaze, bib and feet on fawn would come out as light patches. When the
+# template's fur saturation (1 - min/max, which shading leaves alone) spreads
+# wider than this between its 5th and 95th percentiles, the brightness is
+# taken relative to the median of texels of the same saturation instead.
+# A white template (spread 0.10 on the jindo) is one colour.
+TEMPLATE_PATTERN_SPREAD = 0.2
+TEMPLATE_SHADING_CLIP = (0.15, 1.3)
 # A light belly on a dark coat reaches about this far up the flank, as a
 # share of the height from the belly line to the top of the back. The
 # underside mask runs higher than that (it holds the lower flank), so a
@@ -215,6 +255,52 @@ def seed_for(pet_id: str) -> int:
 # --------------------------------------------------------------------------
 # the brightness map
 # --------------------------------------------------------------------------
+
+def template_detail(image: Image.Image, valid: np.ndarray) -> np.ndarray:
+    """The template's fine brightness detail as a ratio around 1: its luma
+    over its own blur at TEMPLATE_DETAIL_SIGMA (inside the islands), faded
+    to 1 across the template's own colour edges."""
+    luma = to_linear(np.asarray(image, dtype=np.float32)) @ np.asarray(LUMA, dtype=np.float32)
+    ratio = luma / np.maximum(_blur_inside(luma, TEMPLATE_DETAIL_SIGMA, valid), 1e-4)
+    ratio = np.clip(ratio, *TEMPLATE_DETAIL_CLIP)
+    broad = _blur_inside(luma, TEMPLATE_EDGE_SIGMA, valid)
+    gy, gx = np.gradient(broad)
+    edge = np.hypot(gx, gy) / np.maximum(broad, 1e-3)
+    low, high = TEMPLATE_EDGE_RANGE
+    keep = np.clip((high - edge) / (high - low), 0.0, 1.0)
+    return np.where(valid, 1.0 + (ratio - 1.0) * keep, 1.0).astype(np.float32)
+
+
+def template_shading(image: Image.Image, valid: np.ndarray, protect: np.ndarray | None) -> np.ndarray:
+    """The template's brightness over its coat's (TEMPLATE_SHADING): 1 at
+    the coat's median, below in its hollows, above on lit fur; 1 outside
+    the islands."""
+    linear = to_linear(np.asarray(image, dtype=np.float32))
+    luma = linear @ np.asarray(LUMA, dtype=np.float32)
+    fur = valid & (protect < 0.1 if protect is not None else True)
+    if not fur.any():
+        return np.ones(luma.shape, dtype=np.float32)
+    saturation = _blur_inside(1.0 - linear.min(-1) / np.maximum(linear.max(-1), 1e-4), 2.0, fur)
+    low, high = np.percentile(saturation[fur], [5, 95])
+    if high - low > TEMPLATE_PATTERN_SPREAD:
+        # the coat's brightness per saturation: 50 bins, each the median of
+        # its texels, the sparse ones interpolated
+        edges = np.linspace(0.0, 1.0, 51)
+        index = np.clip(np.digitize(saturation, edges) - 1, 0, 49)
+        level = np.full(50, np.nan)
+        for b in range(50):
+            members = fur & (index == b)
+            if members.sum() > 400:
+                level[b] = np.median(luma[members])
+        known = ~np.isnan(level)
+        centres = (edges[:-1] + edges[1:]) / 2
+        level = ndimage.gaussian_filter1d(np.interp(centres, centres[known], level[known]), 1.5)
+        coat = level[index]
+    else:
+        coat = np.full(luma.shape, float(np.median(luma[fur])), dtype=np.float32)
+    shading = np.clip(luma / np.maximum(coat, 1e-4), *TEMPLATE_SHADING_CLIP)
+    return np.where(valid, shading, 1.0).astype(np.float32)
+
 
 def brightness_map(image: Image.Image) -> np.ndarray:
     """Strip the template's own coat from its texture, keeping only the fur.
@@ -372,6 +458,9 @@ def paint_region(
         dark, mid, light = (hex_to_linear(stop) for stop in palette[key])
     else:
         dark, mid, light = ramp_for(key)
+    if TEMPLATE_SHADING:
+        # gray is template_shading(): the mid stop at the coat's median
+        return (mid * gray[..., None]).astype(np.float32)
     painted = gradient_map(gray, dark, mid, light, region)
     # a touch of illustration: the ramp's spread compressed toward its mid stop
     return (mid + (painted - mid) * HAIR_CONTRAST).astype(np.float32)
@@ -1178,14 +1267,22 @@ def compose_texture(
     else:
         jitter = (noise_field(gray.shape, seed + 5) - 0.5) * 4.0
 
-    if SYNTHETIC_HAIR:
+    if TEMPLATE_SHADING:
+        pass  # template_shading(), below, once the islands are loaded
+    elif SYNTHETIC_HAIR:
         # even, drawn fur: hair streaks of one amplitude everywhere, no
         # painted edges, no shading blotches
         hair0 = (anisotropic_noise(gray.shape, direction0, seed + 9, streak=8, grain=1.2)
                  if direction0 is not None else jitter)
-        gray = normalize_brightness(
-            np.clip(1.0 + SYNTHETIC_HAIR_SPREAD * np.clip(hair0, -2.5, 2.5) / 2.5, 0.0, 2.0)
-        ).astype(np.float32)
+        hair = np.clip(1.0 + SYNTHETIC_HAIR_SPREAD * np.clip(hair0, -2.5, 2.5) / 2.5, 0.0, 2.0)
+        if TEMPLATE_DETAIL > 0:
+            # ... and the template's own strands and curls on top (TEMPLATE_DETAIL)
+            valid_path = (Path(geometry_dir) if geometry_dir is not None else template_dir / "geometry") / "valid.npy"
+            island = (np.load(valid_path) > 0.5 if valid_path.exists()
+                      else np.ones(gray.shape, dtype=bool))
+            if island.shape == gray.shape:
+                hair = hair * template_detail(base_image, island) ** TEMPLATE_DETAIL
+        gray = normalize_brightness(np.clip(hair, 0.0, 2.0)).astype(np.float32)
     else:
         gray = (float(gray.mean()) + (gray - float(gray.mean())) * HAIR_CONTRAST).astype(np.float32)
     masks = MaskLibrary(masks_dir, base_image.size, jitter=np.clip(jitter, -2.5, 2.5).astype(np.float32))
@@ -1193,6 +1290,10 @@ def compose_texture(
         geometry_dir = Path("output/geometry")
     if geometry_dir is not None and (Path(geometry_dir) / "valid.npy").exists():
         masks.valid = np.load(Path(geometry_dir) / "valid.npy") > 0.5
+    if TEMPLATE_SHADING:
+        island = (masks.valid if masks.valid is not None and masks.valid.shape == gray.shape
+                  else np.ones(gray.shape, dtype=bool))
+        gray = template_shading(base_image, island, masks.extra("protect"))
 
     landmarks = None
     if geometry_dir is None and Path("output/geometry/geometry.json").exists():
