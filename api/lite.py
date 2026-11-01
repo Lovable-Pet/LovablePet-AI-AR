@@ -1163,20 +1163,33 @@ async def run_lite(
                     # crop the "light fur" was the white clothes and gloves round
                     # a black-and-tan puppy (shelter puppy 10: L* 69, a* b* 0)
                     crop_cut = (face_log.get("face_dark") or [None, None, 0.0])[2]
-                    light_cheeks = votes.get("crown_answer") == "dark" and cheeks in ("cream", "white")
+                    # ... and under a tan crown, by the light fur's share alone:
+                    # a side-on head bowed to the floor read "white cheeks" 4/5
+                    # off the white neck beside it (shelter maltese 7, light
+                    # fur 6 % of the lower face; shelter puppy 13, brown cheeks
+                    # by a white muzzle, 10-16 %; light cheeks on file 47-94 %).
+                    # The light fur's colour is not asked: an urajiro's cream
+                    # cheeks sit near the tan ramp
+                    tan_crown = votes.get("crown_answer") == "tan" and cheeks in ("cream", "white")
+                    if tan_crown:
+                        from .palette import face_dark
+                        crop_cut = face_dark(crop.image)[2]
+                    light_cheeks = (votes.get("crown_answer") == "dark" or tan_crown) and cheeks in ("cream", "white")
                     if light_cheeks and crop_cut < FACE_CUT_MIN_SHARE:
                         face_log["face_light"] = {"skipped": f"uncut crop (cut {crop_cut})"}
                     elif light_cheeks:
                         from .palette import cheeks_from_photo, face_light
                         share, light_lab = face_light(crop.image)
                         verdict = cheeks_from_photo(cheeks, share, light_lab)
+                        if tan_crown and verdict != "dark":
+                            verdict = cheeks
                         face_log["face_light"] = {"share": share, "lab": light_lab, "cheeks": verdict}
                         if verdict != cheeks:
                             face_log["cheeks_from_photo"] = f"cheeks {cheeks} -> {verdict}"
                             cheeks = face_log["cheeks"] = verdict
                             if verdict == "tan":
                                 features.append("tan_cheeks")
-                        elif cheeks == "cream":
+                        elif cheeks == "cream" and not tan_crown:
                             face_log["face_light_lab"] = light_lab
                     for name in (*CHEEK_FEATURES.get(cheeks, ()), *BROW_FEATURES.get(brows, ()),
                                  *MUZZLE_FEATURES.get(muzzle, ()), *EAR_FEATURES.get(ears, ())):
