@@ -303,6 +303,29 @@ def _majority(values: list[str], tie_break: str | None) -> str | None:
     return top[0][0]
 
 
+def paired_colours(samples: list[dict[str, Any]], base: str, second: str | None) -> tuple[str, str | None]:
+    """The base and second colour again when, voted apart, they came out the
+    same colour. Shelter maltese 10 read saddle fawn/black, tan/black and
+    black/tan: the bases split three ways and the record's black broke the
+    tie, the seconds said black, and a tan dog with a black saddle became
+    black on black. Then the samples' base colours are counted by family
+    (fawn and tan are both point colours); a family most samples name gives
+    the base, and those samples' seconds the second."""
+    if second is None or second != base:
+        return base, second
+    pairs = [(s.get("base_color"), s.get("second_color")) for s in samples if s.get("base_color") in FUR_COLORS]
+    families = Counter(color_family(b) for b, _ in pairs)
+    if not families:
+        return base, second
+    family, votes = families.most_common(1)[0]
+    if votes <= len(pairs) / 2:
+        return base, second
+    kept = [(b, s) for b, s in pairs if color_family(b) == family]
+    new_base = _majority([b for b, _ in kept], None) or base
+    new_second = _majority([s for _, s in kept if s in FUR_COLORS and s != new_base], None)
+    return new_base, new_second
+
+
 def resolve_patterns(named: list[str], seconds: list[str]) -> tuple[str | None, str]:
     """Apply the disagreement rules to one round's readings. Returns the
     pattern (None when unresolved) and a note saying which rule fired."""
@@ -396,6 +419,7 @@ async def classify_pattern(
     second = _majority([s.get("second_color", "") for s in agreeing], None)
     if second in (None, "none") or second not in FUR_COLORS or pattern == "solid":
         second = None
+    base, second = paired_colours(agreeing, base, second)
 
     # Most dogs have dark brown eyes, so a split or silent vote takes that
     # rather than whichever sample answered first: a wrong pale iris is far
