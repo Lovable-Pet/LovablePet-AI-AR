@@ -47,11 +47,13 @@ from PIL import Image
 from .agents import AgentRefusal, Transport
 from .fur import FUR_COLORS
 from .patterns import (
+    PATTERN_LAYOUT,
     PATTERN_NAMES,
     color_family,
     instantiate_defaults,
     overlay_for,
 )
+from .regions import REGIONS
 
 ANCHOR_PATTERNS = ("tan_point", "urajiro", "irish", "saddle", "solid")
 SAMPLES = 3
@@ -264,6 +266,9 @@ class PatternDecision:
     white_legs: str = "unknown"
     cheeks: str = "unknown"
     brows: str = "unknown"
+    # an unresolved vote's regions by majority over the samples' layouts
+    # (consensus_layout); None otherwise
+    layout: dict[str, str] | None = None
 
     @property
     def region_colors(self) -> list[dict[str, Any]]:
@@ -283,6 +288,7 @@ class PatternDecision:
             "white_legs": self.white_legs,
             "cheeks": self.cheeks,
             "brows": self.brows,
+            "layout": self.layout,
             "samples": self.samples,
         }
 
@@ -324,6 +330,49 @@ def paired_colours(samples: list[dict[str, Any]], base: str, second: str | None)
     new_base = _majority([b for b, _ in kept], None) or base
     new_second = _majority([s for _, s in kept if s in FUR_COLORS and s != new_base], None)
     return new_base, new_second
+
+
+# An unresolved vote, region by region. Shelter maltese 5 (a fawn-and-white
+# shih tzu) split saddle 3, irish 2, piebald 2, urajiro 1 over three rounds
+# and became "other": a plain white coat with a fawn crown. Yet the samples
+# agreed on the dog - fawn on top, white underneath - and differed in the
+# layout's name and in which colour they called the base: "saddle
+# fawn/white, a darker saddle on a light body" puts white on the back by
+# the layout's own convention. So each sample's layout is laid out over the
+# ten regions with its colours put in order by lightness - the second
+# colour's regions are the lighter colour for these layouts and the darker
+# for the others - and each region takes the colour most samples give it
+# (by family, then the commonest name in it).
+LAYOUT_SECOND_IS_LIGHTER = {"tan_point": True, "urajiro": True, "irish": True, "saddle": False, "piebald": False}
+COLOUR_LIGHTNESS = {"white": 93, "cream": 88, "pink": 76, "fawn": 69, "tan": 56, "gray": 53, "red": 52,
+                    "chocolate": 23, "black": 7}
+
+
+def consensus_layout(samples: list[dict[str, Any]]) -> dict[str, str] | None:
+    """The ten regions' colours by majority over the samples' layouts, or
+    None when fewer than two samples have a two-colour layout."""
+    votes: dict[str, list[str]] = {region: [] for region in REGIONS}
+    laid = 0
+    for sample in samples:
+        pattern = sample.get("pattern")
+        a, b = sample.get("base_color"), sample.get("second_color")
+        if pattern not in LAYOUT_SECOND_IS_LIGHTER or a not in COLOUR_LIGHTNESS or b not in COLOUR_LIGHTNESS or a == b:
+            continue
+        light, dark = (a, b) if COLOUR_LIGHTNESS[a] >= COLOUR_LIGHTNESS[b] else (b, a)
+        second, rest = (light, dark) if LAYOUT_SECOND_IS_LIGHTER[pattern] else (dark, light)
+        second_regions = set(PATTERN_LAYOUT[pattern])
+        for region in REGIONS:
+            votes[region].append(second if region in second_regions else rest)
+        laid += 1
+    if laid < 2:
+        return None
+    # one name per family over the whole coat (the samples said fawn five
+    # times and tan three: a fawn head on a fawn back, not tan on fawn)
+    every = [c for colours in votes.values() for c in colours]
+    name = {family: Counter(c for c in every if color_family(c) == family).most_common(1)[0][0]
+            for family in {color_family(c) for c in every}}
+    return {region: name[Counter(color_family(c) for c in colours).most_common(1)[0][0]]
+            for region, colours in votes.items()}
 
 
 def resolve_patterns(named: list[str], seconds: list[str]) -> tuple[str | None, str]:
@@ -466,6 +515,7 @@ async def classify_pattern(
         features=features,
         feature_votes=feature_votes,
         white_legs=white_legs,
+        layout=consensus_layout(all_samples) if pattern == "other" else None,
     )
 
 

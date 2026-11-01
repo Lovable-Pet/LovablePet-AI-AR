@@ -1292,7 +1292,8 @@ async def run_lite(
                 and dark_share >= DARK_BRINDLE_SHARE and color_family(decision.base_color) != "dark"):
             face_log["dark_brindle"] = f"base {decision.base_color} -> black (dark fur {dark_share})"
             decision.base_color, decision.second_color = "black", None
-        region_colors = apply_features(decision.pattern, decision.base_color, decision.second_color, features)
+        region_colors = apply_features(decision.pattern, decision.base_color, decision.second_color, features,
+                                       consensus=decision.layout)
         face_log["crown_applied"] = crown_on_skull(region_colors, face_log.get("crown"),
                                                    decision.base_color, decision.second_color)
         if (face_log.get("face_light") or {}).get("cheeks") == "dark":

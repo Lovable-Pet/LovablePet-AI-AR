@@ -156,10 +156,16 @@ def _role_colour(role: str, base: str, second: str | None) -> str:
     return role
 
 
-def apply_features(pattern: str, base: str, second: str | None, features: list[str]) -> list[dict[str, Any]]:
+def apply_features(pattern: str, base: str, second: str | None, features: list[str],
+                   consensus: dict[str, str] | None = None) -> list[dict[str, Any]]:
     """The pattern's default layout with the features laid over it, all
-    ten regions, full coverage, no gradients."""
+    ten regions, full coverage, no gradients. A pattern with no layout of
+    its own ("other") takes `consensus` (pattern_classify.consensus_layout)
+    when the vote left one, else the base all over."""
     layout = {e["region"]: e for e in instantiate_defaults(pattern, base, second)}
+    if not layout and consensus:
+        layout = {r: {"region": r, "color": consensus[r], "coverage": "full", "note": "samples' layouts by region",
+                      "source": "pattern_default:consensus", "weight": 1.0} for r in REGIONS}
     if not layout:
         layout = {r: {"region": r, "color": base, "coverage": "full", "note": "solid fallback",
                       "source": "pattern_default:solid", "weight": 1.0} for r in REGIONS}
