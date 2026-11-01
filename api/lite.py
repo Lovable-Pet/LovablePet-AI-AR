@@ -867,6 +867,21 @@ def crown_on_skull(region_colors: list[dict[str, Any]], crown: str | None, base:
     return colour
 
 
+def irish_on_light(pattern: str, base: str | None, second: str | None) -> str:
+    """The pattern an Irish reading stands for. Irish is a coloured dog with
+    a white collar, chest and feet; read with a LIGHT base and a coloured
+    second colour it is a white dog whose colour is on the head - a piebald.
+    Laid out as Irish, the second colour went to the chest, belly and legs:
+    a white puppy with a brown head came out with a brown chest and belly
+    (shelter puppy 13, "irish white/tan" 2 of 3, photo chest white)."""
+    from .patterns import color_family
+
+    if (pattern == "irish" and color_family(str(base or "")) == "light"
+            and second and color_family(str(second)) != "light"):
+        return "piebald"
+    return pattern
+
+
 def cheeks_to_head(region_colors: list[dict[str, Any]]) -> str | None:
     """The cheeks painted the skull's colour (the face crop saw a dark face
     under a dark crown, palette.cheeks_from_photo). On a piebald the base is
@@ -888,26 +903,28 @@ def cheeks_to_head(region_colors: list[dict[str, Any]]) -> str | None:
 DARK_BRINDLE_SHARE = 0.6
 
 
-# A skull painted the crown's warm colour (crown_on_skull) that the photo
-# measures darker than this (CIE L*) is chocolate: a dark brown head read
-# "tan" came out orange (shelter puppy 13, measured L 26).
+# A skull painted the crown's warm colour (crown_on_skull), or a piebald's
+# cap, that the photo measures darker than this (CIE L*) is chocolate: a
+# dark brown head read "tan" came out orange (shelter puppy 13, measured L 26).
 CHOCOLATE_CROWN_MAX_L = 35.0
+CHOCOLATE_CAP_SOURCES = ("face:crown", "pattern_default:piebald")
 
 
 def chocolate_crown(region_colors: list[dict[str, Any]], measured: dict[str, Any]) -> str | None:
     skull = next((e for e in region_colors if e.get("region") == "skull"), None)
     reading = (measured or {}).get("skull")
-    if (skull is None or not str(skull.get("source", "")).startswith("face:crown")
+    if (skull is None or not str(skull.get("source", "")).startswith(CHOCOLATE_CAP_SOURCES)
             or str(skull.get("color")) not in ("tan", "red", "fawn") or not isinstance(reading, dict)
             or not reading.get("lab") or float(reading["lab"][0]) >= CHOCOLATE_CROWN_MAX_L):
         return None
     warm = skull["color"]
     skull["color"] = "chocolate"
     skull["note"] = f"{skull.get('note', '')}; measured L {reading['lab'][0]:.0f}".lstrip("; ")
-    # ... and the cheeks read the same warm colour (cheeks_vs_brows): an
-    # orange face under a brown crown otherwise
+    # ... and the rest of the cap read the same warm colour - the cheeks
+    # (cheeks_vs_brows), the brows and the ear cups: an orange face, orange
+    # brow spots and orange ears under a brown crown otherwise
     for entry in region_colors:
-        if entry.get("region") == "cheeks" and entry.get("color") == warm:
+        if entry.get("region") in ("cheeks", "eyebrows", "ears_inner") and entry.get("color") == warm:
             entry["color"] = "chocolate"
     return "chocolate"
 
@@ -1168,6 +1185,10 @@ async def run_lite(
             except Exception as exc:  # noqa: BLE001 - the face then keeps the layout's colours
                 face_log["error"] = f"{type(exc).__name__}: {exc}"
         log["steps"]["face"] = face_log
+        as_read = decision.pattern
+        decision.pattern = irish_on_light(decision.pattern, decision.base_color, decision.second_color)
+        if decision.pattern != as_read:
+            face_log["irish_to_piebald"] = f"{as_read} {decision.base_color}/{decision.second_color}"
         # a piebald's cap must be seen on the crown: a white or cream crown
         # means the layout call took pale ear tips for a cap (eval e01, e02)
         if decision.pattern == "piebald" and face_log.get("crown") in ("white", "cream"):
