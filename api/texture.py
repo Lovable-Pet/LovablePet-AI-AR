@@ -104,12 +104,18 @@ PLACEABLE_MARKINGS = frozenset({"socks", "blaze", "stripe", "mask"})
 # _blaze_strip); without, _restrict takes the middle columns of the mask.
 # (half widths in face sizes; a shelter puppy's blaze is a thin line - medium
 # 0.2 painted a broad white bar, user)
-BLAZE_HALF_WIDTH_EYES = {"small": 0.08, "medium": 0.12, "large": 0.25}
+BLAZE_HALF_WIDTH_EYES = {"small": 0.08, "medium": 0.12, "large": 0.25, "full": 0.3}
 # ... BLAZE_MUZZLE_WIDEN times as wide a face size under the eyes, narrowing
 # above them to nothing BLAZE_ABOVE_EYES face sizes up (a large blaze - a
-# white face's - runs on up the forehead)
+# white face's - runs on up the forehead; a full one - the crown mostly
+# light, dark only round the eyes and on the ears - on over the head to the
+# ears' line without narrowing)
 BLAZE_MUZZLE_WIDEN = 1.8
-BLAZE_ABOVE_EYES = {"small": 0.45, "medium": 0.55, "large": 1.1}
+BLAZE_ABOVE_EYES = {"small": 0.45, "medium": 0.55, "large": 1.1, "full": 99.0}
+# ... and a full one widens above the eyes instead, to this many times its
+# width a face size up: the white between grey eye patches spreads over the
+# crown (shelter puppy 14)
+BLAZE_FULL_WIDEN = 2.2
 # The face's size for the blaze: the eye radius (90th percentile of the eye
 # feature texels' distance from the eye centre, times EYE_RIM_TO_RADIUS) over
 # EYE_RADIUS - ar_pipeline/refine_face_masks.eye_radius, which gives the
@@ -514,8 +520,9 @@ def _blaze_strip(landmarks: Any, mask: np.ndarray, size: str, noise: np.ndarray)
     # ruler-straight white line (user: "머리에 흰줄 자꾸 왜")
     rise = (pos[:, 2] - z_eyes) / scale
     above = BLAZE_ABOVE_EYES.get(size, BLAZE_ABOVE_EYES["medium"])
-    width = half * np.where(rise < 0.0, 1.0 + (BLAZE_MUZZLE_WIDEN - 1.0) * np.clip(-rise, 0.0, 1.0),
-                            np.clip(1.0 - rise / above, 0.0, 1.0))
+    up = (1.0 + (BLAZE_FULL_WIDEN - 1.0) * np.clip(rise, 0.0, 1.0) if size == "full"
+          else np.clip(1.0 - rise / above, 0.0, 1.0))
+    width = half * np.where(rise < 0.0, 1.0 + (BLAZE_MUZZLE_WIDEN - 1.0) * np.clip(-rise, 0.0, 1.0), up)
     lateral = np.abs(pos[:, 0])
     weight = np.clip(1.0 - (lateral - 0.6 * width) / np.maximum(0.4 * width, 1e-6), 0.0, 1.0) * (width > 1e-6)
     strip = np.zeros(mask.shape, dtype=np.float32)
@@ -1087,6 +1094,9 @@ def compose_body(
     shaped_regions = {s.split(":")[0] for s in shaped}
 
     placed: list[str] = []
+    # where the markings went, for the finish to leave alone (lite._clean_head
+    # took a white blaze on a dark crown for a shard and painted it over)
+    marking_mask = np.zeros(gray.shape, dtype=np.float32)
     for order, marking in enumerate(appearance.get("markings") or [], start=1):
         mask = masks.get(marking.get("region"))
         if mask is None:
@@ -1156,10 +1166,12 @@ def compose_body(
         composed = _blend(
             composed, paint_region(gray, marking.get("color", ""), mask, palette), blob
         )
+        marking_mask = np.maximum(marking_mask, np.asarray(blob, dtype=np.float32))
         if debug:
             _save_debug(debug, f"03_{order:02d}_{marking_type}_{region}_mask", blob)
             _save_debug(debug, f"03_{order:02d}_{marking_type}_{region}", composed)
     report["markings_placed"] = placed
+    report["marking_mask"] = marking_mask
 
     if feather_all:
         # every boundary between two regions of different colour: a colour
@@ -1683,10 +1695,12 @@ def synthesize_texture(
     projected_texture_path: str | Path | None = None,
     debug_dir: str | Path | None = None,
     palette: dict[str, tuple[str, str, str]] | None = None,
+    report_out: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> Image.Image:
     """The coat texture as an image: compose_texture without the normal map
-    and the report, for callers that only want the picture.
+    and the report, for callers that only want the picture (`report_out`,
+    when given, is filled with the report).
 
     `projected_texture_path` is the experimental path's projected face: when
     given, its face regions are composited as the face layer."""
@@ -1699,10 +1713,13 @@ def synthesize_texture(
             projected = projected.resize(base_image.size, Image.LANCZOS)
         weight = _blur(masks.union(FACE_REGIONS), 5.0)
         face_layer = (to_linear(np.asarray(projected, dtype=np.float32)), weight)
-    return compose_texture(
+    result = compose_texture(
         base_texture_path, masks_dir, appearance, debug_dir=debug_dir, palette=palette,
         face_layer=face_layer, **kwargs,
-    ).image
+    )
+    if report_out is not None:
+        report_out.update(result.report)
+    return result.image
 
 
 __all__ = [

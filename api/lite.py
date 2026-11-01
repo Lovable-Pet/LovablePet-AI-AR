@@ -368,7 +368,8 @@ def _surface_channels(fields: np.ndarray, position: np.ndarray, use: np.ndarray,
     return out
 
 
-def _clean_head(image: Image.Image, masks_dir, valid: np.ndarray) -> tuple[Image.Image, int]:
+def _clean_head(image: Image.Image, masks_dir, valid: np.ndarray,
+                keep: np.ndarray | None = None) -> tuple[Image.Image, int]:
     from scipy import ndimage
 
     position = _surface_position(masks_dir)
@@ -384,6 +385,10 @@ def _clean_head(image: Image.Image, masks_dir, valid: np.ndarray) -> tuple[Image
     if protect_path.exists():
         protect = np.asarray(Image.open(protect_path).convert("L").resize(image.size)) > 127
         protect = ndimage.binary_dilation(protect, iterations=2)
+    # the build's placed markings (a white blaze on a dark crown) are not
+    # shards: the shard test painted shelter puppy 13's blaze brown
+    if keep is not None and keep.shape == valid.shape:
+        protect |= ndimage.binary_dilation(keep, iterations=2)
     use = valid & ~protect & (np.linalg.norm(position - eye[None, None, :], axis=-1) < HEAD_RADIUS_M)
     if use.sum() < 1000:
         return image, 0
@@ -911,6 +916,8 @@ def cheeks_to_head(region_colors: list[dict[str, Any]]) -> str | None:
 # dark fur on this share of the crown in the face crop (palette.face_dark)
 # makes a brindle a dark one
 DARK_BRINDLE_SHARE = 0.6
+# ... and under this share a white blaze covers the head (texture "full")
+BLAZE_FULL_DARK_SHARE = 0.6
 
 
 # A skull painted the crown's warm colour (crown_on_skull), or a piebald's
@@ -1187,9 +1194,17 @@ async def run_lite(
                         face_log["blaze_dropped"] = f"blaze {blaze} but muzzle {muzzle}"
                     elif blaze in ("white", "cream"):
                         # wide on a white face (cheeks and muzzle light): a
-                        # piebald puppy's white face between dark eye patches
+                        # piebald puppy's white face between dark eye patches;
+                        # over the whole head when the crop's crown is mostly
+                        # light - a white puppy's grey eye patches and ears
+                        # with the forehead white to the top (shelter puppy 14,
+                        # dark fur 45 % of the crown; dark heads 89-96 %)
+                        dark_crown = (face_log.get("face_dark") or [None, None, 0.0])
+                        mostly_light = (dark_crown[0] is not None and dark_crown[2] >= FACE_CUT_MIN_SHARE
+                                        and dark_crown[0] < BLAZE_FULL_DARK_SHARE)
+                        size = "full" if mostly_light else "large" if cheeks in ("white", "cream") else "medium"
                         markings.append({"type": "blaze", "region": "skull", "color": blaze,
-                                         "size": "large" if cheeks in ("white", "cream") else "medium",
+                                         "size": size,
                                          "anchor": "none",
                                          "note": f"a {blaze} blaze up the forehead between the eyes"})
             except Exception as exc:  # noqa: BLE001 - the face then keeps the layout's colours
@@ -1499,8 +1514,9 @@ async def run_lite(
     # a refine the model was meant to blend them, but it traced the build's
     # cut edges and kept them hard (user on demo e08: "the edges where the
     # colour changes look unnatural, they didn't before").
+    build_report: dict[str, Any] = {}
     coat = synthesize_texture(base_path, masks_dir, build_appearance, feather_all=True,
-                              palette=palette or None)
+                              palette=palette or None, report_out=build_report)
     coat.save(out_dir / "mask_build.png")
     log["timings_s"]["mask_build"] = round(_now() - t, 2)
 
@@ -1586,7 +1602,9 @@ async def run_lite(
         out = out[idx[0], idx[1]]
         finished = Image.fromarray(out)
         finish_report["tiny_islands_from_surface"] = int(tiny.sum())
-    finished, finish_report["head_shards_cleaned"] = _clean_head(finished, masks_dir, valid)
+    marking_mask = build_report.get("marking_mask")
+    finished, finish_report["head_shards_cleaned"] = _clean_head(
+        finished, masks_dir, valid, keep=marking_mask > 0.3 if marking_mask is not None else None)
     finished.save(final_dir / f"{resolved.pet_id}.png")
     from .whiskers import whisker_colour
     whisker_rgb, finish_report["whiskers"] = whisker_colour(finished, template_dir)
