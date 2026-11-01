@@ -393,6 +393,12 @@ MEASURED_STRENGTH = 0.7
 # (18 until 11-01: a yellow puppy's cells, in the shade of its own coat, read
 # L 52 against its photo's coat at 63 and the coat went muddy)
 MEASURED_MAX_SHIFT_L = 10.0
+# ... and lighter by at most this much: the cells land on sunlit fur, glare
+# and pale markings more often than the coat's own tone, and "paler than the
+# photo" was the user's call on four dogs (shelter puppies 4, 6, 7; fixture
+# 2222). Puppy 6's fawn went +10 L from a sunlit forehead (L 83) and a cell on
+# its white muzzle stripe (L 92) though its coat in the photo is a deep gold.
+MEASURED_MAX_LIGHTEN_L = 5.0
 MEASURED_MAX_SHIFT_AB = 10.0
 # cream is a light name: the cell pointed at for a cream chest or cheek on a
 # tan dog lands on the tan beside it or in the shadow under the chin (eval
@@ -731,7 +737,7 @@ def ramps_from_measurement(
         target = np.median(np.stack(labs), axis=0)
         stop_labs = [linear_to_lab(hex_to_linear(stop)[None, None, :])[0, 0] for stop in stops]
         delta = (target - stop_labs[1]) * strength
-        delta[0] = float(np.clip(delta[0], -max_shift_l, max_shift_l))
+        delta[0] = float(np.clip(delta[0], -max_shift_l, min(max_shift_l, MEASURED_MAX_LIGHTEN_L)))
         if tinted:
             delta[1:] = 0.0
         elif name in WARM_BASES:
