@@ -201,8 +201,14 @@ CHEST_FACING = 0.45
 # legs_lower faces inward (> 0.2) or forward (> CHEST_FACING).
 LEG_INNER_FACING = 0.2
 
-# The protect mask's edge is softened over this many texels.
-PROTECT_FEATHER_PX = 3
+# The protect mask's edge is softened inward over this many texels.
+PROTECT_FEATHER_PX = 1.2
+# The template's eyelid line is dark grey: black against its white coat,
+# lighter than a black one - a grey ring round each eye (user). In a band
+# this wide along the inside of the protected eye (within EYE_LID_REACH_M of
+# an eye landmark) the darker of the template and the coat is kept.
+EYE_LID_BAND_PX = 3
+EYE_LID_REACH_M = 0.03
 
 # Where a gradient's fade begins and ends, as percentiles of the distance
 # field inside the region; so a gradient always spans the region.
@@ -1377,8 +1383,16 @@ def compose_texture(
     # 8
     template = to_linear(np.asarray(base_image, dtype=np.float32))
     if protect is not None:
-        weight = _blur(protect, PROTECT_FEATHER_PX / 2.0)
-        weight = np.maximum(weight, protect)
+        # the mask's own soft fringe cut to its middle, and feathered inward:
+        # at half weight several texels out, and with the blur's outer half,
+        # the template's fur came back round every protected edge - a light
+        # ring round a black dog's nose (the chihuahua, user) and the grey eye
+        # shadow round its eyes
+        core = np.clip((protect - 0.35) / 0.3, 0.0, 1.0)
+        core = core * core * (3.0 - 2.0 * core)
+        if landmarks is not None:
+            core = _clear_lid_band(core, composed, template, landmarks)
+        weight = np.minimum(_blur(core, PROTECT_FEATHER_PX / 2.0), core)
         composed = _blend(composed, template, np.clip(weight, 0, 1))
         report["protect_texels"] = int((protect > 0.5).sum())
     else:
@@ -1437,6 +1451,21 @@ def feature_core(features: np.ndarray, base_image: Image.Image) -> np.ndarray:
     image = image.filter(ImageFilter.GaussianBlur(radius=1.0))
     grown = np.asarray(image, dtype=np.float32) / 255.0
     return np.minimum(grown, features)
+
+
+def _clear_lid_band(core: np.ndarray, composed: np.ndarray, template: np.ndarray, landmarks) -> np.ndarray:
+    """The protect weight with the band along the inside of each eye
+    (EYE_LID_BAND_PX) cleared where the coat is darker than the template."""
+    if landmarks.position is None or landmarks.position.shape[:2] != core.shape or EYE_LID_BAND_PX <= 0:
+        return core
+    inside = core > 0.5
+    band = inside & ~ndimage.binary_erosion(inside, iterations=EYE_LID_BAND_PX)
+    near = np.zeros_like(inside)
+    for name in landmarks.anchor_points("eye"):
+        near |= np.linalg.norm(landmarks.position - landmarks.world(name), axis=-1) < EYE_LID_REACH_M
+    luma = np.asarray(LUMA, dtype=np.float32)
+    darker = (composed @ luma) < (template @ luma)
+    return np.where(band & near & darker, 0.0, core).astype(np.float32)
 
 
 def keep_features(final: np.ndarray, base_image: Image.Image, masks: MaskLibrary) -> np.ndarray:
