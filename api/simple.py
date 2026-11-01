@@ -207,6 +207,14 @@ LEG_TOP_CAP = 0.75
 # from the nose (texture gradient_reach)
 MASK_CHEEK_REACH = (5.0, 60.0)
 
+# white toes under a coloured leg: percentiles of the paws region's distance
+# from the paw over which the white gives way to the leg's colour
+PAW_TOE_REACH = (35.0, 75.0)
+
+# a points-coloured chest on a dark coat: percentiles of the chest's distance
+# from the paws over which the points colour gives way to the base
+CHEST_POINTS_REACH = (25.0, 60.0)
+
 
 def default_gradients(appearance: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     """The appearance with default gradients on the regions that blend, and
@@ -263,6 +271,29 @@ def default_gradients(appearance: dict[str, Any]) -> tuple[dict[str, Any], list[
         entries["legs_lower"] = {**entries["legs_lower"], "inner_color": chest["color"],
                                  "note": f"{legs.get('note', '')} / inside {chest['color']} like the chest".strip(" /")}
         added.append(f"legs_lower inner:{chest['color']}")
+    # white paws under a coloured leg are white toes: the paws region runs up
+    # to the wrist and hock, and painted whole it read as white socks
+    # (shelter puppy 6, user: "발이 저렇게 하얀가" - the photo's white stops at
+    # the toes). The leg's colour comes down over the top of the region.
+    legs = entries.get("legs_lower", {})
+    paws = entries.get("paws", {})
+    leg_colour = str(legs.get("color", ""))
+    if (color_family(str(paws.get("color", ""))) == "light" and leg_colour in FUR_COLORS
+            and color_family(leg_colour) != "light"):
+        fade("paws", str(paws["color"]), leg_colour, "paw")
+        if entries["paws"].get("gradient_anchor") == "paw":
+            entries["paws"]["gradient_reach"] = list(PAW_TOE_REACH)
+    # a points-coloured chest on a dark coat is the low chest between the
+    # forelegs: the chest region runs up the front of the neck to the jaw,
+    # and painted whole it put a tan bib from chin to elbows on a
+    # black-and-tan puppy whose photo shows tan only low (shelter puppy 10,
+    # user: "가슴 탄이 넓다"). The base comes down from the throat.
+    chest = entries.get("chest", {})
+    if (points and str(chest.get("color", "")) == points and base in FUR_COLORS
+            and color_family(base) == "dark"):
+        fade("chest", points, base, "paw")
+        if entries["chest"].get("gradient_anchor") == "paw":
+            entries["chest"]["gradient_reach"] = list(CHEST_POINTS_REACH)
     cheeks = entries.get("cheeks", {})
     # not when the face call saw the cheeks: its "cream" is the colour up to
     # the eyes, and the tan fade put tan round the eyes of a black-and-tan
