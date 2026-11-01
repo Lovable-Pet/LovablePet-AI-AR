@@ -116,6 +116,8 @@ BLAZE_ABOVE_EYES = {"small": 0.45, "medium": 0.55, "large": 1.1, "full": 99.0}
 # width a face size up: the white between grey eye patches spreads over the
 # crown (shelter puppy 14)
 BLAZE_FULL_WIDEN = 2.2
+# the share of the blaze's width that is solid; the rest fades to the coat
+BLAZE_SOLID_SHARE = 0.4
 # The face's size for the blaze: the eye radius (90th percentile of the eye
 # feature texels' distance from the eye centre, times EYE_RIM_TO_RADIUS) over
 # EYE_RADIUS - ar_pipeline/refine_face_masks.eye_radius, which gives the
@@ -524,13 +526,17 @@ def _blaze_strip(landmarks: Any, mask: np.ndarray, size: str, noise: np.ndarray)
           else np.clip(1.0 - rise / above, 0.0, 1.0))
     width = half * np.where(rise < 0.0, 1.0 + (BLAZE_MUZZLE_WIDEN - 1.0) * np.clip(-rise, 0.0, 1.0), up)
     lateral = np.abs(pos[:, 0])
-    weight = np.clip(1.0 - (lateral - 0.6 * width) / np.maximum(0.4 * width, 1e-6), 0.0, 1.0) * (width > 1e-6)
+    # solid in the middle 0.4 of the width, fading over the rest: with the
+    # fade over the outer 0.4 and the noise doubled in contrast it was a
+    # band with ruled edges (shelter puppy 14's white head stripe)
+    weight = np.clip(1.0 - (lateral - BLAZE_SOLID_SHARE * width) / np.maximum((1.0 - BLAZE_SOLID_SHARE) * width, 1e-6),
+                     0.0, 1.0) * (width > 1e-6)
     strip = np.zeros(mask.shape, dtype=np.float32)
     strip[rows, cols] = weight
     if int((strip > 0.5).sum()) < 30:
         return None
     # a natural outline: solid inside, the edge broken by the noise
-    return np.clip((strip * (0.7 + 0.6 * noise) - 0.15) * 2.0, 0.0, 1.0) * (mask > 0.5)
+    return np.clip((strip * (0.8 + 0.4 * noise) - 0.1) * 1.4, 0.0, 1.0) * (mask > 0.5)
 
 
 def _smoothstep(t: np.ndarray) -> np.ndarray:
@@ -1151,8 +1157,16 @@ def compose_body(
                     # over white legs (shelter maltese 7)
                     z = landmarks.position[..., 2]
                     low, high = np.percentile(z[inside], [10, 90])
-                    field = field + PATCH_TOP_BIAS * (np.clip((z - low) / max(high - low, 1e-6), 0.0, 1.0) - 0.5)
-            blob = _select(mask, field, area)
+                    top = np.clip((z - low) / max(high - low, 1e-6), 0.0, 1.0)
+                    # ... but not the tail, which stands as high as the back
+                    # and came out wholly coloured on a white-tailed puppy
+                    # (shelter maltese 6): behind the hind feet it is lifted
+                    # as the bottom is
+                    hind = [landmarks.world(name)[1] for name in ("paw_lb", "paw_rb") if name in landmarks.points]
+                    if hind:
+                        top = np.where(landmarks.position[..., 1] > float(np.mean(hind)) + PATCH_TAIL_BEHIND_M, 0.0, top)
+                    field = field + PATCH_TOP_BIAS * (top - 0.5)
+            blob = _select(mask, field, PATCH_AREA.get(size, PATCH_AREA["medium"]))
             placed.append(f"patches:{region}")
         if blob is None and marking_type == "blaze" and landmarks is not None:
             # down the top of the muzzle as well: a blaze runs from the nose
@@ -1264,6 +1278,14 @@ PATCH_SEED = 4242
 # the field's lift from the bottom tenth of the region's height to the top
 # tenth (in the field's units: its spread is PATCH_FIELD_SPREAD)
 PATCH_TOP_BIAS = 0.4
+# the tail: what lies this far behind the hind feet
+PATCH_TAIL_BEHIND_M = 0.05
+# The share of the region the patches cover. The reading says only that
+# there are patches, not how much: a quarter of the back region sits
+# between a white puppy with one flank patch (shelter maltese 6, ~15 %)
+# and a saddle-and-rump parti (maltese 7, ~35 %); the markings' medium
+# 0.35 made the first a saddled dog.
+PATCH_AREA = {"small": 0.12, "medium": 0.25, "large": 0.45}
 
 
 # Sable: the second colour laid over the top of the dog as dark-tipped hair.
