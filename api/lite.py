@@ -269,6 +269,19 @@ def _lowpass_on_islands(x: np.ndarray, valid: np.ndarray, sigma: float) -> np.nd
 # beside a black shard) and rimmed in grey
 TINY_ISLAND_TEXELS = 6000
 
+# A thin strip of one UV chart packed inside another: fewer than
+# SLIVER_SAME_SHARE of the island texels on a ring SLIVER_RADIUS_PX round it
+# lie on the same part of the dog (baked positions within SLIVER_NEAR_M).
+# Every step that works in the atlas reads the other chart into it - the
+# masks' edge jitter, the refine model, the seam pass's vertex samples. The
+# jindo puppy 2's shoulder seam is a 2-6 texel strip wedged into the white
+# bib, and it drew a grey zigzag down the black shoulder (shelter puppy 11,
+# user: "앞다리 바깥에 번개무늬"). Such texels take the colour of the surface
+# round them (_fill_from_surface) before the finish and again after it.
+SLIVER_RADIUS_PX = 3
+SLIVER_NEAR_M = 0.01
+SLIVER_SAME_SHARE = 0.5
+
 
 # an island whose mean L moved further than this from the build (or whose
 # a/b moved further than ISLAND_DRIFT_AB) was recoloured, not refined
@@ -420,6 +433,25 @@ def _fill_from_surface(image: np.ndarray, fill: np.ndarray, valid: np.ndarray,
     out = image.copy()
     out[fr, fc] = (np.einsum("nk,nkc->nc", weight, values[nearest]) / weight.sum(axis=1)[:, None]).astype(image.dtype)
     return out
+
+
+def _atlas_slivers(valid: np.ndarray, position: np.ndarray | None) -> np.ndarray:
+    """The island texels on a thin strip packed inside another chart
+    (SLIVER_*); none without a position map."""
+    if position is None or position.shape[:2] != valid.shape:
+        return np.zeros(valid.shape, dtype=bool)
+    same = np.zeros(valid.shape, dtype=np.float32)
+    total = np.zeros(valid.shape, dtype=np.float32)
+    r = SLIVER_RADIUS_PX
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            if max(abs(dy), abs(dx)) != r:
+                continue
+            there = np.roll(valid, (dy, dx), (0, 1))
+            apart = np.linalg.norm(position - np.roll(position, (dy, dx), (0, 1)), axis=-1)
+            same += there & (apart < SLIVER_NEAR_M)
+            total += there
+    return valid & (total > 0) & (same < SLIVER_SAME_SHARE * total)
 
 
 def _tiny_islands(valid: np.ndarray, max_texels: int) -> np.ndarray:
@@ -1432,9 +1464,20 @@ async def run_lite(
     # and the finish step's rim measurement - the outer three texels against
     # 4-10 px in - read the model's outline at 4-10 px as the reference and
     # darkened the correct rim toward it by 4.6 L, a line along every seam
+    # thin strips packed inside another chart take the surface's colour, so
+    # the seam pass samples the right one (SLIVER_*)
+    surface = _surface_position(masks_dir)
+    slivers = _atlas_slivers(valid, surface)
+    if (Path(masks_dir).parent / "protect.png").exists():
+        # not the template's eyes, nose and pads
+        slivers &= ~(np.asarray(Image.open(Path(masks_dir).parent / "protect.png").convert("L")
+                                .resize(texture.size)) > 127)
+    if slivers.any():
+        texture = Image.fromarray(_fill_from_surface(np.asarray(texture.convert("RGB")).copy(), slivers, valid, surface))
     finished, finish_report = finish_painted(texture, base, masks_dir, template_glb, valid,
                                              eye_colour=appearance.get("eye_color"),
                                              flatten_rims=not refined)
+    finish_report["slivers_from_surface"] = int(slivers.sum())
     # confetti islands (claws, eyelid shells, seam fringe on a generated
     # mesh) come out of the finish as grey shards: the seam ring is wider
     # than the island, so the whole island is blended with whatever lies
@@ -1456,12 +1499,12 @@ async def run_lite(
             finished = Image.fromarray(np.clip(out * (1 - weight) + src * weight, 0, 255).astype(np.uint8))
             finish_report["protect_from_build"] = int((keep > 0.5).sum())
     tiny = _tiny_islands(valid, TINY_ISLAND_TEXELS)
-    if tiny.any():
+    if tiny.any() or slivers.any():
         protect_path = Path(masks_dir).parent / "protect.png"
         if protect_path.exists():
             tiny &= ~(np.asarray(Image.open(protect_path).convert("L").resize(finished.size)) > 127)
-        out = _fill_from_surface(np.asarray(finished.convert("RGB")).copy(), tiny, valid,
-                                 _surface_position(masks_dir))
+        # ... and the slivers again: the seam ring repainted their edges
+        out = _fill_from_surface(np.asarray(finished.convert("RGB")).copy(), tiny | slivers, valid, surface)
         # ... and the padding is refilled from the islands, or the grey rim
         # the finish left around a small island stays in the texels the
         # renderer samples just past its edge
