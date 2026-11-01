@@ -1282,9 +1282,11 @@ async def run_lite(
                 and not unanimous_mask):
             features = [f for f in features if f != "dark_muzzle"]
             sable_extra["muzzle_bridge"] = SABLE_MUZZLE_SHARE
-        # a brindle under a mostly dark crown is a dark brindle: black with
-        # brown streaks (texture.apply_overlay). Read on a fawn base it came
-        # out a leopard-spotted puppy (shelter puppy 8)
+        # a brindle under a mostly dark crown is a dark brindle: a dark coat
+        # with brown hairs mixed in (texture._brindle_mottle). Read on a fawn
+        # base it came out a leopard-spotted puppy (shelter puppy 8). Its base
+        # goes through the grey test below with the plain coats: the grey-
+        # brown of its own fur, not black
         dark_share = (face_log.get("face_dark") or [None])[0]
         if (decision.overlay == "brindle" and face_log.get("crown") == "dark" and dark_share is not None
                 and dark_share >= DARK_BRINDLE_SHARE and color_family(decision.base_color) != "dark"):
@@ -1300,14 +1302,16 @@ async def run_lite(
         dark_share, dark_l, cut, tint_a, tint_b = (list(face_log.get("face_dark") or [])
                                                    + [None, None, 0.0, None, None])[:5]
         if face_log.get("crown") == "gray" or (
-                face_log.get("crown") == "dark" and decision.overlay != "brindle" and dark_l is not None
+                face_log.get("crown") == "dark" and dark_l is not None
+                and (decision.overlay != "brindle" or "dark_brindle" in face_log)
                 and cut >= FACE_CUT_MIN_SHARE and dark_share >= FACE_DARK_MIN_SHARE and dark_l >= FACE_GRAY_MIN_L):
             face_log["gray_for_black"] = gray_for_black(region_colors, markings)
             # ... in the grey of its own fur (palette.gray_from_face), measured
             # on a cut-out crop only
             if cut >= FACE_CUT_MIN_SHARE:
                 from .palette import gray_target
-                face_log["gray_lab"] = gray_target(dark_l, tint_a, tint_b)
+                face_log["gray_lab"] = (gray_target(dark_l, tint_a, tint_b, lift=0.0) if "dark_brindle" in face_log
+                                        else gray_target(dark_l, tint_a, tint_b))
         # patches are placed at random over the body, so only on a body the
         # photograph shows from the side: seen from the front the flank is
         # a guess, and a plain coat is the usual one (eval v2 e02: black

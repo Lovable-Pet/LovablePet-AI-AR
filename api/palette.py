@@ -559,16 +559,18 @@ GRAY_WARM_HUE = 65.0
 GRAY_WARM_GAIN = 1.5
 
 
-def gray_target(dark_l: float | None, tint_a: float | None, tint_b: float | None) -> list[float] | None:
+def gray_target(dark_l: float | None, tint_a: float | None, tint_b: float | None,
+                lift: float = GRAY_FACE_LIFT) -> list[float] | None:
     """The gray ramp's mid LAB for a measured dark fur (GRAY_FACE_*,
-    GRAY_WARM_*)."""
+    GRAY_WARM_*). `lift` 0 for a dark brindle: its lighter hairs are drawn
+    over the base and lift it already."""
     if dark_l is None:
         return None
     low, high = GRAY_FACE_L
     axis = np.array([np.cos(np.radians(GRAY_WARM_HUE)), np.sin(np.radians(GRAY_WARM_HUE))])
     warmth = max(0.0, float(np.dot([tint_a or 0.0, tint_b or 0.0], axis))) * GRAY_WARM_GAIN
     a, b = np.clip(warmth * axis, -GRAY_FACE_MAX_AB, GRAY_FACE_MAX_AB)
-    return [round(float(np.clip(dark_l + GRAY_FACE_LIFT, low, high)), 1), round(float(a), 1), round(float(b), 1)]
+    return [round(float(np.clip(dark_l + lift, low, high)), 1), round(float(a), 1), round(float(b), 1)]
 
 
 def gray_from_face(appearance: dict, palette: dict[str, tuple[str, str, str]]) -> dict[str, tuple[str, str, str]]:

@@ -267,6 +267,17 @@ BRINDLE_STREAK_PX = 40
 BRINDLE_COVER = 0.4
 BRINDLE_SOFT = 0.6
 BRINDLE_OPACITY = 0.65
+# A brindle on a DARK coat - the shelters' dark brindle puppies - is not
+# stripes at all but lighter brown hairs mixed into a dark grey-brown coat
+# in small soft clouds; drawn as stripes, fine or coarse, it came out a
+# tiger or wood grain (shelter puppy 8, user: "진짜 개같지 않다"). A random
+# field smoothed over the SURFACE at BRINDLE_MOTTLE_SIGMA_M (no seams),
+# streaked across the hair for BRINDLE_MOTTLE_STREAK of it, at most
+# BRINDLE_MOTTLE_OPACITY strong, in BRINDLE_MOTTLE_COLOUR.
+BRINDLE_MOTTLE_SIGMA_M = 0.0025
+BRINDLE_MOTTLE_OPACITY = 0.35
+BRINDLE_MOTTLE_STREAK = 0.7
+BRINDLE_MOTTLE_COLOUR = "tan"
 MERLE_COVER = 0.35
 # ... and fur painted lighter than this (CIE L*, faded over the range) is left
 # without them: the white markings (cream mid L 88, white 93; fawn 68, tan 56)
@@ -1362,7 +1373,11 @@ def apply_overlay(composed: np.ndarray, gray: np.ndarray, appearance: dict[str, 
         # stripes made a tiger
         second = "chocolate"
     shape = gray.shape
-    if overlay == "brindle" and direction is not None:
+    if (overlay == "brindle" and color_family(base) == "dark" and landmarks is not None
+            and landmarks.position is not None):
+        weight = _brindle_mottle(shape, direction, valid, seed, landmarks)
+        second = BRINDLE_MOTTLE_COLOUR
+    elif overlay == "brindle" and direction is not None:
         # stripes run across the hair: smear noise along the perpendicular
         across = np.stack([-direction[..., 1], direction[..., 0]], axis=-1)
         stripes = anisotropic_noise(shape, across, seed + 7, streak=BRINDLE_STREAK_PX, grain=BRINDLE_GRAIN_PX)
@@ -1371,8 +1386,9 @@ def apply_overlay(composed: np.ndarray, gray: np.ndarray, appearance: dict[str, 
     else:
         field = noise_field(shape, seed + 11)
         cover, soft, opacity = MERLE_COVER, 0.06, 1.0
-    threshold = float(np.quantile(field[valid], 1.0 - cover))
-    weight = np.clip((field - threshold) / max(soft, 1e-6) + 0.5, 0.0, 1.0) * valid * opacity
+    if overlay != "brindle" or color_family(base) != "dark" or landmarks is None or landmarks.position is None:
+        threshold = float(np.quantile(field[valid], 1.0 - cover))
+        weight = np.clip((field - threshold) / max(soft, 1e-6) + 0.5, 0.0, 1.0) * valid * opacity
     # a brindle's or a merle's white markings carry no stripes: drawn over
     # everything, the stripes showed only on the white chest and legs of a
     # dark brindle and made zebra legs (shelter puppy, user). By the painted
@@ -1381,6 +1397,24 @@ def apply_overlay(composed: np.ndarray, gray: np.ndarray, appearance: dict[str, 
     low, high = OVERLAY_SKIP_L
     weight = weight * np.clip((high - lightness) / (high - low), 0.0, 1.0)
     return _blend(composed, paint_region(gray, second, None, palette), weight), overlay
+
+
+def _brindle_mottle(shape: tuple[int, int], direction: np.ndarray | None, valid: np.ndarray, seed: int,
+                    landmarks) -> np.ndarray:
+    """The dark brindle's lighter hairs as a 0..1 weight (BRINDLE_MOTTLE_*):
+    soft clouds on the surface, streaked across the hair."""
+    rng = np.random.default_rng(seed + 7)
+    surface = landmarks.valid if landmarks.valid is not None else valid
+    smooth = smooth_on_surface(rng.random(shape).astype(np.float32), landmarks.position, surface,
+                               BRINDLE_MOTTLE_SIGMA_M)
+    inside = surface & valid
+    field = (smooth - float(smooth[inside].mean())) / max(float(smooth[inside].std()), 1e-6)
+    weight = np.clip(0.5 + field * 0.6, 0.0, 1.0)
+    if direction is not None:
+        across = np.stack([-direction[..., 1], direction[..., 0]], axis=-1)
+        hair = np.clip(0.5 + anisotropic_noise(shape, across, seed + 9, streak=12, grain=1.0) * 0.35, 0.0, 1.0)
+        weight = weight * ((1.0 - BRINDLE_MOTTLE_STREAK) + BRINDLE_MOTTLE_STREAK * hair)
+    return (weight * BRINDLE_MOTTLE_OPACITY * valid).astype(np.float32)
 
 
 @dataclass
