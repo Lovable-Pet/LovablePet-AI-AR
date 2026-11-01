@@ -1566,7 +1566,9 @@ async def run_lite(
         finish_report["tiny_islands_from_surface"] = int(tiny.sum())
     finished, finish_report["head_shards_cleaned"] = _clean_head(finished, masks_dir, valid)
     finished.save(final_dir / f"{resolved.pet_id}.png")
-    glb = replace_base_texture(template_glb, finished, final_dir / f"{resolved.pet_id}.glb")
+    from .whiskers import whisker_colour
+    whisker_rgb, finish_report["whiskers"] = whisker_colour(finished, template_dir)
+    glb = replace_base_texture(template_glb, finished, final_dir / f"{resolved.pet_id}.glb", whisker_rgb=whisker_rgb)
     weights = (appearance.get("shape") or {}).get("weights") or {}
     if weights:
         from .shape import fit_to_template, set_shape, target_names
