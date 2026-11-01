@@ -484,23 +484,18 @@ def _blend(composed: np.ndarray, painted: np.ndarray, mask: np.ndarray) -> np.nd
 # tan-point shiba's photo shows a black rim about a fifth of the ear's width
 # on each side, and painting the whole front tan made the ears read as
 # orange leaves. So the inner ear is pulled in from its boundary with the
-# other regions by this many texels and the band goes to skull (the head
-# colour, which already carries the ear's back). Measured to the nearest
-# texel of another REGION, not to the island edge, so a UV seam through the
-# cup does not put a dark line down its middle. On the shiba template (two
-# ~13.8k-texel cups, ~54 px half-width) 14 px keeps 60% of the cup.
-EAR_RIM_PX = 14
-# The rim's inner edge is softened over this share of the rim's width (at
-# least 1 px). A 1 px step left the kept cup as a hard-edged, jagged
-# island of pale colour inside the dark ear; on the jindo (rim ~8.6 px)
-# this is a 4 px feather, on the shiba ~7 px.
-EAR_RIM_RAMP_SHARE = 0.5
-EAR_RIM_RAMP_PX = 1
-# ... on a cup of this many texels. Another template's cup is a different
-# size on its atlas (the jindo's is 4.9k texels, half the width), and the
-# same 14 px ate most of it, leaving a blob in the middle of the ear; the
-# rim scales with the cup's width (the square root of its texel count).
-EAR_RIM_REF_TEXELS = 13800
+# other regions and the band goes to skull (the head colour, which already
+# carries the ear's back). Measured to the nearest texel of another REGION on
+# the cup's own UV island, not to the island edge, so a UV seam through the
+# cup does not put a dark line down its middle. The band is this share of the
+# cup's depth (the 95th percentile of that distance over the cup, so it
+# scales with the cup on every template's atlas).
+EAR_RIM_SHARE = 0.2
+# ... and the inner colour fades in over a further share of the depth. The
+# earlier rim (0.34 of the depth, faded over 0.17) left the inner colour as a
+# hard-edged patch in the middle of the cup on every template (user: "귀쪽
+# 털영역도 잘 안되있다").
+EAR_RIM_RAMP_SHARE = 0.25
 
 
 class MaskLibrary:
@@ -512,8 +507,8 @@ class MaskLibrary:
     put. The same field jitters every mask, so two neighbouring regions'
     edges move together and leave no gap.
 
-    ears_inner comes back pulled in by EAR_RIM_PX and skull gains the band
-    that was taken (see EAR_RIM_PX); every consumer of the masks - the
+    ears_inner comes back pulled in by its rim and skull gains the band
+    that was taken (see EAR_RIM_SHARE); every consumer of the masks - the
     build, the refinement's per-region restore, the projection - sees the
     same shapes."""
 
@@ -542,13 +537,24 @@ class MaskLibrary:
                 self._raw[region] = np.asarray(image, dtype=np.float32) / 255.0
         return self._raw[region]
 
+    def _islands(self) -> np.ndarray | None:
+        """The atlas's UV islands, labelled; from the geometry's valid map
+        (set by the caller, or beside the masks), None without one."""
+        valid = self.valid
+        path = self.dir.parent / "geometry" / "valid.npy"
+        if valid is None and path.exists():
+            valid = np.load(path) > 0.5
+        if valid is None or valid.shape != (self.size[1], self.size[0]):
+            return None
+        return ndimage.label(valid)[0]
+
     def _ear_rim(self) -> np.ndarray | None:
-        """The band of ears_inner within EAR_RIM_PX of another region, as a
+        """The band of ears_inner near another region (EAR_RIM_SHARE), as a
         soft 0..1 weight; None when there is no inner-ear mask."""
         if "ear_rim" in self._cache:
             return self._cache["ear_rim"]
         inner = self._raw_mask("ears_inner")
-        if inner is None or EAR_RIM_PX <= 0:
+        if inner is None or EAR_RIM_SHARE <= 0:
             self._cache["ear_rim"] = None
             return None
         # a texel is "another region's" where that region's mask outweighs
@@ -562,12 +568,26 @@ class MaskLibrary:
             mask = self._raw_mask(name)
             if mask is not None:
                 other |= (mask > 0.5) & (mask > inner)
-        distance = ndimage.distance_transform_edt(~other)
-        labels, count = ndimage.label(inner > 0.5)
-        cup = int(np.bincount(labels.ravel())[1:].max()) if count else EAR_RIM_REF_TEXELS
-        rim_px = EAR_RIM_PX * float(np.sqrt(cup / EAR_RIM_REF_TEXELS))
-        ramp_px = max(EAR_RIM_RAMP_PX, rim_px * EAR_RIM_RAMP_SHARE)
-        inside = np.clip((distance - rim_px) / max(ramp_px, 1e-6), 0.0, 1.0).astype(np.float32)
+        distance = ndimage.distance_transform_edt(~other).astype(np.float32)
+        islands = self._islands()
+        if islands is not None:
+            # ... on the cup's own island: the nearest other-region texel in
+            # the atlas was often across a gutter, on another island, and bit
+            # circles out of the cup - a scalloped pale blob in the ear
+            # (user: "귀쪽 털영역"). A splinter island with no other region
+            # on it (a fringe piece at the ear's edge) keeps the atlas distance.
+            for index in np.unique(islands[(inner > 0.5) & (islands > 0)]):
+                rows, cols = np.nonzero(islands == index)
+                box = (slice(rows.min(), rows.max() + 1), slice(cols.min(), cols.max() + 1))
+                sources = other[box] & (islands[box] == index)
+                if not sources.any():
+                    continue
+                own = islands[box] == index
+                distance[box][own] = ndimage.distance_transform_edt(~sources)[own]
+        depths = distance[(inner > 0.5) & np.isfinite(distance)]
+        depth = float(np.percentile(depths, 95)) if depths.size else 0.0
+        rim_px, ramp_px = EAR_RIM_SHARE * depth, max(EAR_RIM_RAMP_SHARE * depth, 1.0)
+        inside = np.clip((distance - rim_px) / ramp_px, 0.0, 1.0).astype(np.float32)
         rim = inner * (1.0 - inside)
         self.ear_rim_texels = int((rim > 0.5).sum())
         self._cache["ear_rim"] = rim
