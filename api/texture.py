@@ -256,9 +256,17 @@ GRADIENT_REACH = {"eye": (5.0, 35.0)}
 GRADIENT_CAP = {"ear_base": 0.6}
 
 # Overlays.
-# (36 drew broad tiger bands; a brindle's streaks are fine)
-BRINDLE_PERIOD_PX = 20
+# A brindle's streaks: noise BRINDLE_GRAIN_PX wide smeared BRINDLE_STREAK_PX
+# across the hair, the top BRINDLE_COVER of it painted, its edge soft over
+# BRINDLE_SOFT of the field's spread and at most BRINDLE_OPACITY strong.
+# (Grain 5 px, smear 20 px and a hard edge drew leopard blotches - shelter
+# puppy 8, user: "표범처럼 보임, 개 같지 않음"; the photo's streaks are thin,
+# long and low in contrast.)
+BRINDLE_GRAIN_PX = 2.0
+BRINDLE_STREAK_PX = 40
 BRINDLE_COVER = 0.4
+BRINDLE_SOFT = 0.6
+BRINDLE_OPACITY = 0.65
 MERLE_COVER = 0.35
 # ... and fur painted lighter than this (CIE L*, faded over the range) is left
 # without them: the white markings (cream mid L 88, white 93; fawn 68, tan 56)
@@ -1357,14 +1365,14 @@ def apply_overlay(composed: np.ndarray, gray: np.ndarray, appearance: dict[str, 
     if overlay == "brindle" and direction is not None:
         # stripes run across the hair: smear noise along the perpendicular
         across = np.stack([-direction[..., 1], direction[..., 0]], axis=-1)
-        stripes = anisotropic_noise(shape, across, seed + 7, streak=BRINDLE_PERIOD_PX, grain=BRINDLE_PERIOD_PX / 4)
+        stripes = anisotropic_noise(shape, across, seed + 7, streak=BRINDLE_STREAK_PX, grain=BRINDLE_GRAIN_PX)
         field = (stripes - stripes.min()) / max(float(stripes.max() - stripes.min()), 1e-6)
-        cover = BRINDLE_COVER
+        cover, soft, opacity = BRINDLE_COVER, BRINDLE_SOFT * float(field[valid].std()), BRINDLE_OPACITY
     else:
         field = noise_field(shape, seed + 11)
-        cover = MERLE_COVER
+        cover, soft, opacity = MERLE_COVER, 0.06, 1.0
     threshold = float(np.quantile(field[valid], 1.0 - cover))
-    weight = np.clip((field - threshold) / 0.06 + 0.5, 0.0, 1.0) * valid
+    weight = np.clip((field - threshold) / max(soft, 1e-6) + 0.5, 0.0, 1.0) * valid * opacity
     # a brindle's or a merle's white markings carry no stripes: drawn over
     # everything, the stripes showed only on the white chest and legs of a
     # dark brindle and made zebra legs (shelter puppy, user). By the painted
