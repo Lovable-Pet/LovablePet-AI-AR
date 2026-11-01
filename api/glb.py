@@ -24,6 +24,18 @@ from pygltflib import GLTF2, BufferView, Image as GLTFImage
 # for its own look, and a stray baseColorFactor or metallic term tints or
 # mirrors the new texture instead of showing it.
 MATTE_ROUGHNESS = 0.85
+# The whisker strands' own material (ar_pipeline/split_whiskers.py): no
+# texture, one colour per dog in its baseColorFactor (api/whiskers.py).
+WHISKER_MATERIAL = "whiskers"
+
+
+def srgb_to_linear(rgb: tuple[int, int, int]) -> list[float]:
+    """An 8-bit sRGB colour as the linear factors glTF materials take."""
+    out = []
+    for channel in rgb:
+        c = channel / 255.0
+        out.append(round(c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4, 5))
+    return out
 
 
 class TextureSlotMissing(RuntimeError):
@@ -157,11 +169,14 @@ def extract_normal_texture(glb_path: str | Path) -> Image.Image | None:
 def replace_base_texture(
     glb_path: str | Path, texture: Image.Image, out_path: str | Path, fmt: str = "PNG",
     body_material: str | None = None, normal: Image.Image | None = None,
+    whisker_rgb: tuple[int, int, int] | None = None,
 ) -> Path:
     """Write a copy of the GLB whose body base color texture is `texture`.
 
     Only the body material is touched (see body_material_index): the eyes,
     whiskers and nose keep their own textures, alpha and material settings.
+    `whisker_rgb` sets the colour of a split template's WHISKER_MATERIAL
+    (a template without one ignores it).
 
     The binary chunk is repacked rather than appended to, so the new file does
     not carry the replaced image as dead weight. Repacking is safe because an
@@ -210,6 +225,12 @@ def replace_base_texture(
 
     _make_matte(gltf, only=body)
     _drop_vertex_colors(gltf, only=body)
+    if whisker_rgb is not None:
+        from .whiskers import WHISKER_ROUGHNESS
+        for material in gltf.materials or []:
+            if (material.name or "") == WHISKER_MATERIAL and material.pbrMetallicRoughness is not None:
+                material.pbrMetallicRoughness.baseColorFactor = [*srgb_to_linear(whisker_rgb), 1.0]
+                material.pbrMetallicRoughness.roughnessFactor = WHISKER_ROUGHNESS
 
     gltf.images[target] = GLTFImage(
         name=gltf.images[target].name,
