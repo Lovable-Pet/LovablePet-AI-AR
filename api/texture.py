@@ -1135,12 +1135,23 @@ def compose_body(
             if landmarks is not None and landmarks.position is not None:
                 rng = np.random.default_rng(PATCH_SEED + order)
                 surface = landmarks.valid if landmarks.valid is not None else mask > -1
+                # sampled as coarsely as the blobs are wide: the cost grows
+                # with the samples times the neighbours within 2.5 sigma
                 smooth = smooth_on_surface(rng.random(mask.shape).astype(np.float32), landmarks.position,
-                                           surface, PATCH_SIGMA_M)
+                                           surface, PATCH_SIGMA_M,
+                                           stride=max(SURFACE_STRIDE, round(SURFACE_STRIDE * PATCH_SIGMA_M / 0.035)))
                 inside = (mask > 0.5) & surface
                 if inside.any():
                     spread = float(smooth[inside].std()) or 1.0
                     field = 0.5 + (smooth - float(smooth[inside].mean())) / spread * PATCH_FIELD_SPREAD
+                    # on the top of the body: the back region runs down the
+                    # flanks onto the upper legs and the tail, and patches
+                    # scattered over all of it came out a cow's spots down to
+                    # the knees where the dog had a saddle and a rump patch
+                    # over white legs (shelter maltese 7)
+                    z = landmarks.position[..., 2]
+                    low, high = np.percentile(z[inside], [10, 90])
+                    field = field + PATCH_TOP_BIAS * (np.clip((z - low) / max(high - low, 1e-6), 0.0, 1.0) - 0.5)
             blob = _select(mask, field, area)
             placed.append(f"patches:{region}")
         if blob is None and marking_type == "blaze" and landmarks is not None:
@@ -1242,11 +1253,17 @@ def compose_body(
 
 
 # Patches (piebald body spots) come from a random field smoothed over the
-# surface with this sigma: blobs about 10-15 cm across on the jindo. The
-# field is rescaled so EDGE_SOFTNESS gives a fur-soft, not a blurred, edge.
-PATCH_SIGMA_M = 0.035
+# surface with this sigma. The field is rescaled so EDGE_SOFTNESS gives a
+# fur-soft, not a blurred, edge. At 3.5 cm (blobs 10-15 cm across) a
+# parti-coloured dog with one saddle and a rump patch came out spotted all
+# over like a cow (shelter maltese 7); a part-coloured coat is a few large
+# patches.
+PATCH_SIGMA_M = 0.07
 PATCH_FIELD_SPREAD = 0.25
 PATCH_SEED = 4242
+# the field's lift from the bottom tenth of the region's height to the top
+# tenth (in the field's units: its spread is PATCH_FIELD_SPREAD)
+PATCH_TOP_BIAS = 0.4
 
 
 # Sable: the second colour laid over the top of the dog as dark-tipped hair.
