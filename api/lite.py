@@ -1125,7 +1125,14 @@ async def run_lite(
                     if votes.get("crown_answer") == "dark":
                         from .palette import face_dark
                         face_log["face_dark"] = list(face_dark(crop.image))
-                    if votes.get("crown_answer") == "dark" and cheeks in ("cream", "white"):
+                    # ... on a cut-out crop only, as the grey test: in an uncut
+                    # crop the "light fur" was the white clothes and gloves round
+                    # a black-and-tan puppy (shelter puppy 10: L* 69, a* b* 0)
+                    crop_cut = (face_log.get("face_dark") or [None, None, 0.0])[2]
+                    light_cheeks = votes.get("crown_answer") == "dark" and cheeks in ("cream", "white")
+                    if light_cheeks and crop_cut < FACE_CUT_MIN_SHARE:
+                        face_log["face_light"] = {"skipped": f"uncut crop (cut {crop_cut})"}
+                    elif light_cheeks:
                         from .palette import cheeks_from_photo, face_light
                         share, light_lab = face_light(crop.image)
                         verdict = cheeks_from_photo(cheeks, share, light_lab)
