@@ -1298,13 +1298,20 @@ async def run_lite(
         if (face_log.get("face_light") or {}).get("cheeks") == "dark":
             face_log["cheeks_to_head"] = cheeks_to_head(region_colors)
         # a crown read dark whose dark fur is lighter than black in the crop
-        # (palette.face_dark): a smoky grey cap, not a black one
+        # (palette.face_dark): a smoky grey cap, not a black one - on a coat
+        # read light or coloured. A coat read black keeps its black: in
+        # daylight a black puppy's crown measured L* 28.9, the grey cap it
+        # was meant for 27.2, and the rule turned all ten of its black
+        # regions grey (shelter maltese 8; its back measured L* 12)
         dark_share, dark_l, cut, tint_a, tint_b = (list(face_log.get("face_dark") or [])
                                                    + [None, None, 0.0, None, None])[:5]
+        black_coat = decision.base_color == "black" and decision.second_color != "gray"
+        smoky = (face_log.get("crown") == "dark" and dark_l is not None
+                 and cut >= FACE_CUT_MIN_SHARE and dark_share >= FACE_DARK_MIN_SHARE and dark_l >= FACE_GRAY_MIN_L)
+        if smoky and black_coat and "dark_brindle" not in face_log:
+            face_log["gray_skipped"] = f"coat read black (dark L {dark_l})"
         if face_log.get("crown") == "gray" or (
-                face_log.get("crown") == "dark" and dark_l is not None
-                and (decision.overlay != "brindle" or "dark_brindle" in face_log)
-                and cut >= FACE_CUT_MIN_SHARE and dark_share >= FACE_DARK_MIN_SHARE and dark_l >= FACE_GRAY_MIN_L):
+                smoky and ("dark_brindle" in face_log or (decision.overlay != "brindle" and not black_coat))):
             face_log["gray_for_black"] = gray_for_black(region_colors, markings)
             # ... in the grey of its own fur (palette.gray_from_face), measured
             # on a cut-out crop only
