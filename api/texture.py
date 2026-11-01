@@ -256,9 +256,13 @@ GRADIENT_REACH = {"eye": (5.0, 35.0)}
 GRADIENT_CAP = {"ear_base": 0.6}
 
 # Overlays.
-BRINDLE_PERIOD_PX = 36
+# (36 drew broad tiger bands; a brindle's streaks are fine)
+BRINDLE_PERIOD_PX = 20
 BRINDLE_COVER = 0.4
 MERLE_COVER = 0.35
+# ... and fur painted lighter than this (CIE L*, faded over the range) is left
+# without them: the white markings (cream mid L 88, white 93; fawn 68, tan 56)
+OVERLAY_SKIP_L = (76.0, 82.0)
 
 LUMA = (0.2126, 0.7152, 0.0722)
 
@@ -1342,6 +1346,13 @@ def apply_overlay(composed: np.ndarray, gray: np.ndarray, appearance: dict[str, 
     second = appearance.get("second_color") or ("black" if overlay == "brindle" else "chocolate")
     if second not in FUR_COLORS:
         second = "black"
+    base = str(appearance.get("base_color") or "").lower()
+    if overlay == "brindle" and color_family(base) == "dark" and color_family(second) == "dark":
+        # a dark brindle is black over brown: black stripes on a black base
+        # drew nothing, and the brindle puppy came out plain black (shelter
+        # puppy 8); its brown shows as the stripes instead - dark brown, tan
+        # stripes made a tiger
+        second = "chocolate"
     shape = gray.shape
     if overlay == "brindle" and direction is not None:
         # stripes run across the hair: smear noise along the perpendicular
@@ -1354,6 +1365,13 @@ def apply_overlay(composed: np.ndarray, gray: np.ndarray, appearance: dict[str, 
         cover = MERLE_COVER
     threshold = float(np.quantile(field[valid], 1.0 - cover))
     weight = np.clip((field - threshold) / 0.06 + 0.5, 0.0, 1.0) * valid
+    # a brindle's or a merle's white markings carry no stripes: drawn over
+    # everything, the stripes showed only on the white chest and legs of a
+    # dark brindle and made zebra legs (shelter puppy, user). By the painted
+    # lightness, so a white blaze placed as a marking is spared too.
+    lightness = 116.0 * np.cbrt(np.clip(composed @ np.asarray(LUMA, dtype=np.float32), 0.0, 1.0)) - 16.0
+    low, high = OVERLAY_SKIP_L
+    weight = weight * np.clip((high - lightness) / (high - low), 0.0, 1.0)
     return _blend(composed, paint_region(gray, second, None, palette), weight), overlay
 
 
