@@ -149,7 +149,8 @@ python -m ar_pipeline.tidy_regions --slug <slug>
 python ar_pipeline/render_anchors.py --template <slug>_small
 ```
 
-새 템플릿을 만든 뒤 한 번: UV가 다른 곳 섬에 놓인 삼각형을 제자리 표면으로(`python -m ar_pipeline.fix_uv_overlaps --slug <slug>`),
+새 템플릿을 만든 뒤 한 번: UV가 다른 곳 섬에 놓인 삼각형을 제자리 표면으로(`python -m ar_pipeline.fix_uv_overlaps --slug <slug>`;
+이미 돌린 템플릿에 꼭짓점만 걸친 부분 겹침을 고칠 때는 `--partial-only`),
 눈·코 보호 영역만 다시(`python ar_pipeline/build_landmarks.py <glb> <템플릿 폴더> <geometry> --protect-only`).
 위 순서를 다시 돌리지 않은 템플릿에 눈 둘레 마스크(`_eye_ring.png`)만 만들려면 `python -m ar_pipeline.open_face_masks --slug <slug> --eye-ring-only`.
 
