@@ -226,9 +226,11 @@ def replace_base_texture(
     _make_matte(gltf, only=body)
     _drop_vertex_colors(gltf, only=body)
     if whisker_rgb is not None:
+        from .whiskers import WHISKER_ROUGHNESS
         for material in gltf.materials or []:
             if (material.name or "") == WHISKER_MATERIAL and material.pbrMetallicRoughness is not None:
                 material.pbrMetallicRoughness.baseColorFactor = [*srgb_to_linear(whisker_rgb), 1.0]
+                material.pbrMetallicRoughness.roughnessFactor = WHISKER_ROUGHNESS
 
     gltf.images[target] = GLTFImage(
         name=gltf.images[target].name,

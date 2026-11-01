@@ -23,6 +23,10 @@ the material WHISKER_MATERIAL (no texture; the colour is its
 baseColorFactor). The primitive shares the body's vertex accessors and
 morph targets, so the skin, clips and shape keys apply to it unchanged.
 
+The strands are also drawn in toward their axes to WHISKER_SLIM_KEEP of
+their width (slim_strands): as modelled, 2 mm wide on a 5 cm muzzle, they
+read as black wire once they stopped taking the muzzle's colour.
+
 The coat under the strand roots (WHISKER_PAD_M round them, minus the
 texels baked on the strands themselves) is written to whisker_pad.png in
 the template folder: api.whiskers reads the finished coat there to pick
@@ -34,7 +38,8 @@ whisker primitive on the old ones). Back up the GLB first; it is edited in
 place unless --out is given.
 
 Usage:
-    python -m ar_pipeline.split_whiskers --slug jindo_puppy [--size small] [--out x.glb]
+    python -m ar_pipeline.split_whiskers --slug jindo_puppy [--size small] [--out x.glb] [--slim 0.5]
+    python -m ar_pipeline.split_whiskers --slug jindo_puppy --source work/backup_whiskers_1101/skeleton_jindo_puppy_small.glb
 """
 
 from __future__ import annotations
@@ -65,6 +70,8 @@ WHISKER_THICK_M = 0.0025
 WHISKER_MIN_LENGTH_M = 0.005
 WHISKER_GROW_M = 0.0025
 WHISKER_GROW_STEPS = 3
+WHISKER_SLIM_KEEP = 0.5
+WHISKER_SLIM_RADIUS_M = 0.0025
 WHISKER_PAD_M = 0.008
 WHISKER_CLEAR_M = 0.0015
 
@@ -163,6 +170,26 @@ def find_whiskers(mesh: TemplateMesh, nose: np.ndarray, eyes: np.ndarray) -> tup
     return np.nonzero(picked)[0], strands
 
 
+def slim_strands(points: np.ndarray, tri: np.ndarray, strand: np.ndarray, keep: float) -> np.ndarray:
+    """The vertex positions with each strand drawn in toward its axis to
+    `keep` of its width. The axis at a vertex is the centroid of the strand
+    vertices within WHISKER_SLIM_RADIUS_M (wider than the tube, so the far
+    side counts). The root rings, welded to the muzzle, move too: held in
+    place they stayed as barbs round a thinned strand, and the skin
+    triangles they share move by under a millimetre. A vertex split off
+    along a UV seam at the same spot moves with them, or the skin would
+    crack open round the root."""
+    used = np.unique(tri[strand].ravel())
+    _, spot = np.unique(np.round(points / 1e-5).astype(np.int64), axis=0, return_inverse=True)
+    spot = spot.reshape(-1)
+    shift = np.zeros((int(spot.max()) + 1, 3))
+    tree = cKDTree(points[used])
+    for index, near in zip(used, tree.query_ball_point(points[used], WHISKER_SLIM_RADIUS_M)):
+        axis = points[used[near]].mean(0)
+        shift[spot[index]] = (axis - points[index]) * (1.0 - keep)
+    return points + shift[spot]
+
+
 def whisker_pad(mesh: TemplateMesh, whisker_tris: np.ndarray, position: np.ndarray,
                 valid: np.ndarray) -> np.ndarray:
     """The texels of the muzzle round the strand roots: within WHISKER_PAD_M
@@ -193,18 +220,22 @@ def main() -> None:
     parser.add_argument("--slug", required=True)
     parser.add_argument("--size", default="small")
     parser.add_argument("--out", default=None, help="write here instead of over the template GLB")
+    parser.add_argument("--source", default=None, help="read this GLB instead (an unsplit backup)")
+    parser.add_argument("--slim", type=float, default=WHISKER_SLIM_KEEP,
+                        help="keep this share of each strand's width (1 leaves them as modelled)")
     args = parser.parse_args()
     glb = ROOT / "output" / f"skeleton_{args.slug}_{args.size}.glb"
+    source = Path(args.source) if args.source else glb
     template = ROOT / "output" / "templates" / f"{args.slug}_{args.size}"
 
-    gltf = GLTF2().load(str(glb))
+    gltf = GLTF2().load(str(source))
     if any((m.name or "") == WHISKER_MATERIAL for m in gltf.materials or []):
-        raise SystemExit(f"[whiskers] {glb.name} already has a {WHISKER_MATERIAL!r} material")
+        raise SystemExit(f"[whiskers] {source.name} already has a {WHISKER_MATERIAL!r} material")
     points = json.loads((template / "landmarks.json").read_text(encoding="utf-8"))["points"]
     nose = np.asarray(points["nose"]["world"], dtype=np.float64)
     eyes = (np.asarray(points["left_eye"]["world"]) + np.asarray(points["right_eye"]["world"])) / 2.0
 
-    mesh = TemplateMesh.load(glb)
+    mesh = TemplateMesh.load(source)
     whisker_tris, strands = find_whiskers(mesh, nose, eyes)
     if not strands:
         raise SystemExit("[whiskers] no whisker strands found")
@@ -245,6 +276,12 @@ def main() -> None:
     append(gltf, blob, whisker_prim.indices, tri[strand].reshape(-1).astype(index_dtype), 34963)
     append(gltf, blob, body_prim.indices, tri[~strand].reshape(-1).astype(index_dtype), 34963)
     owner.primitives.append(whisker_prim)
+    if args.slim < 1.0:
+        # both primitives read this accessor; only strand vertices move
+        points = read(gltf, bytes(blob), body_prim.attributes.POSITION)
+        slim = slim_strands(points.astype(np.float64), tri.astype(np.int64), strand, args.slim)
+        append(gltf, blob, body_prim.attributes.POSITION, slim.astype(points.dtype), 34962)
+        print(f"[whiskers] strands slimmed to {args.slim:.2f} of their width")
 
     blob = repack(gltf, blob)
     gltf.buffers[0].byteLength = len(blob)

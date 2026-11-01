@@ -19,8 +19,9 @@ from PIL import Image
 
 WHISKER_DARK_RGB = (34, 30, 28)
 WHISKER_LIGHT_RGB = (236, 233, 226)
-# a slight sheen: hair, not the coat's matte fur
-WHISKER_ROUGHNESS = 0.45
+# nearly as matte as the coat: at 0.45 the faceted tubes caught a
+# highlight spiralling round them and read as twisted wire
+WHISKER_ROUGHNESS = 0.8
 # the pads count as light from this L* up, with chroma at most this
 WHISKER_LIGHT_L = 65.0
 WHISKER_LIGHT_MAX_CHROMA = 20.0
