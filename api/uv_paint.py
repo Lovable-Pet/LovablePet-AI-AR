@@ -417,8 +417,11 @@ def finish_painted(painted: Image.Image, base_texture: Image.Image, masks_dir: s
     if mesh_glb is not None and Path(mesh_glb).exists():
         from .mesh import TemplateMesh
         from .seams import smooth_seams
+        from .assets import geometry_dir_for
         mesh = TemplateMesh.load(mesh_glb, base_texture.size)
-        composed, report["seams"] = smooth_seams(np.clip(composed, 0, 1), mesh)
+        position_path = geometry_dir_for(masks_dir) / "position.npy"
+        position = np.load(position_path) if position_path.exists() else None
+        composed, report["seams"] = smooth_seams(np.clip(composed, 0, 1), mesh, position=position, valid=valid)
 
     return Image.fromarray((to_srgb(np.clip(composed, 0, 1)) * 255).astype(np.uint8), mode="RGB"), report
 
