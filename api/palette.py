@@ -506,10 +506,12 @@ FACE_GRAY_MIN_L = 24.0
 FACE_CUT_MIN_SHARE = 0.05
 
 
-def face_dark(crop: Image.Image) -> tuple[float | None, float | None, float]:
-    """(share, median L*, cut) of the dark fur (L* under 55) in the upper
-    face of a head crop, among the dog's pixels there; `cut` is the share of
-    the whole crop that is the cut-out's flat grey fill."""
+def face_dark(crop: Image.Image) -> tuple[float | None, float | None, float, float | None, float | None]:
+    """(share, median L*, cut, a*, b*) of the dark fur (L* under 55) in the
+    upper face of a head crop, among the dog's pixels there; `cut` is the
+    share of the whole crop that is the cut-out's flat grey fill, and a*/b*
+    the dark fur's median taken relative to the crop's own white fur (L*
+    over 70, near grey) when it has some, so a cast in the photo cancels."""
     from .fur import to_linear
     from .projection import linear_to_lab
 
@@ -524,8 +526,63 @@ def face_dark(crop: Image.Image) -> tuple[float | None, float | None, float]:
     dark = (lab[..., 0] < 55.0) & ~fill
     dog = int((~fill).sum())
     if not dog or not dark.any():
-        return None, None, cut
-    return round(float(dark.sum()) / dog, 3), round(float(np.median(lab[..., 0][dark])), 1), cut
+        return None, None, cut, None, None
+    tint = np.median(lab[dark][:, 1:], axis=0)
+    white = (lab[..., 0] > 70.0) & ~fill & (np.hypot(lab[..., 1], lab[..., 2]) < 12.0)
+    if int(white.sum()) >= FACE_CREAM_MIN_PIXELS:
+        tint = tint - np.median(lab[white][:, 1:], axis=0)
+    return (round(float(dark.sum()) / dog, 3), round(float(np.median(lab[..., 0][dark])), 1), cut,
+            round(float(tint[0]), 1), round(float(tint[1]), 1))
+
+
+# A crown read grey (lite gray_for_black) is painted the grey of its own
+# dark fur: the gray ramp (mid L* 53, a touch blue) made a white puppy's
+# smoky grey-brown eye patches (photo L* 27, a* +3.6 against its white fur)
+# a light blue-grey cap (shelter puppy 14, user: "저런 회색이 아닐 것 - 따뜻한
+# 회갈색"). The ramp moves so its mid stop is the measured fur
+# GRAY_FACE_LIFT lighter (the median takes in the shadows, as a black dog's
+# fur measures L* 12-16 against the black mid 7), L* within GRAY_FACE_L, its
+# a*/b* within GRAY_FACE_MAX_AB of neutral.
+GRAY_FACE_LIFT = 8.0
+GRAY_FACE_L = (30.0, 50.0)
+GRAY_FACE_MAX_AB = 6.0
+# The tint is kept along the warm axis only (a fawn's hue, GRAY_WARM_HUE
+# degrees), GRAY_WARM_GAIN times: taken as measured, puppy 14's (+3.6, -0.2)
+# came out mauve; a cool tint is a cast, not a grey-brown coat.
+GRAY_WARM_HUE = 65.0
+GRAY_WARM_GAIN = 1.5
+
+
+def gray_target(dark_l: float | None, tint_a: float | None, tint_b: float | None) -> list[float] | None:
+    """The gray ramp's mid LAB for a measured dark fur (GRAY_FACE_*,
+    GRAY_WARM_*)."""
+    if dark_l is None:
+        return None
+    low, high = GRAY_FACE_L
+    axis = np.array([np.cos(np.radians(GRAY_WARM_HUE)), np.sin(np.radians(GRAY_WARM_HUE))])
+    warmth = max(0.0, float(np.dot([tint_a or 0.0, tint_b or 0.0], axis))) * GRAY_WARM_GAIN
+    a, b = np.clip(warmth * axis, -GRAY_FACE_MAX_AB, GRAY_FACE_MAX_AB)
+    return [round(float(np.clip(dark_l + GRAY_FACE_LIFT, low, high)), 1), round(float(a), 1), round(float(b), 1)]
+
+
+def gray_from_face(appearance: dict, palette: dict[str, tuple[str, str, str]]) -> dict[str, tuple[str, str, str]]:
+    """The palette with the gray ramp moved to appearance["gray_lab"] (every
+    stop by the same LAB delta); unchanged without it."""
+    from .fur import hex_to_linear, to_srgb
+    from .projection import lab_to_linear, linear_to_lab
+
+    target = appearance.get("gray_lab")
+    if not target:
+        return palette
+    stops = palette.get("gray") or FUR_PALETTE["gray"]
+    labs = [linear_to_lab(hex_to_linear(stop)[None, None, :])[0, 0] for stop in stops]
+    delta = np.asarray(target, dtype=np.float32) - labs[1]
+    moved = []
+    for lab in labs:
+        lab = np.clip(lab + delta, [0.0, -128.0, -128.0], [100.0, 127.0, 127.0]).astype(np.float32)
+        rgb = to_srgb(lab_to_linear(lab[None, None, :])[0, 0])
+        moved.append(_rgb_to_hex(tuple(int(round(float(np.clip(c, 0, 1)) * 255)) for c in rgb)))
+    return {**palette, "gray": tuple(moved)}
 
 
 def cheeks_from_photo(cheeks: str, share: float | None, lab: list[float] | None) -> str:

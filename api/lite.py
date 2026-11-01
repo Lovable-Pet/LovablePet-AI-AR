@@ -1287,11 +1287,17 @@ async def run_lite(
             face_log["cheeks_to_head"] = cheeks_to_head(region_colors)
         # a crown read dark whose dark fur is lighter than black in the crop
         # (palette.face_dark): a smoky grey cap, not a black one
-        dark_share, dark_l, cut = (list(face_log.get("face_dark") or []) + [None, None, 0.0])[:3]
+        dark_share, dark_l, cut, tint_a, tint_b = (list(face_log.get("face_dark") or [])
+                                                   + [None, None, 0.0, None, None])[:5]
         if face_log.get("crown") == "gray" or (
                 face_log.get("crown") == "dark" and decision.overlay != "brindle" and dark_l is not None
                 and cut >= FACE_CUT_MIN_SHARE and dark_share >= FACE_DARK_MIN_SHARE and dark_l >= FACE_GRAY_MIN_L):
             face_log["gray_for_black"] = gray_for_black(region_colors, markings)
+            # ... in the grey of its own fur (palette.gray_from_face), measured
+            # on a cut-out crop only
+            if cut >= FACE_CUT_MIN_SHARE:
+                from .palette import gray_target
+                face_log["gray_lab"] = gray_target(dark_l, tint_a, tint_b)
         # patches are placed at random over the body, so only on a body the
         # photograph shows from the side: seen from the front the flank is
         # a guess, and a plain coat is the usual one (eval v2 e02: black
@@ -1343,6 +1349,8 @@ async def run_lite(
             "eye_ring": face_log.get("eye_ring") if face_log.get("eye_ring") in ("light", "dark") else None,
             # the light face fur's LAB on a dark-crowned, cream-cheeked dog
             "face_light_lab": face_log.get("face_light_lab"),
+            # the grey of a smoky crown's own fur (palette.gray_from_face)
+            "gray_lab": face_log.get("gray_lab"),
             "inferred_regions": [e["region"] for e in region_colors
                                  if str(e.get("source", "")).startswith("pattern")],
         }
@@ -1427,9 +1435,10 @@ async def run_lite(
     chocolate = chocolate_crown(appearance.get("region_colors") or [], measured)
     if chocolate:
         log["steps"].setdefault("face", {})["crown_chocolate"] = chocolate
-    from .palette import cream_from_face, relative_cream
+    from .palette import cream_from_face, gray_from_face, relative_cream
     palette = relative_cream(appearance, palette or {})
     palette = cream_from_face(appearance, palette)
+    palette = gray_from_face(appearance, palette)
     if "cream" in palette:
         palette_report["cream_relative"] = list(palette["cream"])
     log["steps"]["measure"] = {"regions": {r: v["lab"] for r, v in measured.items()}, "ramps": palette_report}
