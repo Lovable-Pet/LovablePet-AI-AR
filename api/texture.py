@@ -57,6 +57,7 @@ animal to whoever adopted it.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -528,6 +529,11 @@ class MaskLibrary:
         self.jitter = jitter
         self.valid: np.ndarray | None = None
         self.ear_rim_texels = 0
+        # ar_pipeline/tidy_regions.py already cut the chest mask to the part
+        # that faces forward (the _chest_front test, without the jitter)
+        settings = self.dir.parent / "template.json"
+        self.chest_trimmed = bool(settings.exists()
+                                  and json.loads(settings.read_text(encoding="utf-8")).get("regions_tidied"))
 
     def _raw_mask(self, region: str) -> np.ndarray | None:
         """The mask as stage 1 baked it, resized, before the rim rule and
@@ -885,8 +891,11 @@ def compose_body(
             field = _proximity(neighbour) if neighbour is not None else noise
             applied = _select(mask, field, keep)
 
+        # ... and on a tidied template the mask is that already: the test
+        # again, with its jitter, only scattered base-coat specks where the
+        # fur's normals hover at the threshold (the retriever's bib)
         if (region == "chest" and landmarks is not None and landmarks.normal is not None
-                and color_name != base_color):
+                and color_name != base_color and not masks.chest_trimmed):
             applied = applied * _chest_front(landmarks, masks.jitter)
             if debug:
                 _save_debug(debug, f"02_{order:02d}_chest_front", applied)
