@@ -390,7 +390,9 @@ def palette_for(appearance: dict, photo_paths: list[str | Path]) -> tuple[dict, 
 # turn a fawn coat chocolate. Neutral names (white, black, gray) keep the
 # table: a white bib in shadow is still white.
 MEASURED_STRENGTH = 0.7
-MEASURED_MAX_SHIFT_L = 18.0
+# (18 until 11-01: a yellow puppy's cells, in the shade of its own coat, read
+# L 52 against its photo's coat at 63 and the coat went muddy)
+MEASURED_MAX_SHIFT_L = 10.0
 MEASURED_MAX_SHIFT_AB = 10.0
 # cream is a light name: the cell pointed at for a cream chest or cheek on a
 # tan dog lands on the tan beside it or in the shadow under the chin (eval
@@ -457,8 +459,13 @@ def relative_cream(appearance: dict, palette: dict[str, tuple[str, str, str]]) -
 
 # A warm ramp under a neutral border keeps at least this share of the table's
 # chroma, and its hue turns at most this many degrees from the table's.
-WARM_MIN_CHROMA_SHARE = 0.85
-WARM_MAX_HUE_TURN = 8.0
+# Neither, now (11-01): the measured cells of yellow shelter puppies read hue
+# 78-79 and chroma 20 where the photos' coats measure hue 67-69 and chroma
+# 20-30 (pixels of the whole coat), and the turn plus the greying painted
+# the golden puppies khaki beige; the table's hue and chroma are kept and the
+# lightness alone follows the measurement.
+WARM_MIN_CHROMA_SHARE = 1.0
+WARM_MAX_HUE_TURN = 0.0
 
 
 def _warm_chroma_shift(mid: np.ndarray, target: np.ndarray, strength: float, max_shift_ab: float) -> np.ndarray:
