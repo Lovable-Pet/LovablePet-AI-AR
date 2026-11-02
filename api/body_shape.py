@@ -144,9 +144,21 @@ def tail_target(build: str, carriage: str) -> dict[str, float]:
     return {}
 
 
-def shape_weights(answers: dict[str, str]) -> dict[str, float]:
+# Tipped ears that some samples saw erect stay erect: both splits on file
+# (tipped 2 / erect 1) were ears standing to a slightly bent tip in the
+# photo - a black shiba's, folded, came out with blunt crumpled stubs that
+# show the pale ear cup (shelter adult jindo 6; half folded still did), and
+# the eval piebald e13's
+EAR_SPLIT_FOLD = 0.0
+
+
+def shape_weights(answers: dict[str, str], votes: dict[str, Any] | None = None) -> dict[str, float]:
     weights: dict[str, float] = {}
-    weights.update(EAR_TARGETS.get(answers.get("ears", ""), {}))
+    ears = dict(EAR_TARGETS.get(answers.get("ears", ""), {}))
+    ear_votes = (votes or {}).get("ears") or {}
+    if answers.get("ears") == "tipped" and ear_votes.get("erect"):
+        ears = {name: value * EAR_SPLIT_FOLD for name, value in ears.items() if value * EAR_SPLIT_FOLD}
+    weights.update(ears)
     weights.update(tail_target(answers.get("tail_build", ""), answers.get("tail_carriage", "")))
     weights.update(BUILD_TARGETS.get(answers.get("build", ""), {}))
     weights.update(MUZZLE_TARGETS.get(answers.get("muzzle", ""), {}))
