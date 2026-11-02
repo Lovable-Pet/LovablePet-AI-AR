@@ -966,14 +966,19 @@ PATCH_SIZE = {"small": "small", "large": "medium", "most": "large"}
 # warm colour the face or body call gave some regions is the whole coat's
 # when the back measures within SAME_COAT_DE of them and nearer that colour's
 # ramp than the base's. A white dog whose shaded chest was called tan keeps
-# its white: its back measures white.
+# its white: its back measures white. The other way round too: a near-white
+# yellow Labrador read fawn by the layout call and cream by the face (crown,
+# cheeks 5/5) and body (chest, belly, feet) calls came out a tan dog; its
+# back measured (81, 4, 14), cream's (shelter retriever 5). A golden with a
+# cream front keeps its gold: its back measures 25 dE off the cream parts.
 SAME_COAT_DE = 12.0
 
 
 def one_coat_colour(appearance: dict[str, Any], measured: dict[str, Any]) -> list[str]:
-    """Recolour, in place, the base-coloured layout regions of a solid light
-    coat to the warm colour the calls gave its other regions, when the
-    measurements say it is one colour; returns what changed."""
+    """Recolour, in place, the base-coloured layout regions of a solid coat
+    to the one colour the calls gave its other regions - warm on a light
+    base, light on a warm one - when the measurements say it is one colour;
+    returns what changed."""
     from .fur import hex_to_linear
     from .palette import FUR_PALETTE
     from .patterns import color_family
@@ -981,14 +986,15 @@ def one_coat_colour(appearance: dict[str, Any], measured: dict[str, Any]) -> lis
 
     base = str(appearance.get("base_color") or "").lower()
     entries = appearance.get("region_colors") or []
-    if appearance.get("pattern") != "solid" or color_family(base) != "light" or not isinstance(measured, dict):
+    other = {"light": "point", "point": "light"}.get(color_family(base))
+    if appearance.get("pattern") != "solid" or other is None or not isinstance(measured, dict):
         return []
     back = (measured.get("back") or {}).get("lab")
     called = {}
     for entry in entries:
         colour = str(entry.get("color", "")).lower()
         source = str(entry.get("source", ""))
-        if color_family(colour) == "point" and source.startswith(("face:", "body:")):
+        if color_family(colour) == other and source.startswith(("face:", "body:")):
             called.setdefault(colour, []).append(entry.get("region"))
     if not back or len(called) != 1:
         return []
@@ -1300,6 +1306,15 @@ async def run_lite(
                                         reverse=True)
                         face_log["muzzle_not_unanimous"] = f"dark {muzzle_votes} on {decision.base_color}"
                         muzzle = face_log["muzzle"] = others[0][1] if others else "unknown"
+                    # ... and a light muzzle on a warm coat split between white
+                    # and cream is the softer cream: a golden's paler muzzle
+                    # read white 3 / cream 2 drew a white stripe up its gold
+                    # face (shelter retriever 1; the white blazes of the fawn
+                    # chihuahuas had no cream vote)
+                    if (muzzle == "white" and color_family(decision.base_color) == "point"
+                            and muzzle_votes.get("cream", 0) > 0):
+                        face_log["muzzle_softened"] = f"white {muzzle_votes} on {decision.base_color}"
+                        muzzle = face_log["muzzle"] = "cream"
                     for name in (*CHEEK_FEATURES.get(cheeks, ()), *BROW_FEATURES.get(brows, ()),
                                  *MUZZLE_FEATURES.get(muzzle, ()), *EAR_FEATURES.get(ears, ())):
                         if name not in features:
