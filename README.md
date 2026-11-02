@@ -155,6 +155,7 @@ python ar_pipeline/render_anchors.py --template <slug>_small
 털 조각이 흰 털 위 어두운 삼각형으로 보이면 접힌 조각의 법선을 바로잡기(`python -m ar_pipeline.fix_normals --slug <slug>`; 언제 돌려도 됨).
 눈이 홍채 없는 회색 원판이면(생성 모델에 따라) 홍채·동공·반사광을 그려 넣기(`python -m ar_pipeline.paint_eyes --slug <slug> --install`; 원본 눈에 한 번만, 토이푸들 11-02 적용).
 가슴 형상 스무딩(`smooth_geometry --regions chest`)은 짧은 털 템플릿(진도·치와와)용이다 — 곱슬 토이푸들에 돌렸더니 가슴 곱슬이 녹아 매끈한 판이 됐다. 되돌리려면 그 전 GLB에서 움직인 정점만 복원하고 법선을 다시(`python -m ar_pipeline.restore_geometry --slug <slug> --from <이전 GLB>` 뒤 `fix_normals`; 토이푸들 11-02 적용).
+늘어진 귀 템플릿에서 뺨 마스크가 귀 앞면까지 덮여 있으면(뺨 색이 귀에 칠해짐) 귀 뼈 스킨 가중치로 귀를 찾아 머리(skull)로 넘기기(`python -m ar_pipeline.ear_flaps --slug <slug> --install`; 원본 마스크는 `work/backup_earflaps_<slug>/`, 리트리버 11-02 적용).
 맨 마지막에(`shape_keys` 뒤) 수염 가닥을 따로 재질로(`python -m ar_pipeline.split_whiskers --slug <slug>`; 개마다 수염색 하나, `whisker_pad.png`도 만듦).
 위 순서를 다시 돌리지 않은 템플릿에 눈 둘레 마스크(`_eye_ring.png`)만 만들려면 `python -m ar_pipeline.open_face_masks --slug <slug> --eye-ring-only`.
 
