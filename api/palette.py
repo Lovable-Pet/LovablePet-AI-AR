@@ -477,8 +477,10 @@ def face_light(crop: Image.Image) -> tuple[float | None, list[float] | None]:
     # coat's sheen under daylight is blue-grey at L* 45-60 (shelter puppy 10),
     # a glove or backdrop plainly blue
     cool = lab[..., 2] < -2.0
-    white = (lab[..., 0] > 65.0) & (np.hypot(lab[..., 1], lab[..., 2]) <= 8.0)
-    light = (lab[..., 0] > 40.0) & ~fill & (~cool | white)
+    white = (lab[..., 0] > FACE_COOL_WHITE[0]) & (np.hypot(lab[..., 1], lab[..., 2]) <= FACE_COOL_WHITE[1])
+    # ... and not the tongue or lips (a* over 15): a licking senior's pink
+    # tongue filled the lower face (shelter chihuahua 7)
+    light = (lab[..., 0] > 40.0) & ~fill & (~cool | white) & (lab[..., 1] <= 15.0)
     dog = int((~fill).sum())
     share = round(float(light.sum()) / dog, 3) if dog else None
     if int(light.sum()) < FACE_CREAM_MIN_PIXELS:
@@ -495,6 +497,13 @@ def face_light(crop: Image.Image) -> tuple[float | None, list[float] | None]:
 # tan faces 0.20, cream and white 0.22-0.53 - a narrow margin, ten dogs), and
 # light fur nearer the tan ramp than cream or white is tan.
 FACE_LIGHT_MIN_SHARE = 0.18
+# Cool light pixels that still count as white fur: at least this L*, at most
+# this chroma. In a cool-cast photo a grey-and-cream senior's muzzle and
+# cheeks read L* 55-75 at b* -6 to -9 and were all left out as "blue" -
+# 7 % light fur, a dark face, where the photo has a pale grizzled one
+# (shelter chihuahua 7: 18 % with these). The black sheen the cool test is
+# for sits at L* 45-60 (puppy 10, whose crop is now uncut and skipped).
+FACE_COOL_WHITE = (55.0, 12.0)
 
 
 # The crown in the upper face of a head crop (shares of its height and
