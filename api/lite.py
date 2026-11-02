@@ -1392,10 +1392,17 @@ async def run_lite(
         body_answers: tuple[str, str, str] | None = None
         cream_share: float | None = None
         if body_call:
-            from .body_colours import filter_leg_features, read_body_colours
+            from .body_colours import filter_leg_features, light_by_family, read_body_colours
             try:
                 chest, belly, paws, body_votes = await read_body_colours(transport, blocks, samples=samples)
+                split = (chest, belly, paws)
+                chest, belly, paws = (light_by_family(answer, body_votes.get(key), body_votes.get("samples"),
+                                                      decision.base_color)
+                                      for answer, key in zip(split, ("chest", "belly", "paws")))
                 body_log.update({"asked": True, "chest": chest, "belly": belly, "paws": paws, "votes": body_votes})
+                if (chest, belly, paws) != split:
+                    body_log["light_by_family"] = {k: f"{a} -> {b}" for k, a, b in
+                                                   zip(("chest", "belly", "paws"), split, (chest, belly, paws)) if a != b}
                 features = filter_leg_features(features, paws)
                 body_answers = (chest, belly, paws)
             except Exception as exc:  # noqa: BLE001 - the layout's chest, belly and legs stay

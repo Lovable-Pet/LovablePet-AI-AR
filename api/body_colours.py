@@ -219,6 +219,24 @@ async def read_body_colours(transport: Transport, photo_blocks: list[dict[str, A
                                 "notes": [str(r.get("note", "")) for r in readings if r.get("note")]}
 
 
+def light_by_family(answer: str, said: dict[str, int] | None, samples: int | None, base_color: str) -> str:
+    """A part no single colour won (`answer` unknown) that most samples
+    called light is light: the light colour more of them named, white on a
+    tie for a white dog and cream for any other. A black-and-tan shiba's
+    white bib, read dark / cream / white, kept the layout's tan chest
+    (shelter adult jindo 6); on file the split light majorities were all
+    light in their photos (a cream chihuahua's feet, a white puppy's chest,
+    a white dog's feet and belly)."""
+    if answer != "unknown" or not said or not samples:
+        return answer
+    cream, white = int(said.get("cream", 0)), int(said.get("white", 0))
+    if (cream + white) * 2 <= samples:
+        return answer
+    if cream == white:
+        return "white" if str(base_color).lower() == "white" else "cream"
+    return "white" if white > cream else "cream"
+
+
 def vote_patches(readings: list[dict[str, Any]]) -> dict[str, Any]:
     """patch_amount: the amount more than half of all the samples gave, else
     unknown; patch_places: "side" when more than half put the largest patch
