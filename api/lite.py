@@ -1029,12 +1029,24 @@ def one_coat_colour(appearance: dict[str, Any], measured: dict[str, Any],
         if total < 3 or votes.get(top) != total or color_family(top) != other:
             return []
         witness = "crown"
+    # ... the layout's base-coloured regions, the features that take the base
+    # (no_brows' eyebrows, dark_ears' cups), and the base itself: kept fawn,
+    # it was the coat under every edge - fawn brow spots on a cream jindo,
+    # fawn where its light belly leaves the outer thigh, fawn at the top of
+    # its legs - and the cream was mixed toward it (relative_cream), a beige
+    # dog (shelter adult jindo 1, user: "01번 백구 다시 봐봐")
+    from .simple import FEATURES
+    base_features = {f"feature:{name}" for name, (_, roles) in FEATURES.items() if "base" in roles.values()}
     changed = []
     for entry in entries:
-        if str(entry.get("color", "")).lower() == base and str(entry.get("source", "")).startswith("pattern"):
+        source = str(entry.get("source", ""))
+        if str(entry.get("color", "")).lower() == base and (source.startswith("pattern") or source in base_features):
             entry.update({"color": warm, "note": f"one coat: {warm} like {'/'.join(regions)}",
                           "source": f"{witness}:one_coat"})
             changed.append(f"{entry.get('region')}:{base}->{warm}")
+    if changed:
+        appearance["base_color"] = warm
+        changed.append(f"base:{base}->{warm}")
     return changed
 
 
