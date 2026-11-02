@@ -1218,14 +1218,14 @@ async def run_lite(
             # read above with the model sheet
             from .body_shape import shape_weights
             answers, shape_votes = early_shape
-            appearance["shape"] = {"answers": answers, "weights": shape_weights(answers)}
+            appearance["shape"] = {"answers": answers, "weights": shape_weights(answers, shape_votes)}
             log["steps"]["shape"] = {**appearance["shape"], "votes": shape_votes}
         elif read_shape and target_names(template_glb):
             from .body_shape import read_body_shape, shape_weights
             from .extract import photo_blocks
             answers, shape_votes = await read_body_shape(transport or default_transport(), photo_blocks(photos),
                                                          samples=samples)
-            appearance["shape"] = {"answers": answers, "weights": shape_weights(answers)}
+            appearance["shape"] = {"answers": answers, "weights": shape_weights(answers, shape_votes)}
             log["steps"]["shape"] = {**appearance["shape"], "votes": shape_votes}
     else:
         from .extract import photo_blocks
@@ -1575,13 +1575,13 @@ async def run_lite(
             # template has (set_shape skips unknown targets)
             from .body_shape import shape_weights
             answers, shape_votes = early_shape
-            shape = {"answers": answers, "weights": shape_weights(answers)}
+            shape = {"answers": answers, "weights": shape_weights(answers, shape_votes)}
             log["steps"]["shape"] = {**shape, "votes": shape_votes}
         elif shape_call and target_names(template_glb):
             from .body_shape import read_body_shape, shape_weights
             try:
                 answers, shape_votes = await read_body_shape(transport, blocks, samples=samples)
-                shape = {"answers": answers, "weights": shape_weights(answers)}
+                shape = {"answers": answers, "weights": shape_weights(answers, shape_votes)}
                 log["steps"]["shape"] = {**shape, "votes": shape_votes}
             except Exception as exc:  # noqa: BLE001 - the template's own outline stays
                 log["steps"]["shape"] = {"error": f"{type(exc).__name__}: {exc}"}
