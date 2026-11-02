@@ -156,10 +156,16 @@ def _role_colour(role: str, base: str, second: str | None) -> str:
     return role
 
 
-def apply_features(pattern: str, base: str, second: str | None, features: list[str]) -> list[dict[str, Any]]:
+def apply_features(pattern: str, base: str, second: str | None, features: list[str],
+                   consensus: dict[str, str] | None = None) -> list[dict[str, Any]]:
     """The pattern's default layout with the features laid over it, all
-    ten regions, full coverage, no gradients."""
+    ten regions, full coverage, no gradients. A pattern with no layout of
+    its own ("other") takes `consensus` (pattern_classify.consensus_layout)
+    when the vote left one, else the base all over."""
     layout = {e["region"]: e for e in instantiate_defaults(pattern, base, second)}
+    if not layout and consensus:
+        layout = {r: {"region": r, "color": consensus[r], "coverage": "full", "note": "samples' layouts by region",
+                      "source": "pattern_default:consensus", "weight": 1.0} for r in REGIONS}
     if not layout:
         layout = {r: {"region": r, "color": base, "coverage": "full", "note": "solid fallback",
                       "source": "pattern_default:solid", "weight": 1.0} for r in REGIONS}
@@ -266,11 +272,19 @@ def default_gradients(appearance: dict[str, Any]) -> tuple[dict[str, Any], list[
     # user read a tan inner leg on a dog whose photo shows white there.
     chest = entries.get("chest", {})
     paws = entries.get("paws", {})
+    # On a solid coat only the inward faces: a golden's or a yellow mix's
+    # lighter front is its chest and the feathering behind the legs, and
+    # the front of the foreleg is the coat - painted cream as well, the
+    # forelegs of three of the shelter retriever-types came out cream
+    # stockings from elbow to toes where their photos show golden or tan legs.
     if (color_family(legs.get("color", "")) != "light" and color_family(chest.get("color", "")) == "light"
             and color_family(paws.get("color", "")) == "light" and str(legs.get("inner_color") or "") == ""):
         entries["legs_lower"] = {**entries["legs_lower"], "inner_color": chest["color"],
                                  "note": f"{legs.get('note', '')} / inside {chest['color']} like the chest".strip(" /")}
-        added.append(f"legs_lower inner:{chest['color']}")
+        if str(appearance.get("pattern", "")).lower() == "solid":
+            entries["legs_lower"]["inner_faces"] = "inward"
+        added.append(f"legs_lower inner:{chest['color']}"
+                     + (" inward" if entries["legs_lower"].get("inner_faces") == "inward" else ""))
     # white paws under a coloured leg are white toes: the paws region runs up
     # to the wrist and hock, and painted whole it read as white socks
     # (shelter puppy 6, user: "발이 저렇게 하얀가" - the photo's white stops at

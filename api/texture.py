@@ -104,12 +104,20 @@ PLACEABLE_MARKINGS = frozenset({"socks", "blaze", "stripe", "mask"})
 # _blaze_strip); without, _restrict takes the middle columns of the mask.
 # (half widths in face sizes; a shelter puppy's blaze is a thin line - medium
 # 0.2 painted a broad white bar, user)
-BLAZE_HALF_WIDTH_EYES = {"small": 0.08, "medium": 0.12, "large": 0.25}
+BLAZE_HALF_WIDTH_EYES = {"small": 0.08, "medium": 0.12, "large": 0.25, "full": 0.3}
 # ... BLAZE_MUZZLE_WIDEN times as wide a face size under the eyes, narrowing
 # above them to nothing BLAZE_ABOVE_EYES face sizes up (a large blaze - a
-# white face's - runs on up the forehead)
+# white face's - runs on up the forehead; a full one - the crown mostly
+# light, dark only round the eyes and on the ears - on over the head to the
+# ears' line without narrowing)
 BLAZE_MUZZLE_WIDEN = 1.8
-BLAZE_ABOVE_EYES = {"small": 0.45, "medium": 0.55, "large": 1.1}
+BLAZE_ABOVE_EYES = {"small": 0.45, "medium": 0.55, "large": 1.1, "full": 99.0}
+# ... and a full one widens above the eyes instead, to this many times its
+# width a face size up: the white between grey eye patches spreads over the
+# crown (shelter puppy 14)
+BLAZE_FULL_WIDEN = 2.2
+# the share of the blaze's width that is solid; the rest fades to the coat
+BLAZE_SOLID_SHARE = 0.4
 # The face's size for the blaze: the eye radius (90th percentile of the eye
 # feature texels' distance from the eye centre, times EYE_RIM_TO_RADIUS) over
 # EYE_RADIUS - ar_pipeline/refine_face_masks.eye_radius, which gives the
@@ -422,9 +430,12 @@ def noise_field(shape: tuple[int, int], seed: int) -> np.ndarray:
     return ((total - total.min()) / max(spread, 1e-6)).astype(np.float32)
 
 
-def _select(mask: np.ndarray, field: np.ndarray, keep: float) -> np.ndarray:
-    """Cut a soft-edged patch covering roughly `keep` of the mask."""
+def _select(mask: np.ndarray, field: np.ndarray, keep: float, domain: np.ndarray | None = None) -> np.ndarray:
+    """Cut a soft-edged patch covering roughly `keep` of the mask (of the
+    domain's texels, when given)."""
     inside = mask > 0.5
+    if domain is not None and (domain & inside).any():
+        inside = domain & inside
     if not inside.any():
         return np.zeros_like(mask)
     threshold = float(np.quantile(field[inside], 1.0 - float(np.clip(keep, 0.01, 0.99))))
@@ -514,16 +525,21 @@ def _blaze_strip(landmarks: Any, mask: np.ndarray, size: str, noise: np.ndarray)
     # ruler-straight white line (user: "머리에 흰줄 자꾸 왜")
     rise = (pos[:, 2] - z_eyes) / scale
     above = BLAZE_ABOVE_EYES.get(size, BLAZE_ABOVE_EYES["medium"])
-    width = half * np.where(rise < 0.0, 1.0 + (BLAZE_MUZZLE_WIDEN - 1.0) * np.clip(-rise, 0.0, 1.0),
-                            np.clip(1.0 - rise / above, 0.0, 1.0))
+    up = (1.0 + (BLAZE_FULL_WIDEN - 1.0) * np.clip(rise, 0.0, 1.0) if size == "full"
+          else np.clip(1.0 - rise / above, 0.0, 1.0))
+    width = half * np.where(rise < 0.0, 1.0 + (BLAZE_MUZZLE_WIDEN - 1.0) * np.clip(-rise, 0.0, 1.0), up)
     lateral = np.abs(pos[:, 0])
-    weight = np.clip(1.0 - (lateral - 0.6 * width) / np.maximum(0.4 * width, 1e-6), 0.0, 1.0) * (width > 1e-6)
+    # solid in the middle 0.4 of the width, fading over the rest: with the
+    # fade over the outer 0.4 and the noise doubled in contrast it was a
+    # band with ruled edges (shelter puppy 14's white head stripe)
+    weight = np.clip(1.0 - (lateral - BLAZE_SOLID_SHARE * width) / np.maximum((1.0 - BLAZE_SOLID_SHARE) * width, 1e-6),
+                     0.0, 1.0) * (width > 1e-6)
     strip = np.zeros(mask.shape, dtype=np.float32)
     strip[rows, cols] = weight
     if int((strip > 0.5).sum()) < 30:
         return None
     # a natural outline: solid inside, the edge broken by the noise
-    return np.clip((strip * (0.7 + 0.6 * noise) - 0.15) * 2.0, 0.0, 1.0) * (mask > 0.5)
+    return np.clip((strip * (0.8 + 0.4 * noise) - 0.1) * 1.4, 0.0, 1.0) * (mask > 0.5)
 
 
 def _smoothstep(t: np.ndarray) -> np.ndarray:
@@ -687,6 +703,17 @@ class MaskLibrary:
         self._cache["ear_rim"] = rim
         return rim
 
+    def ear_cup(self) -> np.ndarray | None:
+        """The whole inner ear, rim included, jittered as the regions are:
+        what skull paints under ears_inner (compose_body), so the rim's soft
+        split between the two leaves no gap for the base coat."""
+        if "ear_cup" not in self._cache:
+            mask = self._raw_mask("ears_inner")
+            if mask is not None and self.jitter is not None:
+                mask = _jitter_edge(mask, self.jitter)
+            self._cache["ear_cup"] = mask
+        return self._cache["ear_cup"]
+
     def get(self, region: str) -> np.ndarray | None:
         if region not in REGIONS:
             self.missing.append(f"{region} (not in the region enum)")
@@ -758,14 +785,16 @@ def _belly_reach(landmarks, mask: np.ndarray, jitter: np.ndarray | None,
     return np.clip(signed / max(EDGE_SOFT_PX, 1e-3) + 0.5, 0.0, 1.0).astype(np.float32)
 
 
-def _leg_inner(landmarks, jitter: np.ndarray | None) -> np.ndarray:
-    """1 where the surface faces the body's midline or forward, 0 where it
-    faces outward or back, with a fur-level edge; the inside of a leg."""
+def _leg_inner(landmarks, jitter: np.ndarray | None, forward_too: bool = True) -> np.ndarray:
+    """1 where the surface faces the body's midline or (`forward_too`)
+    forward, 0 where it faces outward or back, with a fur-level edge; the
+    inside of a leg."""
     normal = landmarks.normal
     side = np.sign(landmarks.position[..., 0]) if landmarks.position is not None else 1.0
     inward = -side * normal[..., 0]
-    forward = -normal[..., 1]
-    signed = np.maximum((inward - LEG_INNER_FACING) / 0.08, (forward - CHEST_FACING) / 0.08)
+    signed = (inward - LEG_INNER_FACING) / 0.08
+    if forward_too:
+        signed = np.maximum(signed, (-normal[..., 1] - CHEST_FACING) / 0.08)
     if jitter is not None:
         signed = signed + 0.6 * jitter
     return np.clip(signed + 0.5, 0.0, 1.0).astype(np.float32)
@@ -796,6 +825,39 @@ def _chest_front(landmarks, jitter: np.ndarray | None) -> np.ndarray:
         throat = np.clip((z - chest_z) / texel + 0.5, 0.0, 1.0)
         facing = np.maximum(facing, throat)
     return facing.astype(np.float32)
+
+
+# The chest mask runs down the front of each foreleg to the legs_lower band
+# (the retriever's from the brisket at 0.37 m to 0.30 m), and a light chest
+# painted there drew cream stockings from elbow to toes on golden and yellow
+# dogs whose photos show coat-coloured forelegs (shelter retriever-types 1,
+# 2, 9). Where the legs are the coat's colour a light chest stops at the
+# brisket - the lowest point of the chest mask's forward-facing midline
+# (BRISKET_MIDLINE_M either side of chest_center, its BRISKET_PERCENTILE) -
+# over BRISKET_RAMP_M; below it the mask keeps the base coat, the legs'
+# colour. Not where the legs are another colour (a black-and-tan's tan
+# legs under a white chest): the base coat there is black.
+BRISKET_MIDLINE_M = 0.015
+BRISKET_PERCENTILE = 5.0
+BRISKET_RAMP_M = 0.012
+
+
+def _above_brisket(landmarks, chest: np.ndarray, jitter: np.ndarray | None) -> np.ndarray | None:
+    """1 above the brisket, 0 below it on the forelegs (None without the
+    landmarks it needs)."""
+    if landmarks.position is None or landmarks.normal is None or "chest_center" not in landmarks.points:
+        return None
+    centre = landmarks.world("chest_center")
+    position = landmarks.position
+    midline = ((chest > 0.5) & landmarks.valid & (np.abs(position[..., 0] - centre[0]) < BRISKET_MIDLINE_M)
+               & (-landmarks.normal[..., 1] > CHEST_FACING) & (position[..., 1] < centre[1] + 0.1))
+    if int(midline.sum()) < 20:
+        return None
+    brisket = float(np.percentile(position[..., 2][midline], BRISKET_PERCENTILE))
+    signed = (position[..., 2] - brisket) / BRISKET_RAMP_M
+    if jitter is not None:
+        signed = signed + 0.3 * jitter
+    return np.clip(signed + 0.5, 0.0, 1.0).astype(np.float32)
 
 
 # A doberman-type chest: dark, with two small points-coloured spots on the
@@ -947,7 +1009,19 @@ def compose_body(
 
     gradients_drawn: list[str] = []
     order = 0
-    for entry in observed + inferred:
+    # The ear's rim is a soft split of the cup between ears_inner and skull
+    # (MaskLibrary._ear_rim): a texel half each, painted one over the other,
+    # kept a quarter of the base coat - on a white dog with a black head a
+    # dotted grey-white line round the inside of each black ear (shelter
+    # chihuahua 10), unseen wherever the base is the head's colour, and no
+    # feathering runs between two regions of one colour. So skull goes first
+    # and covers the whole cup, and ears_inner is laid over it.
+    painting = observed + inferred
+    names = [e.get("region") for e in painting]
+    cup = masks.ear_cup() if "skull" in names and "ears_inner" in names else None
+    if cup is not None and names.index("ears_inner") < names.index("skull"):
+        painting.insert(names.index("ears_inner"), painting.pop(names.index("skull")))
+    for entry in painting:
         mask = masks.get(entry.get("region"))
         if mask is None:
             continue
@@ -981,6 +1055,15 @@ def compose_body(
             applied = applied * _chest_front(landmarks, masks.jitter)
             if debug:
                 _save_debug(debug, f"02_{order:02d}_chest_front", applied)
+        if (region == "chest" and landmarks is not None and color_family(color_name) == "light"
+                and color_family(base_color) != "light"
+                and next((str(e.get("color", "")) for e in entries
+                          if e.get("region") == "legs_lower"), base_color) == base_color):
+            above = _above_brisket(landmarks, mask, masks.jitter)
+            if above is not None:
+                applied = applied * above
+                if debug:
+                    _save_debug(debug, f"02_{order:02d}_chest_above_brisket", applied)
         if (region == "cheeks" and landmarks is not None and landmarks.position is not None
                 and color_family(color_name) == "point"
                 and color_family(next((str(e.get("color", "")) for e in entries if e.get("region") == "skull"),
@@ -994,12 +1077,15 @@ def compose_body(
             applied = applied * _belly_reach(landmarks, mask, masks.jitter, masks.get("back"))
             if debug:
                 _save_debug(debug, f"02_{order:02d}_underside_reach", applied)
+        if region == "skull" and cup is not None:
+            applied = np.maximum(applied, cup)
 
         composed = _blend(composed, painted, applied)
         inner_color = str(entry.get("inner_color") or "").lower()
         if (region == "legs_lower" and inner_color in FUR_COLORS and inner_color != color_name
                 and landmarks is not None and landmarks.normal is not None):
-            inner = applied * _leg_inner(landmarks, masks.jitter)
+            inner = applied * _leg_inner(landmarks, masks.jitter,
+                                         forward_too=str(entry.get("inner_faces") or "") != "inward")
             composed = _blend(composed, paint_region(gray, inner_color, mask, palette), inner)
             gradients_drawn.append(f"legs_lower inner:{inner_color}")
             if debug:
@@ -1087,6 +1173,9 @@ def compose_body(
     shaped_regions = {s.split(":")[0] for s in shaped}
 
     placed: list[str] = []
+    # where the markings went, for the finish to leave alone (lite._clean_head
+    # took a white blaze on a dark crown for a shard and painted it over)
+    marking_mask = np.zeros(gray.shape, dtype=np.float32)
     for order, marking in enumerate(appearance.get("markings") or [], start=1):
         mask = masks.get(marking.get("region"))
         if mask is None:
@@ -1122,16 +1211,71 @@ def compose_body(
             # noise the patches broke at every seam and came out with torn,
             # jagged edges (user on eval demo e13)
             field = noise
+            trunk = None
             if landmarks is not None and landmarks.position is not None:
                 rng = np.random.default_rng(PATCH_SEED + order)
                 surface = landmarks.valid if landmarks.valid is not None else mask > -1
+                # sampled as coarsely as the blobs are wide: the cost grows
+                # with the samples times the neighbours within 2.5 sigma
                 smooth = smooth_on_surface(rng.random(mask.shape).astype(np.float32), landmarks.position,
-                                           surface, PATCH_SIGMA_M)
+                                           surface, PATCH_SIGMA_M,
+                                           stride=max(SURFACE_STRIDE, round(SURFACE_STRIDE * PATCH_SIGMA_M / 0.035)))
                 inside = (mask > 0.5) & surface
                 if inside.any():
                     spread = float(smooth[inside].std()) or 1.0
                     field = 0.5 + (smooth - float(smooth[inside].mean())) / spread * PATCH_FIELD_SPREAD
-            blob = _select(mask, field, area)
+                    # on the trunk only: the back region runs onto the neck
+                    # and the tail, and the neck crest is its highest place -
+                    # the patches ran from a black head down the neck as one
+                    # strip, and a whole tail came out coloured, on dogs with
+                    # a white neck and a white tail (eval e13, shelter
+                    # maltese 6 and 7, e15 - all five patched dogs)
+                    hard = _patch_off_trunk(masks, landmarks, mask.shape)
+                    off = smooth_on_surface(hard, landmarks.position, surface, PATCH_OFF_RAMP_M,
+                                            stride=max(SURFACE_STRIDE,
+                                                       round(SURFACE_STRIDE * PATCH_OFF_RAMP_M / 0.035)))
+                    # ... the fade on the trunk's side only: a tail curled
+                    # over the back lies within the fade of the back itself
+                    # and came out black on a white-tailed piebald (shelter
+                    # chihuahua 10, its tail at 0.4 of the full lowering)
+                    off = np.maximum(off, hard)
+                    field = field - PATCH_OFF_TRUNK * off
+                    trunk = inside & (off < 0.5)
+                    # on the top of the body: the back region runs down the
+                    # flanks onto the upper legs, and patches scattered over
+                    # all of it came out a cow's spots down to the knees where
+                    # the dog had a saddle and a rump patch over white legs
+                    # (shelter maltese 7)
+                    z = landmarks.position[..., 2]
+                    low, high = np.percentile(z[trunk if trunk.any() else inside], [10, 90])
+                    top = np.clip((z - low) / max(high - low, 1e-6), 0.0, 1.0)
+                    # ... and drawn to where the reading put them (body_colours
+                    # patch_*): on the side, the top bias would pull a flank
+                    # patch onto the spine (shelter maltese 6)
+                    places = [p for p in marking.get("places") or () if p in PATCH_PLACE_SHAPE]
+                    if "side" not in places:
+                        field = field + PATCH_TOP_BIAS * (top - 0.5)
+                    # one flank: a flank patch is one dog's side, and the
+                    # photograph does not say which
+                    side = float(rng.choice((-1.0, 1.0)))
+                    place = _patch_place_weight(landmarks, trunk, places, side)
+                    if place is not None:
+                        field = field + PATCH_PLACE_BIAS * place
+                        placed.append(f"patches@{'+'.join(places)}")
+            # the area is the trunk's share: off it the field is too low to
+            # be picked, and the region's share came out a third more of the
+            # trunk once the neck and tail were taken out (eval e13, a
+            # blanket from the withers to the rump)
+            blob = _select(mask, field, PATCH_AREA.get(size, PATCH_AREA["medium"]), domain=trunk)
+            if trunk is not None:
+                # no pale half-painted spots: where the field rose near the
+                # cut but not past it, a faint grey or tan smudge (e13's
+                # shoulder, e15's back). Only the edge band of a patch with a
+                # painted core keeps its fade, measured on the surface so a
+                # seam does not cut it
+                core = smooth_on_surface((blob > PATCH_CORE).astype(np.float32), landmarks.position, surface,
+                                         PATCH_CORE_REACH_M, stride=PATCH_CORE_STRIDE)
+                blob = blob * np.clip(core / PATCH_CORE_NEAR, 0.0, 1.0)
             placed.append(f"patches:{region}")
         if blob is None and marking_type == "blaze" and landmarks is not None:
             # down the top of the muzzle as well: a blaze runs from the nose
@@ -1156,10 +1300,12 @@ def compose_body(
         composed = _blend(
             composed, paint_region(gray, marking.get("color", ""), mask, palette), blob
         )
+        marking_mask = np.maximum(marking_mask, np.asarray(blob, dtype=np.float32))
         if debug:
             _save_debug(debug, f"03_{order:02d}_{marking_type}_{region}_mask", blob)
             _save_debug(debug, f"03_{order:02d}_{marking_type}_{region}", composed)
     report["markings_placed"] = placed
+    report["marking_mask"] = marking_mask
 
     if feather_all:
         # every boundary between two regions of different colour: a colour
@@ -1230,11 +1376,108 @@ def compose_body(
 
 
 # Patches (piebald body spots) come from a random field smoothed over the
-# surface with this sigma: blobs about 10-15 cm across on the jindo. The
-# field is rescaled so EDGE_SOFTNESS gives a fur-soft, not a blurred, edge.
-PATCH_SIGMA_M = 0.035
+# surface with this sigma. The field is rescaled so EDGE_SOFTNESS gives a
+# fur-soft, not a blurred, edge. At 3.5 cm (blobs 10-15 cm across) a
+# parti-coloured dog with one saddle and a rump patch came out spotted all
+# over like a cow (shelter maltese 7); a part-coloured coat is a few large
+# patches.
+PATCH_SIGMA_M = 0.07
 PATCH_FIELD_SPREAD = 0.25
 PATCH_SEED = 4242
+# the field's lift from the bottom tenth of the trunk's height to the top
+# tenth (in the field's units: its spread is PATCH_FIELD_SPREAD)
+PATCH_TOP_BIAS = 0.4
+# Off the trunk, where no patch goes: the template's own collar and tail
+# masks (masks_source) and what lies PATCH_TAIL_BEHIND_M behind the hind feet
+# (the maltese's tail root is tagged back), lowered in the field by
+# PATCH_OFF_TRUNK, faded in over PATCH_OFF_RAMP_M on the surface so a patch
+# does not end on the masks' line
+PATCH_OFF_SOURCES = ("collar", "tail_top", "tail_tip")
+PATCH_TAIL_BEHIND_M = 0.05
+PATCH_OFF_TRUNK = 1.0
+# as wide as the patches' own noise: over 2.5 cm the fade outweighed the
+# noise and a patch ended on a straight line at the tail root and the neck
+PATCH_OFF_RAMP_M = 0.06
+# a patch's painted core (blob above PATCH_CORE) and how near to one, on the
+# surface, its fading edge must lie: the core smoothed with this sigma
+# reaches PATCH_CORE_NEAR at about one sigma off its edge
+PATCH_CORE = 0.6
+PATCH_CORE_REACH_M = 0.02
+PATCH_CORE_NEAR = 0.15
+# sampled every 7 texels: 2.9 s on the jindo against 11.5 s at 5, the reach
+# within 0.06 at the 99th percentile
+PATCH_CORE_STRIDE = 7
+# The share of the TRUNK (the back region off the neck and the tail) the
+# patches cover, by body_colours patch_amount (lite.PATCH_SIZE: small ->
+# small, large -> medium, most -> large; "large" means patches bigger than
+# the head, not more of the body). medium is also for no answer. As shares
+# of the whole region (neck and tail in) a quarter sat between a white puppy
+# with one flank patch (shelter maltese 6, ~15 %) and a saddle-and-rump parti
+# (maltese 7, ~35 %); of the trunk, 0.25 draws maltese 7 as a saddle and a
+# separate rump patch and eval e13 with a white back before its rump patch.
+PATCH_AREA = {"small": 0.12, "medium": 0.25, "large": 0.45}
+# A place the reading put patches on, drawn there on top of the top-of-body
+# bias: along the trunk, 0 at the front feet and 1 at the hind feet, as
+# (centre, gaussian sigma), times the height on the trunk (0 at its lowest
+# tenth, 1 at its highest) as a ramp (from, to) or a band (centre, -sigma);
+# the most of the places read, added to the field at PATCH_PLACE_BIAS per
+# unit (its noise spread is PATCH_FIELD_SPREAD). A rump weight alone moves a
+# few percent of the texels: the top bias already leans the patches back
+# (e13 5.6 %). An over-the-spine patch is the top bias itself. Weighting a
+# saddle, a flank and a rump at once covered the whole trunk - one blanket
+# where the dog has a white back and a rump patch (eval e13).
+PATCH_PLACE_SHAPE = {
+    "rump": ((0.95, 0.2), (0.15, 0.6)),
+    "side": ((0.55, 0.18), (0.45, -0.18)),
+}
+PATCH_PLACE_BIAS = 0.5
+# a side patch: on one flank, faded across the midline over this width
+PATCH_SIDE_FADE_M = 0.03
+
+
+def _patch_off_trunk(masks: "MaskLibrary", landmarks: Any, shape: tuple[int, ...]) -> np.ndarray:
+    """1 on the neck and the tail (PATCH_OFF_SOURCES and behind the hind
+    feet), 0 on the trunk."""
+    off = np.zeros(shape[:2], dtype=np.float32)
+    for name in PATCH_OFF_SOURCES:
+        path = masks.dir.parent / "masks_source" / f"{name}.png"
+        if path.exists():
+            image = Image.open(path).convert("L").resize((shape[1], shape[0]), Image.NEAREST)
+            off = np.maximum(off, (np.asarray(image) > 127).astype(np.float32))
+    hind = [landmarks.world(name)[1] for name in ("paw_lb", "paw_rb") if name in landmarks.points]
+    if hind:
+        off[landmarks.position[..., 1] > float(np.mean(hind)) + PATCH_TAIL_BEHIND_M] = 1.0
+    return off
+
+
+def _patch_place_weight(landmarks: Any, inside: np.ndarray, places: list[str],
+                        side: float = 1.0) -> np.ndarray | None:
+    """0..1 per texel: how well it lies on one of the places (side: on the
+    flank whose x has this sign), or None when no place was read or the
+    template has no feet to measure the trunk by."""
+    feet = {name: landmarks.world(name) for name in ("paw_lf", "paw_rf", "paw_lb", "paw_rb")
+            if name in landmarks.points}
+    if not places or len(feet) < 4:
+        return None
+    position = landmarks.position
+    front = float(np.mean([feet["paw_lf"][1], feet["paw_rf"][1]]))
+    back = float(np.mean([feet["paw_lb"][1], feet["paw_rb"][1]]))
+    along = (position[..., 1] - front) / (back - front)
+    trunk = inside & (along >= 0.0) & (along <= 1.0)
+    if not trunk.any():
+        return None
+    z = position[..., 2]
+    low, high = np.percentile(z[trunk], [10, 90])
+    height = np.clip((z - low) / max(high - low, 1e-6), 0.0, 1.0)
+    weight = np.zeros(inside.shape, dtype=np.float32)
+    for place in places:
+        (centre, sigma), (a, b) = PATCH_PLACE_SHAPE[place]
+        lengthwise = np.exp(-0.5 * ((along - centre) / sigma) ** 2)
+        upright = np.exp(-0.5 * ((height - a) / -b) ** 2) if b < 0 else np.clip((height - a) / (b - a), 0.0, 1.0)
+        if place == "side":
+            upright = upright * np.clip(0.5 + side * position[..., 0] / PATCH_SIDE_FADE_M, 0.0, 1.0)
+        weight = np.maximum(weight, (lengthwise * upright).astype(np.float32))
+    return weight
 
 
 # Sable: the second colour laid over the top of the dog as dark-tipped hair.
@@ -1683,10 +1926,12 @@ def synthesize_texture(
     projected_texture_path: str | Path | None = None,
     debug_dir: str | Path | None = None,
     palette: dict[str, tuple[str, str, str]] | None = None,
+    report_out: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> Image.Image:
     """The coat texture as an image: compose_texture without the normal map
-    and the report, for callers that only want the picture.
+    and the report, for callers that only want the picture (`report_out`,
+    when given, is filled with the report).
 
     `projected_texture_path` is the experimental path's projected face: when
     given, its face regions are composited as the face layer."""
@@ -1699,10 +1944,13 @@ def synthesize_texture(
             projected = projected.resize(base_image.size, Image.LANCZOS)
         weight = _blur(masks.union(FACE_REGIONS), 5.0)
         face_layer = (to_linear(np.asarray(projected, dtype=np.float32)), weight)
-    return compose_texture(
+    result = compose_texture(
         base_texture_path, masks_dir, appearance, debug_dir=debug_dir, palette=palette,
         face_layer=face_layer, **kwargs,
-    ).image
+    )
+    if report_out is not None:
+        report_out.update(result.report)
+    return result.image
 
 
 __all__ = [
