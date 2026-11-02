@@ -67,7 +67,8 @@ CHAIN_PREFIXES = ("L_hip", "L_knee", "L_ankle", "L_foot", "R_hip", "R_knee", "R_
 # the rump's contact (within PITCH_LIMIT_DEG) when the front paws must reach
 # the floor too, and each planted paw, or one under the floor, brought to
 # its rest height by CCD on its leg (IK_ITERATIONS passes, IK_STEP_DEG a
-# joint a pass).
+# joint a pass); last, no paw nearer the midline than LATERAL_KEEP of its
+# rest stance (the puppy's inward-angled legs crossed on the jindo's).
 TORSO = ("pelvis", "spine", "chest", "breathe", "COG", "central")
 CONTACT_M = 0.03
 CONTACT_FADE_M = 0.08
@@ -78,6 +79,8 @@ IK_STEP_DEG = 25.0
 # the share of a front leg's slack (its straight length less its reach) the
 # pitch leaves for the leg to close by straightening
 REACH_SHARE = 0.85
+# a paw comes no nearer the midline than this share of its rest stance
+LATERAL_KEEP = 0.6
 LEGS = {"LB": ("L_hip_jnt", "L_knee_jnt", "L_ankle_jnt", "L_foot_jnt", "LB_toes_jnt"),
         "RB": ("R_hip_jnt", "R_knee_jnt", "R_ankle_jnt", "R_foot_jnt", "RB_toes_jnt"),
         "LF": ("L_shoulder_jnt", "L_elbow_jnt", "L_wrist_jnt", "L_hand_jnt", "LF_toes_jnt"),
@@ -340,6 +343,7 @@ def ground_pass(source: Rig, target: Rig, frames: list[dict[int, tuple]], rotati
     legs = {leg: [target.by_name[n] for n in names] for leg, names in LEGS.items()
             if all(n in target.by_name for n in names) and names[-1] in source.by_name}
     toe_rest = {leg: tgt_rest[chain[-1]][1, 3] for leg, chain in legs.items()}
+    toe_x = {leg: tgt_rest[chain[-1]][0, 3] for leg, chain in legs.items()}
     src_toe_rest = {leg: src_rest[source.by_name[LEGS[leg][-1]]][1, 3] for leg in legs}
     leg_length = {leg: sum(np.linalg.norm(tgt_rest[b][:3, 3] - tgt_rest[a][:3, 3]) for a, b in zip(chain, chain[1:]))
                   for leg, chain in legs.items()}
@@ -399,6 +403,26 @@ def ground_pass(source: Rig, target: Rig, frames: list[dict[int, tuple]], rotati
             if abs(best) > 1e-6:
                 set_pitch(best)
             world = pose()
+        def reach(chain: list[int], goal: np.ndarray) -> dict[int, np.ndarray]:
+            """CCD of the chain's toe onto `goal`; returns the pose."""
+            toe = chain[-1]
+            w = pose()
+            for _ in range(IK_ITERATIONS):
+                for joint in reversed(chain[:-1]):
+                    w = pose()
+                    here = w[joint][:3, 3]
+                    vec = Rotation.from_matrix(_swing(w[toe][:3, 3] - here, goal - here)).as_rotvec()
+                    angle = float(np.linalg.norm(vec))
+                    if angle > np.radians(IK_STEP_DEG):
+                        vec = vec * np.radians(IK_STEP_DEG) / angle
+                    up = target.parent[joint]
+                    q[joint] = Rotation.from_matrix(
+                        _rot(w[up]).T @ Rotation.from_rotvec(vec).as_matrix() @ _rot(w[joint])).as_quat()
+                w = pose()
+                if np.linalg.norm(w[toe][:3, 3] - goal) < 0.003:
+                    break
+            return w
+
         # 3. each planted paw, and any under the floor, to its rest height (CCD)
         for leg, chain in legs.items():
             toe = chain[-1]
@@ -406,20 +430,17 @@ def ground_pass(source: Rig, target: Rig, frames: list[dict[int, tuple]], rotati
                 continue
             goal = world[toe][:3, 3].copy()
             goal[1] = toe_rest[leg]
-            for _ in range(IK_ITERATIONS):
-                for joint in reversed(chain[:-1]):
-                    world = pose()
-                    here = world[joint][:3, 3]
-                    vec = Rotation.from_matrix(_swing(world[toe][:3, 3] - here, goal - here)).as_rotvec()
-                    angle = float(np.linalg.norm(vec))
-                    if angle > np.radians(IK_STEP_DEG):
-                        vec = vec * np.radians(IK_STEP_DEG) / angle
-                    turn = Rotation.from_rotvec(vec).as_matrix()
-                    up = target.parent[joint]
-                    q[joint] = Rotation.from_matrix(_rot(world[up]).T @ turn @ _rot(world[joint])).as_quat()
-                world = pose()
-                if np.linalg.norm(world[toe][:3, 3] - goal) < 0.003:
-                    break
+            world = reach(chain, goal)
+        # 4. no paw nearer the midline than LATERAL_KEEP of its rest stance:
+        # the puppy's legs angled in, on the jindo's longer ones, crossed
+        for leg, chain in legs.items():
+            toe = chain[-1]
+            side = np.sign(toe_x[leg])
+            keep = LATERAL_KEEP * abs(toe_x[leg])
+            if world[toe][0, 3] * side < keep:
+                goal = world[toe][:3, 3].copy()
+                goal[0] = side * keep
+                world = reach(chain, goal)
         for i in target.joints:
             rotations[i][k] = q[i]
         translations[k] = state["t"]
