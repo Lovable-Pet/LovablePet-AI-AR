@@ -45,18 +45,17 @@ WHITE_LEG_FEATURES = ("white_paws", "white_socks")
 # body they cover. The layout call says only that there are patches, and one
 # fixed placement fit neither a white puppy with one small flank patch
 # (shelter maltese 6, drawn as a saddle) nor a parti with a saddle and a rump
-# patch (maltese 7, drawn without the rump). Each place is its own yes/no: a
-# dog can have several. Only the amount and the rump are drawn
-# (texture.PATCH_PLACE_SHAPE): on five patched dogs (11-02: maltese 6 and 7,
-# eval e13 and e15, puppy 13) the amount split small / large as the photos
-# do and rump was yes 3/3 on maltese 7 and e13 (both with a rump patch), 0/3
-# on maltese 6 and e15, 1/3 on the puppy's dark rear back; saddle was yes in
-# 15 of 15 samples (a flank patch too). Saddle and flank stay asked and
-# logged: rump was read beside them.
-PATCH_PLACES = ("saddle", "flank", "rump")
+# patch (maltese 7, drawn without the rump). On five patched dogs (11-02:
+# maltese 6 and 7, eval e13 and e15, puppy 13) the amount split small /
+# large as the photos do. Where: asked as a saddle yes/no beside a flank
+# yes/no, saddle came back yes in 15 of 15 samples, the flank puppy's too
+# ("small patch on back"); asked instead whether the top line of the back
+# right above the largest patch is white, the flank puppy came back side 3/3
+# and the saddled parti over_spine 3/3. The rump is its own yes/no - a dog
+# can have a saddle and a rump patch.
 PATCH_PLACE_ANSWERS = ("yes", "no", "unknown")
+PATCH_LARGEST_ANSWERS = ("over_spine", "side", "none", "unknown")
 PATCH_AMOUNT_ANSWERS = ("none", "small", "large", "most", "unknown")
-PATCH_FIELDS = {f"patch_{place}": place for place in PATCH_PLACES}
 
 BODY_COLOURS_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -108,19 +107,14 @@ BODY_COLOURS_SCHEMA: dict[str, Any] = {
                            "head, the body still mostly white), most (half the body or more is coloured), "
                            "unknown (the body is not visible).",
         },
-        "patch_saddle": {
+        "patch_largest": {
             "type": "string",
-            "enum": list(PATCH_PLACE_ANSWERS),
-            "description": "Is a patch across the top of the back, over the spine between the shoulders and "
-                           "the hips (a saddle)? yes, no (also when there are no patches), unknown (the back "
-                           "is not visible).",
-        },
-        "patch_flank": {
-            "type": "string",
-            "enum": list(PATCH_PLACE_ANSWERS),
-            "description": "Is a patch on the side of the ribs or the belly, below the top of the back - with "
-                           "white fur above it along the spine? yes, no (also when there are no patches), "
-                           "unknown (the side is not visible).",
+            "enum": list(PATCH_LARGEST_ANSWERS),
+            "description": "The largest patch on the body: over_spine (it covers the middle line along the top "
+                           "of the back - the top line of the back right above it is coloured too), side (it "
+                           "sits on the side of the body with white fur between it and the spine - the top "
+                           "line of the back right above it is white), none (no patches on the body), unknown "
+                           "(the top of the back is not visible).",
         },
         "patch_rump": {
             "type": "string",
@@ -131,8 +125,8 @@ BODY_COLOURS_SCHEMA: dict[str, Any] = {
         },
         "note": {"type": "string", "description": "One short phrase on what you saw, or empty."},
     },
-    "required": ["chest", "belly", "paws", "back_tipping", "chest_lightness", "patch_amount", "patch_saddle",
-                 "patch_flank", "patch_rump", "note"],
+    "required": ["chest", "belly", "paws", "back_tipping", "chest_lightness", "patch_amount", "patch_largest",
+                 "patch_rump", "note"],
     "additionalProperties": False,
 }
 
@@ -174,10 +168,12 @@ fawn; cream is off-white with a warm tint; white is a plain white.
 
 patches: only patches of colour on a white or near-white body, between the
 neck and the root of the tail - not the head, the ears or the tail. Say how
-much of the body they cover, and for each place whether a patch sits there:
-saddle across the top of the back, flank on the side below a white spine,
-rump over the hips and thighs. A dog can have patches in several places. A
-coloured dog with a white chest or white feet has no patches (none, no)."""
+much of the body they cover, and whether a patch sits over the hips and
+thighs (rump). For the largest patch, look at the top line of the back
+right above it: coloured there, it covers the spine (over_spine); white
+there, with white fur between the patch and the spine, it is on the side
+(side). A coloured dog with a white chest or white feet has no patches
+(none, no)."""
 
 
 async def read_body_colours(transport: Transport, photo_blocks: list[dict[str, Any]],
@@ -225,14 +221,19 @@ async def read_body_colours(transport: Transport, photo_blocks: list[dict[str, A
 
 def vote_patches(readings: list[dict[str, Any]]) -> dict[str, Any]:
     """patch_amount: the amount more than half of all the samples gave, else
-    unknown; patch_places: the places more than half said yes to."""
-    amounts = Counter(r.get("patch_amount") for r in readings if r.get("patch_amount") in PATCH_AMOUNT_ANSWERS)
-    top = amounts.most_common(1)
-    amount = top[0][0] if top and top[0][1] * 2 > len(readings) else "unknown"
-    yes = {place: sum(1 for r in readings if r.get(field) == "yes") for field, place in PATCH_FIELDS.items()}
-    places = [place for place in PATCH_PLACES if yes[place] * 2 > len(readings)]
+    unknown; patch_places: "side" when more than half put the largest patch
+    on the side, "rump" when more than half said yes to the rump."""
+    def majority(key: str, allowed: tuple[str, ...]) -> tuple[str, dict[str, int]]:
+        said = Counter(r.get(key) for r in readings if r.get(key) in allowed)
+        top = said.most_common(1)
+        return (top[0][0] if top and top[0][1] * 2 > len(readings) else "unknown"), dict(said)
+
+    amount, amounts = majority("patch_amount", PATCH_AMOUNT_ANSWERS)
+    largest, largests = majority("patch_largest", PATCH_LARGEST_ANSWERS)
+    rump, rumps = majority("patch_rump", PATCH_PLACE_ANSWERS)
+    places = (["side"] if largest == "side" else []) + (["rump"] if rump == "yes" else [])
     return {"patch_amount": amount, "patch_places": places,
-            "patch_votes": {"amount": dict(amounts), "yes": yes}}
+            "patch_votes": {"amount": amounts, "largest": largests, "rump": rumps}}
 
 
 # answer -> colour role (simple._role_colour); "dark_tan_spots" paints the
@@ -312,4 +313,4 @@ def apply_body_colours(region_colors: list[dict[str, Any]], markings: list[dict[
 
 
 __all__ = ["read_body_colours", "apply_body_colours", "filter_leg_features", "vote_patches", "PAW_ANSWERS",
-           "BODY_COLOURS_SCHEMA", "CHEST_ANSWERS", "BELLY_ANSWERS", "PATCH_PLACES"]
+           "BODY_COLOURS_SCHEMA", "CHEST_ANSWERS", "BELLY_ANSWERS"]

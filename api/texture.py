@@ -430,9 +430,12 @@ def noise_field(shape: tuple[int, int], seed: int) -> np.ndarray:
     return ((total - total.min()) / max(spread, 1e-6)).astype(np.float32)
 
 
-def _select(mask: np.ndarray, field: np.ndarray, keep: float) -> np.ndarray:
-    """Cut a soft-edged patch covering roughly `keep` of the mask."""
+def _select(mask: np.ndarray, field: np.ndarray, keep: float, domain: np.ndarray | None = None) -> np.ndarray:
+    """Cut a soft-edged patch covering roughly `keep` of the mask (of the
+    domain's texels, when given)."""
     inside = mask > 0.5
+    if domain is not None and (domain & inside).any():
+        inside = domain & inside
     if not inside.any():
         return np.zeros_like(mask)
     threshold = float(np.quantile(field[inside], 1.0 - float(np.clip(keep, 0.01, 0.99))))
@@ -1138,6 +1141,7 @@ def compose_body(
             # noise the patches broke at every seam and came out with torn,
             # jagged edges (user on eval demo e13)
             field = noise
+            trunk = None
             if landmarks is not None and landmarks.position is not None:
                 rng = np.random.default_rng(PATCH_SEED + order)
                 surface = landmarks.valid if landmarks.valid is not None else mask > -1
@@ -1150,30 +1154,53 @@ def compose_body(
                 if inside.any():
                     spread = float(smooth[inside].std()) or 1.0
                     field = 0.5 + (smooth - float(smooth[inside].mean())) / spread * PATCH_FIELD_SPREAD
+                    # on the trunk only: the back region runs onto the neck
+                    # and the tail, and the neck crest is its highest place -
+                    # the patches ran from a black head down the neck as one
+                    # strip, and a whole tail came out coloured, on dogs with
+                    # a white neck and a white tail (eval e13, shelter
+                    # maltese 6 and 7, e15 - all five patched dogs)
+                    off = _patch_off_trunk(masks, landmarks, mask.shape)
+                    off = smooth_on_surface(off, landmarks.position, surface, PATCH_OFF_RAMP_M,
+                                            stride=max(SURFACE_STRIDE,
+                                                       round(SURFACE_STRIDE * PATCH_OFF_RAMP_M / 0.035)))
+                    field = field - PATCH_OFF_TRUNK * off
+                    trunk = inside & (off < 0.5)
                     # on the top of the body: the back region runs down the
-                    # flanks onto the upper legs and the tail, and patches
-                    # scattered over all of it came out a cow's spots down to
-                    # the knees where the dog had a saddle and a rump patch
-                    # over white legs (shelter maltese 7)
+                    # flanks onto the upper legs, and patches scattered over
+                    # all of it came out a cow's spots down to the knees where
+                    # the dog had a saddle and a rump patch over white legs
+                    # (shelter maltese 7)
                     z = landmarks.position[..., 2]
-                    low, high = np.percentile(z[inside], [10, 90])
+                    low, high = np.percentile(z[trunk if trunk.any() else inside], [10, 90])
                     top = np.clip((z - low) / max(high - low, 1e-6), 0.0, 1.0)
-                    # ... but not the tail, which stands as high as the back
-                    # and came out wholly coloured on a white-tailed puppy
-                    # (shelter maltese 6): behind the hind feet it is lifted
-                    # as the bottom is
-                    hind = [landmarks.world(name)[1] for name in ("paw_lb", "paw_rb") if name in landmarks.points]
-                    tail = (landmarks.position[..., 1] > float(np.mean(hind)) + PATCH_TAIL_BEHIND_M if hind
-                            else np.zeros(mask.shape, dtype=bool))
-                    field = field + PATCH_TOP_BIAS * (np.where(tail, 0.0, top) - 0.5)
                     # ... and drawn to where the reading put them (body_colours
-                    # patch_*)
+                    # patch_*): on the side, the top bias would pull a flank
+                    # patch onto the spine (shelter maltese 6)
                     places = [p for p in marking.get("places") or () if p in PATCH_PLACE_SHAPE]
-                    place = _patch_place_weight(landmarks, inside, places)
+                    if "side" not in places:
+                        field = field + PATCH_TOP_BIAS * (top - 0.5)
+                    # one flank: a flank patch is one dog's side, and the
+                    # photograph does not say which
+                    side = float(rng.choice((-1.0, 1.0)))
+                    place = _patch_place_weight(landmarks, trunk, places, side)
                     if place is not None:
-                        field = field + PATCH_PLACE_BIAS * np.where(tail, 0.0, place)
+                        field = field + PATCH_PLACE_BIAS * place
                         placed.append(f"patches@{'+'.join(places)}")
-            blob = _select(mask, field, PATCH_AREA.get(size, PATCH_AREA["medium"]))
+            # the area is the trunk's share: off it the field is too low to
+            # be picked, and the region's share came out a third more of the
+            # trunk once the neck and tail were taken out (eval e13, a
+            # blanket from the withers to the rump)
+            blob = _select(mask, field, PATCH_AREA.get(size, PATCH_AREA["medium"]), domain=trunk)
+            if trunk is not None:
+                # no pale half-painted spots: where the field rose near the
+                # cut but not past it, a faint grey or tan smudge (e13's
+                # shoulder, e15's back). Only the edge band of a patch with a
+                # painted core keeps its fade, measured on the surface so a
+                # seam does not cut it
+                core = smooth_on_surface((blob > PATCH_CORE).astype(np.float32), landmarks.position, surface,
+                                         PATCH_CORE_REACH_M, stride=PATCH_CORE_STRIDE)
+                blob = blob * np.clip(core / PATCH_CORE_NEAR, 0.0, 1.0)
             placed.append(f"patches:{region}")
         if blob is None and marking_type == "blaze" and landmarks is not None:
             # down the top of the muzzle as well: a blaze runs from the nose
@@ -1282,38 +1309,77 @@ def compose_body(
 PATCH_SIGMA_M = 0.07
 PATCH_FIELD_SPREAD = 0.25
 PATCH_SEED = 4242
-# the field's lift from the bottom tenth of the region's height to the top
+# the field's lift from the bottom tenth of the trunk's height to the top
 # tenth (in the field's units: its spread is PATCH_FIELD_SPREAD)
 PATCH_TOP_BIAS = 0.4
-# the tail: what lies this far behind the hind feet
+# Off the trunk, where no patch goes: the template's own collar and tail
+# masks (masks_source) and what lies PATCH_TAIL_BEHIND_M behind the hind feet
+# (the maltese's tail root is tagged back), lowered in the field by
+# PATCH_OFF_TRUNK, faded in over PATCH_OFF_RAMP_M on the surface so a patch
+# does not end on the masks' line
+PATCH_OFF_SOURCES = ("collar", "tail_top", "tail_tip")
 PATCH_TAIL_BEHIND_M = 0.05
-# The share of the region the patches cover, by body_colours patch_amount
-# (lite.PATCH_SIZE: small -> small, large -> medium, most -> large; "large"
-# means patches bigger than the head, not more of the body - eval e13's two
-# large patches cover under a quarter of it). medium is also for no answer:
-# a quarter of the back region sits between a white puppy with one flank
-# patch (shelter maltese 6, ~15 %) and a saddle-and-rump parti (maltese 7,
-# ~35 %); the markings' medium 0.35 made the first a saddled dog.
+PATCH_OFF_TRUNK = 1.0
+# as wide as the patches' own noise: over 2.5 cm the fade outweighed the
+# noise and a patch ended on a straight line at the tail root and the neck
+PATCH_OFF_RAMP_M = 0.06
+# a patch's painted core (blob above PATCH_CORE) and how near to one, on the
+# surface, its fading edge must lie: the core smoothed with this sigma
+# reaches PATCH_CORE_NEAR at about one sigma off its edge
+PATCH_CORE = 0.6
+PATCH_CORE_REACH_M = 0.02
+PATCH_CORE_NEAR = 0.15
+# sampled every 7 texels: 2.9 s on the jindo against 11.5 s at 5, the reach
+# within 0.06 at the 99th percentile
+PATCH_CORE_STRIDE = 7
+# The share of the TRUNK (the back region off the neck and the tail) the
+# patches cover, by body_colours patch_amount (lite.PATCH_SIZE: small ->
+# small, large -> medium, most -> large; "large" means patches bigger than
+# the head, not more of the body). medium is also for no answer. As shares
+# of the whole region (neck and tail in) a quarter sat between a white puppy
+# with one flank patch (shelter maltese 6, ~15 %) and a saddle-and-rump parti
+# (maltese 7, ~35 %); of the trunk, 0.25 draws maltese 7 as a saddle and a
+# separate rump patch and eval e13 with a white back before its rump patch.
 PATCH_AREA = {"small": 0.12, "medium": 0.25, "large": 0.45}
 # A place the reading put patches on, drawn there on top of the top-of-body
 # bias: along the trunk, 0 at the front feet and 1 at the hind feet, as
-# (centre, gaussian sigma), times a ramp (from, to) of the height on the
-# trunk, 0 at its lowest tenth and 1 at its highest; the most of the places
-# read, added to the field at PATCH_PLACE_BIAS per unit (its noise spread is
-# PATCH_FIELD_SPREAD). A rump weight alone moves a few percent of the
-# texels: the top bias already leans the patches back (e13 5.6 %).
-# Only the rump: the saddle answer was yes in 15 of 15 samples over five
-# patched dogs (a flank patch too), and with flank it covered the whole trunk
-# - one blanket where the dog has a white back and a rump patch (eval e13).
+# (centre, gaussian sigma), times the height on the trunk (0 at its lowest
+# tenth, 1 at its highest) as a ramp (from, to) or a band (centre, -sigma);
+# the most of the places read, added to the field at PATCH_PLACE_BIAS per
+# unit (its noise spread is PATCH_FIELD_SPREAD). A rump weight alone moves a
+# few percent of the texels: the top bias already leans the patches back
+# (e13 5.6 %). An over-the-spine patch is the top bias itself. Weighting a
+# saddle, a flank and a rump at once covered the whole trunk - one blanket
+# where the dog has a white back and a rump patch (eval e13).
 PATCH_PLACE_SHAPE = {
     "rump": ((0.95, 0.2), (0.15, 0.6)),
+    "side": ((0.55, 0.18), (0.45, -0.18)),
 }
 PATCH_PLACE_BIAS = 0.5
+# a side patch: on one flank, faded across the midline over this width
+PATCH_SIDE_FADE_M = 0.03
 
 
-def _patch_place_weight(landmarks: Any, inside: np.ndarray, places: list[str]) -> np.ndarray | None:
-    """0..1 per texel: how well it lies on one of the places, or None when
-    no place was read or the template has no feet to measure the trunk by."""
+def _patch_off_trunk(masks: "MaskLibrary", landmarks: Any, shape: tuple[int, ...]) -> np.ndarray:
+    """1 on the neck and the tail (PATCH_OFF_SOURCES and behind the hind
+    feet), 0 on the trunk."""
+    off = np.zeros(shape[:2], dtype=np.float32)
+    for name in PATCH_OFF_SOURCES:
+        path = masks.dir.parent / "masks_source" / f"{name}.png"
+        if path.exists():
+            image = Image.open(path).convert("L").resize((shape[1], shape[0]), Image.NEAREST)
+            off = np.maximum(off, (np.asarray(image) > 127).astype(np.float32))
+    hind = [landmarks.world(name)[1] for name in ("paw_lb", "paw_rb") if name in landmarks.points]
+    if hind:
+        off[landmarks.position[..., 1] > float(np.mean(hind)) + PATCH_TAIL_BEHIND_M] = 1.0
+    return off
+
+
+def _patch_place_weight(landmarks: Any, inside: np.ndarray, places: list[str],
+                        side: float = 1.0) -> np.ndarray | None:
+    """0..1 per texel: how well it lies on one of the places (side: on the
+    flank whose x has this sign), or None when no place was read or the
+    template has no feet to measure the trunk by."""
     feet = {name: landmarks.world(name) for name in ("paw_lf", "paw_rf", "paw_lb", "paw_rb")
             if name in landmarks.points}
     if not places or len(feet) < 4:
@@ -1332,7 +1398,9 @@ def _patch_place_weight(landmarks: Any, inside: np.ndarray, places: list[str]) -
     for place in places:
         (centre, sigma), (a, b) = PATCH_PLACE_SHAPE[place]
         lengthwise = np.exp(-0.5 * ((along - centre) / sigma) ** 2)
-        upright = np.clip((height - a) / (b - a), 0.0, 1.0)
+        upright = np.exp(-0.5 * ((height - a) / -b) ** 2) if b < 0 else np.clip((height - a) / (b - a), 0.0, 1.0)
+        if place == "side":
+            upright = upright * np.clip(0.5 + side * position[..., 0] / PATCH_SIDE_FADE_M, 0.0, 1.0)
         weight = np.maximum(weight, (lengthwise * upright).astype(np.float32))
     return weight
 
