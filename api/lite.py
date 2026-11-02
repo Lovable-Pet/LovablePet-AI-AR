@@ -918,6 +918,9 @@ def cheeks_to_head(region_colors: list[dict[str, Any]]) -> str | None:
 DARK_BRINDLE_SHARE = 0.6
 # ... and under this share a white blaze covers the head (texture "full")
 BLAZE_FULL_DARK_SHARE = 0.6
+# body_colours patch_amount -> the patches' size (texture.PATCH_AREA). large
+# is patches bigger than the head, not more of the body: the medium area
+PATCH_SIZE = {"small": "small", "large": "medium", "most": "large"}
 
 
 # A skull painted the crown's warm colour (crown_on_skull), or a piebald's
@@ -1371,9 +1374,20 @@ async def run_lite(
         if "body_patches" in features and not flank_seen:
             log["steps"]["patches_skipped"] = f"body_patches but the photo view is {views}"
         patches_in = decision.second_color if decision.second_color not in (None, "none") else patch_colour
-        if "body_patches" in features and flank_seen and patches_in:
+        # how much and where, from the body call (body_colours patch_*): the
+        # amount sizes them, the places draw them there. A body every sample
+        # called patch-free keeps the coat plain.
+        body_votes = body_log.get("votes") or {}
+        patch_amount = body_votes.get("patch_amount") or "unknown"
+        no_patches = ((body_votes.get("patch_votes") or {}).get("amount") or {}).get("none", 0) == \
+            body_votes.get("samples", -1)
+        if "body_patches" in features and flank_seen and patches_in and no_patches:
+            log["steps"]["patches_skipped"] = "body call: no patches on the body"
+        elif "body_patches" in features and flank_seen and patches_in:
             markings.append({"type": "patches", "region": "back", "color": patches_in,
-                             "size": "medium", "anchor": "none", "note": "piebald patches on the body"})
+                             "size": PATCH_SIZE.get(patch_amount, "medium"),
+                             "places": list(body_votes.get("patch_places") or []),
+                             "anchor": "none", "note": "piebald patches on the body"})
         if body_answers:
             from .body_colours import apply_body_colours
             chest, belly, paws = body_answers

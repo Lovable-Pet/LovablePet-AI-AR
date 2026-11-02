@@ -1163,9 +1163,16 @@ def compose_body(
                     # (shelter maltese 6): behind the hind feet it is lifted
                     # as the bottom is
                     hind = [landmarks.world(name)[1] for name in ("paw_lb", "paw_rb") if name in landmarks.points]
-                    if hind:
-                        top = np.where(landmarks.position[..., 1] > float(np.mean(hind)) + PATCH_TAIL_BEHIND_M, 0.0, top)
-                    field = field + PATCH_TOP_BIAS * (top - 0.5)
+                    tail = (landmarks.position[..., 1] > float(np.mean(hind)) + PATCH_TAIL_BEHIND_M if hind
+                            else np.zeros(mask.shape, dtype=bool))
+                    field = field + PATCH_TOP_BIAS * (np.where(tail, 0.0, top) - 0.5)
+                    # ... and drawn to where the reading put them (body_colours
+                    # patch_*)
+                    places = [p for p in marking.get("places") or () if p in PATCH_PLACE_SHAPE]
+                    place = _patch_place_weight(landmarks, inside, places)
+                    if place is not None:
+                        field = field + PATCH_PLACE_BIAS * np.where(tail, 0.0, place)
+                        placed.append(f"patches@{'+'.join(places)}")
             blob = _select(mask, field, PATCH_AREA.get(size, PATCH_AREA["medium"]))
             placed.append(f"patches:{region}")
         if blob is None and marking_type == "blaze" and landmarks is not None:
@@ -1280,12 +1287,54 @@ PATCH_SEED = 4242
 PATCH_TOP_BIAS = 0.4
 # the tail: what lies this far behind the hind feet
 PATCH_TAIL_BEHIND_M = 0.05
-# The share of the region the patches cover. The reading says only that
-# there are patches, not how much: a quarter of the back region sits
-# between a white puppy with one flank patch (shelter maltese 6, ~15 %)
-# and a saddle-and-rump parti (maltese 7, ~35 %); the markings' medium
-# 0.35 made the first a saddled dog.
+# The share of the region the patches cover, by body_colours patch_amount
+# (lite.PATCH_SIZE: small -> small, large -> medium, most -> large; "large"
+# means patches bigger than the head, not more of the body - eval e13's two
+# large patches cover under a quarter of it). medium is also for no answer:
+# a quarter of the back region sits between a white puppy with one flank
+# patch (shelter maltese 6, ~15 %) and a saddle-and-rump parti (maltese 7,
+# ~35 %); the markings' medium 0.35 made the first a saddled dog.
 PATCH_AREA = {"small": 0.12, "medium": 0.25, "large": 0.45}
+# A place the reading put patches on, drawn there on top of the top-of-body
+# bias: along the trunk, 0 at the front feet and 1 at the hind feet, as
+# (centre, gaussian sigma), times a ramp (from, to) of the height on the
+# trunk, 0 at its lowest tenth and 1 at its highest; the most of the places
+# read, added to the field at PATCH_PLACE_BIAS per unit (its noise spread is
+# PATCH_FIELD_SPREAD). A rump weight alone moves a few percent of the
+# texels: the top bias already leans the patches back (e13 5.6 %).
+# Only the rump: the saddle answer was yes in 15 of 15 samples over five
+# patched dogs (a flank patch too), and with flank it covered the whole trunk
+# - one blanket where the dog has a white back and a rump patch (eval e13).
+PATCH_PLACE_SHAPE = {
+    "rump": ((0.95, 0.2), (0.15, 0.6)),
+}
+PATCH_PLACE_BIAS = 0.5
+
+
+def _patch_place_weight(landmarks: Any, inside: np.ndarray, places: list[str]) -> np.ndarray | None:
+    """0..1 per texel: how well it lies on one of the places, or None when
+    no place was read or the template has no feet to measure the trunk by."""
+    feet = {name: landmarks.world(name) for name in ("paw_lf", "paw_rf", "paw_lb", "paw_rb")
+            if name in landmarks.points}
+    if not places or len(feet) < 4:
+        return None
+    position = landmarks.position
+    front = float(np.mean([feet["paw_lf"][1], feet["paw_rf"][1]]))
+    back = float(np.mean([feet["paw_lb"][1], feet["paw_rb"][1]]))
+    along = (position[..., 1] - front) / (back - front)
+    trunk = inside & (along >= 0.0) & (along <= 1.0)
+    if not trunk.any():
+        return None
+    z = position[..., 2]
+    low, high = np.percentile(z[trunk], [10, 90])
+    height = np.clip((z - low) / max(high - low, 1e-6), 0.0, 1.0)
+    weight = np.zeros(inside.shape, dtype=np.float32)
+    for place in places:
+        (centre, sigma), (a, b) = PATCH_PLACE_SHAPE[place]
+        lengthwise = np.exp(-0.5 * ((along - centre) / sigma) ** 2)
+        upright = np.clip((height - a) / (b - a), 0.0, 1.0)
+        weight = np.maximum(weight, (lengthwise * upright).astype(np.float32))
+    return weight
 
 
 # Sable: the second colour laid over the top of the dog as dark-tipped hair.
