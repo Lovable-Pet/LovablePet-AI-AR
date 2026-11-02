@@ -923,6 +923,7 @@ BLAZE_FULL_DARK_SHARE = 0.6
 PATCH_SIZE = {"small": "small", "large": "medium", "most": "large"}
 
 
+
 # A skull painted the crown's warm colour (crown_on_skull), or a piebald's
 # cap, that the photo measures darker than this (CIE L*) is chocolate: a
 # dark brown head read "tan" came out orange (shelter puppy 13, measured L 26).
@@ -1194,6 +1195,21 @@ async def run_lite(
                                 features.append("tan_cheeks")
                         elif cheeks == "cream" and not tan_crown:
                             face_log["face_light_lab"] = light_lab
+                    # a dark muzzle top on a coat that is not dark, from every
+                    # sample only: the dark lips and nose of a pale face read
+                    # as one 3-4 of 5 times (shelter chihuahuas 1 and 3, a
+                    # black mask round a cream face; eval e04 4/5, e18 3/5),
+                    # the real black masks of fawn dogs 5 of 5 (eval e10,
+                    # e20, shelter puppy 6 in three runs). Short of that, the
+                    # next answer
+                    from .patterns import color_family
+                    muzzle_votes = votes.get("muzzle") or {}
+                    if (muzzle == "dark" and color_family(decision.base_color) != "dark"
+                            and muzzle_votes.get("dark", 0) < votes.get("samples", 0)):
+                        others = sorted(((n, a) for a, n in muzzle_votes.items() if a not in ("dark", "unknown")),
+                                        reverse=True)
+                        face_log["muzzle_not_unanimous"] = f"dark {muzzle_votes} on {decision.base_color}"
+                        muzzle = face_log["muzzle"] = others[0][1] if others else "unknown"
                     for name in (*CHEEK_FEATURES.get(cheeks, ()), *BROW_FEATURES.get(brows, ()),
                                  *MUZZLE_FEATURES.get(muzzle, ()), *EAR_FEATURES.get(ears, ())):
                         if name not in features:
@@ -1381,6 +1397,16 @@ async def run_lite(
         patch_amount = body_votes.get("patch_amount") or "unknown"
         no_patches = ((body_votes.get("patch_votes") or {}).get("amount") or {}).get("none", 0) == \
             body_votes.get("samples", -1)
+        # a piebald is a white body with patches: the body call seeing them
+        # is enough when the layout samples did not name them (shelter
+        # chihuahua 10: body_patches 1 of 3 layout samples, patches large
+        # 3/3 in the body call - a white body under a black head). Only on a
+        # piebald: a fawn dog with a white bib read "large patches" too
+        # (chihuahua 2)
+        if (decision.pattern == "piebald" and "body_patches" not in features
+                and patch_amount in ("small", "large", "most")):
+            features.append("body_patches")
+            log["steps"]["patches_from_body_call"] = f"piebald, body call {patch_amount}"
         if "body_patches" in features and flank_seen and patches_in and no_patches:
             log["steps"]["patches_skipped"] = "body call: no patches on the body"
         elif "body_patches" in features and flank_seen and patches_in:
