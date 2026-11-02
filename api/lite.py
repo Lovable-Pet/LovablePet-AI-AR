@@ -415,19 +415,23 @@ def _surface_position(masks_dir) -> np.ndarray | None:
 
 
 def _fill_from_surface(image: np.ndarray, fill: np.ndarray, valid: np.ndarray,
-                       position: np.ndarray | None) -> np.ndarray:
+                       position: np.ndarray | None, exclude: np.ndarray | None = None) -> np.ndarray:
     """`image` (h, w, c) with the `fill` texels taken from the nearest other
     texels on the dog's SURFACE (3D, inverse-distance over the 6 nearest).
     The confetti islands (eyelid shells, claws, fur-clump fringes) used to
     take the build's colour, which since the build is feathered and the
     refine blends differs from the finished colour around them: they came
     out as white shards on the face (user on demo e08: "the face is
-    broken"). None position falls back to the image as it is."""
+    broken"). None position falls back to the image as it is. `exclude`:
+    texels that give no colour (the protected pads, eyes and nose - the
+    pads beside a filled toe turned a white paw grey)."""
     if position is None or not fill.any():
         return image
     from scipy.spatial import cKDTree
 
     source = valid & ~fill
+    if exclude is not None:
+        source &= ~exclude
     rows, cols = np.nonzero(source[::2, ::2])
     rows, cols = rows * 2, cols * 2
     tree = cKDTree(position[rows, cols].astype(np.float64))
@@ -437,6 +441,37 @@ def _fill_from_surface(image: np.ndarray, fill: np.ndarray, valid: np.ndarray,
     values = image[rows, cols].astype(np.float64)
     out = image.copy()
     out[fr, fc] = (np.einsum("nk,nkc->nc", weight, values[nearest]) / weight.sum(axis=1)[:, None]).astype(image.dtype)
+    return out
+
+
+# The fine detail a filled island keeps: its own lightness against its own
+# blur at this sigma (texels), clipped. A paw cut into 13 small islands
+# (the maltese's left forepaw, half its texels under TINY_ISLAND_TEXELS) took
+# one flat colour from around it and lost its toes - a smooth white block
+# beside three toed paws (user on shelter maltese 7 in 3D). A wrongly
+# coloured shard is flat in itself, so it still takes its surroundings'
+# colour; its own crevices and claws come back.
+ISLAND_DETAIL_SIGMA = 4.0
+ISLAND_DETAIL_CLIP = (0.5, 1.5)
+
+
+def _keep_island_detail(filled: np.ndarray, before: np.ndarray, fill: np.ndarray, valid: np.ndarray,
+                        lab: bool = False) -> np.ndarray:
+    """`filled` with the `fill` texels' fine lightness from `before`: L*
+    added back (lab) or the RGB scaled by the luma ratio."""
+    from scipy import ndimage
+
+    if not fill.any():
+        return filled
+    light = before[..., 0].astype(np.float64) if lab else before.astype(np.float64).mean(-1)
+    weight = ndimage.gaussian_filter(valid.astype(np.float64), ISLAND_DETAIL_SIGMA)
+    broad = ndimage.gaussian_filter(light * valid, ISLAND_DETAIL_SIGMA) / np.maximum(weight, 1e-3)
+    out = filled.copy()
+    if lab:
+        out[..., 0][fill] = (filled[..., 0][fill] + (light - broad)[fill]).astype(filled.dtype)
+        return out
+    ratio = np.clip(light / np.maximum(broad, 1.0), *ISLAND_DETAIL_CLIP)
+    out[fill] = np.clip(filled[fill].astype(np.float64) * ratio[fill][:, None], 0, 255).astype(filled.dtype)
     return out
 
 
@@ -818,7 +853,8 @@ async def refine_coat(
         # shards read as bright angular flecks all over a dark coat
         tiny = _tiny_islands(valid, TINY_ISLAND_TEXELS)
         if tiny.any():
-            merged_lab = _fill_from_surface(merged_lab, tiny, valid, surface_position)
+            merged_lab = _keep_island_detail(_fill_from_surface(merged_lab, tiny, valid, surface_position),
+                                             merged_lab, tiny, valid, lab=True)
             roll["tiny_islands_from_surface"] = int(tiny.sum())
         # an island the model recoloured wholesale (one hind leg painted
         # dark grey while the other three stayed white) hides inside the
@@ -1703,7 +1739,11 @@ async def run_lite(
         if protect_path.exists():
             tiny &= ~(np.asarray(Image.open(protect_path).convert("L").resize(finished.size)) > 127)
         # ... and the slivers again: the seam ring repainted their edges
-        out = _fill_from_surface(np.asarray(finished.convert("RGB")).copy(), tiny | slivers, valid, surface)
+        before = np.asarray(finished.convert("RGB")).copy()
+        protected = (np.asarray(Image.open(protect_path).convert("L").resize(finished.size)) > 127
+                     if protect_path.exists() else None)
+        out = _fill_from_surface(before.copy(), tiny | slivers, valid, surface, exclude=protected)
+        out = _keep_island_detail(out, before, tiny & ~slivers, valid)
         # ... and the padding is refilled from the islands, or the grey rim
         # the finish left around a small island stays in the texels the
         # renderer samples just past its edge
