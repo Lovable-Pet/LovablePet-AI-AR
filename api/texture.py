@@ -785,14 +785,16 @@ def _belly_reach(landmarks, mask: np.ndarray, jitter: np.ndarray | None,
     return np.clip(signed / max(EDGE_SOFT_PX, 1e-3) + 0.5, 0.0, 1.0).astype(np.float32)
 
 
-def _leg_inner(landmarks, jitter: np.ndarray | None) -> np.ndarray:
-    """1 where the surface faces the body's midline or forward, 0 where it
-    faces outward or back, with a fur-level edge; the inside of a leg."""
+def _leg_inner(landmarks, jitter: np.ndarray | None, forward_too: bool = True) -> np.ndarray:
+    """1 where the surface faces the body's midline or (`forward_too`)
+    forward, 0 where it faces outward or back, with a fur-level edge; the
+    inside of a leg."""
     normal = landmarks.normal
     side = np.sign(landmarks.position[..., 0]) if landmarks.position is not None else 1.0
     inward = -side * normal[..., 0]
-    forward = -normal[..., 1]
-    signed = np.maximum((inward - LEG_INNER_FACING) / 0.08, (forward - CHEST_FACING) / 0.08)
+    signed = (inward - LEG_INNER_FACING) / 0.08
+    if forward_too:
+        signed = np.maximum(signed, (-normal[..., 1] - CHEST_FACING) / 0.08)
     if jitter is not None:
         signed = signed + 0.6 * jitter
     return np.clip(signed + 0.5, 0.0, 1.0).astype(np.float32)
@@ -823,6 +825,39 @@ def _chest_front(landmarks, jitter: np.ndarray | None) -> np.ndarray:
         throat = np.clip((z - chest_z) / texel + 0.5, 0.0, 1.0)
         facing = np.maximum(facing, throat)
     return facing.astype(np.float32)
+
+
+# The chest mask runs down the front of each foreleg to the legs_lower band
+# (the retriever's from the brisket at 0.37 m to 0.30 m), and a light chest
+# painted there drew cream stockings from elbow to toes on golden and yellow
+# dogs whose photos show coat-coloured forelegs (shelter retriever-types 1,
+# 2, 9). Where the legs are the coat's colour a light chest stops at the
+# brisket - the lowest point of the chest mask's forward-facing midline
+# (BRISKET_MIDLINE_M either side of chest_center, its BRISKET_PERCENTILE) -
+# over BRISKET_RAMP_M; below it the mask keeps the base coat, the legs'
+# colour. Not where the legs are another colour (a black-and-tan's tan
+# legs under a white chest): the base coat there is black.
+BRISKET_MIDLINE_M = 0.015
+BRISKET_PERCENTILE = 5.0
+BRISKET_RAMP_M = 0.012
+
+
+def _above_brisket(landmarks, chest: np.ndarray, jitter: np.ndarray | None) -> np.ndarray | None:
+    """1 above the brisket, 0 below it on the forelegs (None without the
+    landmarks it needs)."""
+    if landmarks.position is None or landmarks.normal is None or "chest_center" not in landmarks.points:
+        return None
+    centre = landmarks.world("chest_center")
+    position = landmarks.position
+    midline = ((chest > 0.5) & landmarks.valid & (np.abs(position[..., 0] - centre[0]) < BRISKET_MIDLINE_M)
+               & (-landmarks.normal[..., 1] > CHEST_FACING) & (position[..., 1] < centre[1] + 0.1))
+    if int(midline.sum()) < 20:
+        return None
+    brisket = float(np.percentile(position[..., 2][midline], BRISKET_PERCENTILE))
+    signed = (position[..., 2] - brisket) / BRISKET_RAMP_M
+    if jitter is not None:
+        signed = signed + 0.3 * jitter
+    return np.clip(signed + 0.5, 0.0, 1.0).astype(np.float32)
 
 
 # A doberman-type chest: dark, with two small points-coloured spots on the
@@ -1020,6 +1055,15 @@ def compose_body(
             applied = applied * _chest_front(landmarks, masks.jitter)
             if debug:
                 _save_debug(debug, f"02_{order:02d}_chest_front", applied)
+        if (region == "chest" and landmarks is not None and color_family(color_name) == "light"
+                and color_family(base_color) != "light"
+                and next((str(e.get("color", "")) for e in entries
+                          if e.get("region") == "legs_lower"), base_color) == base_color):
+            above = _above_brisket(landmarks, mask, masks.jitter)
+            if above is not None:
+                applied = applied * above
+                if debug:
+                    _save_debug(debug, f"02_{order:02d}_chest_above_brisket", applied)
         if (region == "cheeks" and landmarks is not None and landmarks.position is not None
                 and color_family(color_name) == "point"
                 and color_family(next((str(e.get("color", "")) for e in entries if e.get("region") == "skull"),
@@ -1040,7 +1084,8 @@ def compose_body(
         inner_color = str(entry.get("inner_color") or "").lower()
         if (region == "legs_lower" and inner_color in FUR_COLORS and inner_color != color_name
                 and landmarks is not None and landmarks.normal is not None):
-            inner = applied * _leg_inner(landmarks, masks.jitter)
+            inner = applied * _leg_inner(landmarks, masks.jitter,
+                                         forward_too=str(entry.get("inner_faces") or "") != "inward")
             composed = _blend(composed, paint_region(gray, inner_color, mask, palette), inner)
             gradients_drawn.append(f"legs_lower inner:{inner_color}")
             if debug:
