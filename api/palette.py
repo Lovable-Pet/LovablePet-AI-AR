@@ -420,13 +420,43 @@ MEASURED_L_RANGE = (15.0, 92.0)
 # the cream cheeks green; e18's red backdrop cast the tan coat hue 34 and
 # the capped shift painted the whole dog salmon (eval v2).
 MEASURED_HUE_RANGE = (40.0, 100.0)
+# Chocolate is a dark, low-chroma coat. The table's mid is chroma 19, and
+# the shelter chocolate dogs measure 7-11 (a chocolate labrador's back cell
+# (19, 8, 7), its whole coat's pixels (19, 7, 8); a chocolate poodle's coat
+# 7) - under MEASURED_MIN_CHROMA, so no chocolate reading ever counted and
+# the labrador came out the table's milk chocolate, a lighter red-brown
+# than its photo (shelter retriever-type 6). A chocolate reading counts
+# from CHOCOLATE_MIN_CHROMA up to CHOCOLATE_MAX_L (a cream or white cell
+# beside it is lighter, a black one under MEASURED_L_RANGE).
+CHOCOLATE_MIN_CHROMA = 5.0
+CHOCOLATE_MAX_L = 45.0
+# ... and its chroma comes down toward the reading's (MEASURED_STRENGTH of
+# the way, to at least this share of the table's), hue kept, whatever the
+# border. Unlike the yellow puppies' cells (chroma 20 against their coats'
+# 20-30, see WARM_MIN_CHROMA_SHARE), the labrador's cell and coat agree.
+CHOCOLATE_MIN_CHROMA_SHARE = 0.5
 
 
-def _plausible_hue(lab: np.ndarray) -> bool:
+def _plausible_hue(lab: np.ndarray, name: str = "") -> bool:
     chroma = float(np.hypot(lab[1], lab[2]))
     hue = float(np.degrees(np.arctan2(lab[2], lab[1])))
-    return (chroma >= MEASURED_MIN_CHROMA and MEASURED_L_RANGE[0] <= float(lab[0]) <= MEASURED_L_RANGE[1]
+    if name == "chocolate":
+        min_chroma, top_l = CHOCOLATE_MIN_CHROMA, CHOCOLATE_MAX_L
+    else:
+        min_chroma, top_l = MEASURED_MIN_CHROMA, MEASURED_L_RANGE[1]
+    return (chroma >= min_chroma and MEASURED_L_RANGE[0] <= float(lab[0]) <= top_l
             and MEASURED_HUE_RANGE[0] <= hue <= MEASURED_HUE_RANGE[1])
+
+
+def _chocolate_chroma_shift(mid: np.ndarray, target: np.ndarray, strength: float) -> np.ndarray:
+    """The a*/b* shift that brings the chocolate ramp's chroma down toward
+    the measured (CHOCOLATE_MIN_CHROMA_SHARE), its hue kept; never up."""
+    table = float(np.hypot(mid[1], mid[2]))
+    if table < 1e-3:
+        return np.zeros(2, dtype=np.float32)
+    wanted = table + strength * (float(np.hypot(target[1], target[2])) - table)
+    share = float(np.clip(wanted / table, CHOCOLATE_MIN_CHROMA_SHARE, 1.0))
+    return (mid[1:] * (share - 1.0)).astype(np.float32)
 
 
 # "cream" on a warm dog is its pale front, which the calls now name by being
@@ -504,6 +534,13 @@ FACE_LIGHT_MIN_SHARE = 0.18
 # (shelter chihuahua 7: 18 % with these). The black sheen the cool test is
 # for sits at L* 45-60 (puppy 10, whose crop is now uncut and skipped).
 FACE_COOL_WHITE = (55.0, 12.0)
+# Light fur this near grey is white or cream in shade, never tan: the
+# nearest-ramp test goes by lightness first, and a white-cheeked
+# black-and-white mix in a dim kennel (shelter retriever-type 10, light fur
+# L* 57, chroma 2.2) sat nearer the tan ramp's mid (L* 56) than white's
+# (93) and came out with a tan band across its face. Tan cheeks read
+# chroma 12-17 (shelter puppy 9, chihuahuas 5 and 10).
+FACE_TAN_MIN_CHROMA = 8.0
 
 
 # The crown in the upper face of a head crop (shares of its height and
@@ -609,7 +646,7 @@ def cheeks_from_photo(cheeks: str, share: float | None, lab: list[float] | None)
 
     if share is not None and share < FACE_LIGHT_MIN_SHARE:
         return "dark"
-    if lab is None:
+    if lab is None or float(np.hypot(lab[1], lab[2])) < FACE_TAN_MIN_CHROMA:
         return cheeks
     def distance(name: str) -> float:
         mid = linear_to_lab(hex_to_linear(FUR_PALETTE[name][1])[None, None, :])[0, 0]
@@ -721,7 +758,7 @@ def ramps_from_measurement(
         reading = measured.get(region) if isinstance(measured, dict) else None
         if reading and reading.get("lab"):
             lab = np.asarray(reading["lab"], dtype=np.float32)
-            if _plausible_hue(lab):
+            if _plausible_hue(lab, name):
                 by_name.setdefault(name, []).append(lab)
             else:
                 skipped.append(f"{region}:{name}@L{lab[0]:.0f}")
@@ -755,6 +792,8 @@ def ramps_from_measurement(
             delta[1:] = _warm_chroma_shift(stop_labs[1], target, strength, max_shift_ab)
         else:
             delta[1:] = np.clip(delta[1:], -max_shift_ab, max_shift_ab)
+        if name == "chocolate":
+            delta[1:] = _chocolate_chroma_shift(stop_labs[1], target, strength)
         moved = []
         for lab in stop_labs:
             rgb = to_srgb(lab_to_linear((lab + delta).astype(np.float32)[None, None, :])[0, 0])
