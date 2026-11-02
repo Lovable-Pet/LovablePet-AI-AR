@@ -52,10 +52,13 @@ ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "archive" / "shiba" / "output" / "skeleton_shiba_small.glb"
 COMPONENTS = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT4": 16}
 DTYPES = {5126: np.float32, 5125: np.uint32, 5123: np.uint16, 5121: np.uint8}
-# bones whose direction follows the source's (a chain bone with one child)
-CHAIN_PREFIXES = ("L_hip", "L_knee", "L_ankle", "L_foot", "R_hip", "R_knee", "R_ankle", "R_foot",
-                  "L_shoulder", "L_elbow", "L_wrist", "L_hand", "R_shoulder", "R_elbow", "R_wrist", "R_hand",
-                  "tail_", "neck_", "L_clavicle", "R_clavicle")
+# bones whose direction follows the source's absolute direction (a chain bone
+# with one child). None now: copied onto the jindo's legs, whose rest
+# stance differs from the puppy's, they crossed its front legs and splayed
+# its stance even standing still (user, 11-03: "다리가 요염한 자세") - the
+# change from rest (the world delta) keeps the template's own stance, and
+# the ground pass takes care of a leg through the floor
+CHAIN_PREFIXES: tuple[str, ...] = ()
 # GROUND CONTACT. The source is a short-legged puppy: given its joint
 # angles, the jindo's rump sat 31 cm under the floor and its legs went
 # through it lying down; lifted until the rump touched, its front paws hung
@@ -81,6 +84,8 @@ IK_STEP_DEG = 25.0
 REACH_SHARE = 0.85
 # a paw comes no nearer the midline than this share of its rest stance
 LATERAL_KEEP = 0.6
+# the share of a front leg's straight length it stands at when the dog sits
+SIT_LEG_SHARE = 0.96
 LEGS = {"LB": ("L_hip_jnt", "L_knee_jnt", "L_ankle_jnt", "L_foot_jnt", "LB_toes_jnt"),
         "RB": ("R_hip_jnt", "R_knee_jnt", "R_ankle_jnt", "R_foot_jnt", "RB_toes_jnt"),
         "LF": ("L_shoulder_jnt", "L_elbow_jnt", "L_wrist_jnt", "L_hand_jnt", "LF_toes_jnt"),
@@ -274,7 +279,7 @@ def retarget(source: Rig, target: Rig, clip: str, fps: float) -> dict:
         name = (target.gltf.nodes[i].name or "").split(".")[0]
         j = source.by_name.get(name)
         kids = [c for c in target.gltf.nodes[i].children or [] if c in target.joints]
-        if j is None or len(kids) != 1 or not name.startswith(CHAIN_PREFIXES):
+        if j is None or len(kids) != 1 or not CHAIN_PREFIXES or not name.startswith(CHAIN_PREFIXES):
             continue
         kid_name = (target.gltf.nodes[kids[0]].name or "").split(".")[0]
         if kid_name in source.by_name:
@@ -372,6 +377,7 @@ def ground_pass(source: Rig, target: Rig, frames: list[dict[int, tuple]], rotati
         world = pose()
         # 2. the pitch about the rump's contact, for front paws that must reach the floor
         front = [leg for leg in ("LF", "RF") if leg in legs and planted[leg]]
+        sit_front = front if on_floor > 0.5 else []
         if on_floor > 0.5 and front:
             _, pivot = target.body_low(world)
             cog_rot, cog_pos = _rot(world[mover]), world[mover][:3, 3].copy()
@@ -383,18 +389,17 @@ def ground_pass(source: Rig, target: Rig, frames: list[dict[int, tuple]], rotati
                 state["t"] = to_local @ (pivot + turn @ (cog_pos - pivot) - parent_world[:3, 3])
 
             def front_gap(angle: float) -> float:
-                # what the leg cannot close by straightening (REACH_SHARE of
-                # its slack): pitched for the whole gap, a sitting jindo
-                # crouched forward on bent front legs
+                # the shoulders at the height a near-straight front leg
+                # reaches (SIT_LEG_SHARE of its length) above its rest toe:
+                # the jindo's torso is 1.9 times the puppy's against a front
+                # leg 1.2 times, so pitched up as far as the puppy's the
+                # paws hung 19 cm in the air; pitched down until the paws
+                # touched where they were, it crouched on legs slanting back
+                # (user, 11-03: "자연스럽게 안 앉고")
                 set_pitch(angle)
                 w = pose()
-                gaps = []
-                for leg in front:
-                    chain = legs[leg]
-                    gap = w[chain[-1]][1, 3] - toe_rest[leg]
-                    slack = leg_length[leg] - np.linalg.norm(w[chain[-1]][:3, 3] - w[chain[0]][:3, 3])
-                    gaps.append(gap - REACH_SHARE * max(slack, 0.0) if gap > 0 else gap)
-                return float(np.mean(gaps))
+                return float(np.mean([w[legs[leg][0]][1, 3] - SIT_LEG_SHARE * leg_length[leg] - toe_rest[leg]
+                                      for leg in front]))
 
             angles = np.linspace(-PITCH_LIMIT_DEG, PITCH_LIMIT_DEG, 29)
             gaps = np.array([front_gap(a) for a in angles])
@@ -430,6 +435,9 @@ def ground_pass(source: Rig, target: Rig, frames: list[dict[int, tuple]], rotati
                 continue
             goal = world[toe][:3, 3].copy()
             goal[1] = toe_rest[leg]
+            if leg in sit_front:
+                # a sitting dog's front legs stand straight down from the shoulders
+                goal[2] = world[chain[0]][2, 3]
             world = reach(chain, goal)
         # 4. no paw nearer the midline than LATERAL_KEEP of its rest stance:
         # the puppy's legs angled in, on the jindo's longer ones, crossed
