@@ -7,19 +7,26 @@ templates' eyes carry a painted iris. Here the disc is found by the eye
 landmark (the dark texels within 1.5 cm) and painted in rings on the
 SURFACE: each texel's 3D distance from the disc's centre over its radius,
 the centre taken from the disc's rim (the atlas packs a disc denser on one
-side, and the texels' own mean sat off-centre). A dark brown iris: the
-reading said dark_brown for nine of ten shelter poodles, and the small eye
-island is not one eyes.recolour_iris recolours.
+side, and the texels' own mean sat off-centre).
+
+Matched to the shelter poodles' own eyes (output/runs/poo10 face crops,
+11-02): a dark brown eye reads near black - iris and pupil hardly apart,
+L* 3-12, a faint brown only at the iris's edge - and what makes it look
+alive is the wet gloss: a window-shaped catch-light, a smaller second one,
+and a soft sheen over the upper half. A first, lighter iris (L* 25 with
+plain fibres) read as a painted toy eye beside them. The reading said
+dark_brown for nine of ten; the small eye island is not one
+eyes.recolour_iris recolours.
 
     python -m ar_pipeline.paint_eyes --slug toypoodle            # preview only
     python -m ar_pipeline.paint_eyes --slug toypoodle --install  # into the GLB and base_color.png
 
 --install backs the GLB and base_color.png up to work/backup_eyes_<slug>/
-first (once). Run it on the template's own flat eyes once: on painted eyes
-the catch-light leaves a hole in the dark disc and the rings shift (toy
-poodle: 135 texels). Done for toypoodle on 2026-11-02 (its originals in
-work/backup_eyes_toypoodle/). The template assets go into the next release
-(assets-v2).
+first (once), and every run paints from that backup when it exists - the
+template's own flat eyes - so a run repeats exactly (painting over painted
+eyes, the catch-light left a hole in the dark disc and the rings shifted).
+Done for toypoodle on 2026-11-02. The template assets go into the next
+release (assets-v2).
 """
 from __future__ import annotations
 
@@ -37,21 +44,35 @@ from api.landmarks import Landmarks
 from api.projection import lab_to_linear, linear_to_lab
 
 # ring radii as shares of the disc's, and the ramp between rings
-PUPIL, IRIS = 0.40, 0.90
-SOFT = 0.06
-PUPIL_LAB = np.array([5.0, 0.0, 0.0])
-IRIS_LAB = np.array([25.0, 11.0, 17.0])
-LIMBUS_LAB = np.array([11.0, 3.0, 4.0])
+PUPIL, IRIS = 0.45, 0.92
+SOFT = 0.07
+PUPIL_LAB = np.array([2.0, 0.0, 0.0])
+# the iris from its inner edge to its outer: near black to a very dark brown
+# (L* 9-17 still rendered a plain brown ring under the preview's light)
+IRIS_INNER_LAB = np.array([5.0, 1.5, 2.0])
+IRIS_OUTER_LAB = np.array([11.0, 5.0, 8.0])
+IRIS_FIBRE_L = 1.0
+LIMBUS_LAB = np.array([4.0, 0.5, 0.5])
 HIGHLIGHT_LAB = np.array([97.0, 0.0, -1.0])
+# catch-lights as (up, toward +x) offsets and radius, in disc radii: one
+# light for both eyes, so the same world side (taken across the gaze, the
+# left eye's landed on the other side, off its disc), and the sheen's lift
+# over the upper half (L*), and the wet lower lid's thin light arc
+CATCHLIGHTS = (((0.40, 0.25), 0.19), ((0.05, 0.50), 0.08))
+SHEEN_L = 10.0
+LOWER_LID = (0.80, 0.94, 30.0)     # from, to (disc radii, lower half only), L*
 # the disc: texels darker than this within this distance of the eye landmark
 DISC_MAX_L = 40.0
 DISC_REACH_M = 0.015
 
 
 def paint(slug: str) -> tuple[Image.Image, Image.Image, list[str]]:
-    """(painted texture, before/after preview, report lines)."""
+    """(painted texture, before/after preview, report lines), from the
+    backed-up original when there is one."""
     tpl = Path(f"output/templates/{slug}_small")
-    texture = extract_base_texture(Path(f"output/skeleton_{slug}_small.glb")).convert("RGB")
+    glb = Path(f"output/skeleton_{slug}_small.glb")
+    original = Path(f"work/backup_eyes_{slug}") / glb.name
+    texture = extract_base_texture(original if original.exists() else glb).convert("RGB")
     lm = Landmarks.load(tpl, tpl / "geometry")
     pos, valid, normal = lm.position, lm.valid, lm.normal
     lab = linear_to_lab(to_linear(np.asarray(texture).astype(np.float32)))
@@ -68,26 +89,44 @@ def paint(slug: str) -> tuple[Image.Image, Image.Image, list[str]]:
         disc = labels == (np.argmax(ndimage.sum(dark, labels, range(1, count + 1))) + 1)
         rim = disc & ~ndimage.binary_erosion(disc)
         centre = pos[rim].mean(0)
-        radius = float(np.median(np.linalg.norm(pos[rim] - centre, axis=-1)))
-        rho = np.linalg.norm(pos - centre, axis=-1) / radius
         gaze = normal[disc].mean(0)
         gaze /= np.linalg.norm(gaze)
         up = np.array([0.0, 0.0, 1.0]) - gaze[2] * gaze
         up /= np.linalg.norm(up)
         across = np.cross(gaze, up)
-        # the iris's fibres: noise by the angle round the gaze
+        # world +x on the eye's face, for the catch-lights
+        toward_x = np.array([1.0, 0.0, 0.0]) - gaze[0] * gaze - (up @ np.array([1.0, 0.0, 0.0])) * up
+        toward_x /= max(np.linalg.norm(toward_x), 1e-6)
+        # distances in the plane across the gaze, as the eye is seen from in
+        # front: the rim's centre lies inside the bulging eyeball, and a point
+        # placed off it in 3D sat 0.07-0.23 radii under the surface - the
+        # catch-lights never reached a texel
         offset = pos - centre
+        offset = offset - (offset @ gaze)[..., None] * gaze
+        radius = float(np.median(np.linalg.norm(offset[rim], axis=-1)))
+        rho = np.linalg.norm(offset, axis=-1) / radius
+        # the iris's fibres: noise by the angle round the gaze
         angle = np.arctan2(offset @ across, offset @ up)
         fibres = np.interp(angle, np.linspace(-np.pi, np.pi, 49), rng.normal(0, 1, 49))
         w_iris = np.clip((rho - PUPIL) / SOFT + 0.5, 0.0, 1.0)[..., None]
         w_limbus = np.clip((rho - IRIS) / SOFT + 0.5, 0.0, 1.0)[..., None]
-        iris = IRIS_LAB + np.stack([3.5 * fibres + 4.0 * (rho - 0.6), 1.5 * fibres, 2.0 * fibres], -1)
+        out = np.clip((rho - PUPIL) / (IRIS - PUPIL), 0.0, 1.0)[..., None]
+        iris = IRIS_INNER_LAB * (1 - out) + IRIS_OUTER_LAB * out
+        iris = iris + np.stack([IRIS_FIBRE_L * fibres, 0.3 * fibres, 0.5 * fibres], -1)
         colour = PUPIL_LAB * (1 - w_iris) + iris * w_iris
         colour = colour * (1 - w_limbus) + LIMBUS_LAB * w_limbus
-        # the catch-light: up and a little across from the centre
-        spot = centre + radius * (0.42 * up + 0.22 * across)
-        light = np.clip(1.0 - np.linalg.norm(pos - spot, axis=-1) / (0.16 * radius), 0.0, 1.0) ** 0.7
-        colour = colour * (1 - light)[..., None] + HIGHLIGHT_LAB * light[..., None]
+        # the wet sheen: lighter over the upper half, fading down
+        height = np.clip((offset @ up) / radius, -1.0, 1.0)
+        colour[..., 0] += SHEEN_L * np.clip(height, 0.0, 1.0) ** 1.5 * (rho < 1.0)
+        # the wet lower lid: a thin light arc along the bottom of the eye
+        lid_from, lid_to, lid_l = LOWER_LID
+        arc = np.clip(np.minimum(rho - lid_from, lid_to - rho) / 0.04, 0.0, 1.0) * np.clip(-height / 0.5, 0.0, 1.0)
+        colour[..., 0] = colour[..., 0] * (1 - 0.6 * arc) + lid_l * 0.6 * arc
+        # the catch-lights, up and toward +x from the centre
+        for (u, a), size in CATCHLIGHTS:
+            spot = radius * (u * up + a * toward_x)
+            light = np.clip(1.0 - np.linalg.norm(offset - spot, axis=-1) / (size * radius), 0.0, 1.0) ** 0.6
+            colour = colour * (1 - light)[..., None] + HIGHLIGHT_LAB * light[..., None]
         out_lab[disc] = colour[disc]
         ys, xs = np.nonzero(disc)
         boxes.append((slice(max(ys.min() - 6, 0), ys.max() + 7), slice(max(xs.min() - 6, 0), xs.max() + 7)))
