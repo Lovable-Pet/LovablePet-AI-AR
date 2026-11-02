@@ -922,6 +922,60 @@ BLAZE_FULL_DARK_SHARE = 0.6
 # is patches bigger than the head, not more of the body: the medium area
 PATCH_SIZE = {"small": "small", "large": "medium", "most": "large"}
 
+# One colour named twice: a solid apricot poodle read cream 3/3 by the
+# layout call and tan by the face (crown 5/5) and body (chest 2/3) calls came
+# out a near-white body with an orange head and chest. Its back, chest,
+# crown and legs all measured one light apricot (L* 46-69, b* 11-18), nearer
+# the tan ramp than cream's (shelter toy poodle 5). On a solid light coat, a
+# warm colour the face or body call gave some regions is the whole coat's
+# when the back measures within SAME_COAT_DE of them and nearer that colour's
+# ramp than the base's. A white dog whose shaded chest was called tan keeps
+# its white: its back measures white.
+SAME_COAT_DE = 12.0
+
+
+def one_coat_colour(appearance: dict[str, Any], measured: dict[str, Any]) -> list[str]:
+    """Recolour, in place, the base-coloured layout regions of a solid light
+    coat to the warm colour the calls gave its other regions, when the
+    measurements say it is one colour; returns what changed."""
+    from .fur import hex_to_linear
+    from .palette import FUR_PALETTE
+    from .patterns import color_family
+    from .projection import linear_to_lab
+
+    base = str(appearance.get("base_color") or "").lower()
+    entries = appearance.get("region_colors") or []
+    if appearance.get("pattern") != "solid" or color_family(base) != "light" or not isinstance(measured, dict):
+        return []
+    back = (measured.get("back") or {}).get("lab")
+    called = {}
+    for entry in entries:
+        colour = str(entry.get("color", "")).lower()
+        source = str(entry.get("source", ""))
+        if color_family(colour) == "point" and source.startswith(("face:", "body:")):
+            called.setdefault(colour, []).append(entry.get("region"))
+    if not back or len(called) != 1:
+        return []
+    (warm, regions), = called.items()
+    labs = [measured[r]["lab"] for r in regions if (measured.get(r) or {}).get("lab")]
+    if not labs:
+        return []
+    back = np.asarray(back, dtype=np.float32)
+    if float(np.linalg.norm(np.median(np.asarray(labs, dtype=np.float32), axis=0) - back)) >= SAME_COAT_DE:
+        return []
+
+    def mid(name: str) -> np.ndarray:
+        return linear_to_lab(hex_to_linear(FUR_PALETTE[name][1])[None, None, :])[0, 0]
+    if np.linalg.norm(back - mid(warm)) >= np.linalg.norm(back - mid(base)):
+        return []
+    changed = []
+    for entry in entries:
+        if str(entry.get("color", "")).lower() == base and str(entry.get("source", "")).startswith("pattern"):
+            entry.update({"color": warm, "note": f"one coat: {warm} like {'/'.join(regions)}",
+                          "source": "measured:one_coat"})
+            changed.append(f"{entry.get('region')}:{base}->{warm}")
+    return changed
+
 
 
 # A skull painted the crown's warm colour (crown_on_skull), or a piebald's
@@ -1535,6 +1589,9 @@ async def run_lite(
             for reading in measured.values():
                 if isinstance(reading, dict):
                     reading.setdefault("border", kind)
+        one_coat = one_coat_colour(appearance, measured)
+        if one_coat:
+            log["steps"]["one_coat_colour"] = one_coat
         palette, palette_report = ramps_from_measurement(appearance, measured)
     chocolate = chocolate_crown(appearance.get("region_colors") or [], measured)
     if chocolate:
