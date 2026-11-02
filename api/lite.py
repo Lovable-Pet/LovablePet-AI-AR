@@ -971,14 +971,23 @@ PATCH_SIZE = {"small": "small", "large": "medium", "most": "large"}
 # cheeks 5/5) and body (chest, belly, feet) calls came out a tan dog; its
 # back measured (81, 4, 14), cream's (shelter retriever 5). A golden with a
 # cream front keeps its gold: its back measures 25 dE off the cream parts.
+# With no measurement (a dog seen through bars is not measured) the face
+# call's crown stands witness instead, when every sample named it that one
+# colour: a cream jindo behind cage bars, layout fawn 3/3, crown, cheeks
+# and muzzle cream 5/5, chest, belly and feet cream 3/3, came out a yellow
+# dog (shelter adult jindo 1). On file a solid coat's crown was unanimous
+# against its layout base three times - the two measured (toy poodle 5,
+# retriever 5) both one coat.
 SAME_COAT_DE = 12.0
 
 
-def one_coat_colour(appearance: dict[str, Any], measured: dict[str, Any]) -> list[str]:
+def one_coat_colour(appearance: dict[str, Any], measured: dict[str, Any],
+                    crown_votes: dict[str, int] | None = None) -> list[str]:
     """Recolour, in place, the base-coloured layout regions of a solid coat
     to the one colour the calls gave its other regions - warm on a light
-    base, light on a warm one - when the measurements say it is one colour;
-    returns what changed."""
+    base, light on a warm one - when the measurements say it is one colour
+    (or, with no measurement, the face call's crown votes are unanimous for
+    it); returns what changed."""
     from .fur import hex_to_linear
     from .palette import FUR_PALETTE
     from .patterns import color_family
@@ -987,8 +996,9 @@ def one_coat_colour(appearance: dict[str, Any], measured: dict[str, Any]) -> lis
     base = str(appearance.get("base_color") or "").lower()
     entries = appearance.get("region_colors") or []
     other = {"light": "point", "point": "light"}.get(color_family(base))
-    if appearance.get("pattern") != "solid" or other is None or not isinstance(measured, dict):
+    if appearance.get("pattern") != "solid" or other is None:
         return []
+    measured = measured if isinstance(measured, dict) else {}
     back = (measured.get("back") or {}).get("lab")
     called = {}
     for entry in entries:
@@ -996,25 +1006,34 @@ def one_coat_colour(appearance: dict[str, Any], measured: dict[str, Any]) -> lis
         source = str(entry.get("source", ""))
         if color_family(colour) == other and source.startswith(("face:", "body:")):
             called.setdefault(colour, []).append(entry.get("region"))
-    if not back or len(called) != 1:
+    if len(called) != 1:
         return []
     (warm, regions), = called.items()
-    labs = [measured[r]["lab"] for r in regions if (measured.get(r) or {}).get("lab")]
-    if not labs:
-        return []
-    back = np.asarray(back, dtype=np.float32)
-    if float(np.linalg.norm(np.median(np.asarray(labs, dtype=np.float32), axis=0) - back)) >= SAME_COAT_DE:
-        return []
+    if back:
+        labs = [measured[r]["lab"] for r in regions if (measured.get(r) or {}).get("lab")]
+        if not labs:
+            return []
+        back = np.asarray(back, dtype=np.float32)
+        if float(np.linalg.norm(np.median(np.asarray(labs, dtype=np.float32), axis=0) - back)) >= SAME_COAT_DE:
+            return []
 
-    def mid(name: str) -> np.ndarray:
-        return linear_to_lab(hex_to_linear(FUR_PALETTE[name][1])[None, None, :])[0, 0]
-    if np.linalg.norm(back - mid(warm)) >= np.linalg.norm(back - mid(base)):
-        return []
+        def mid(name: str) -> np.ndarray:
+            return linear_to_lab(hex_to_linear(FUR_PALETTE[name][1])[None, None, :])[0, 0]
+        if np.linalg.norm(back - mid(warm)) >= np.linalg.norm(back - mid(base)):
+            return []
+        witness = "measured"
+    else:
+        votes = {k: int(v) for k, v in (crown_votes or {}).items()}
+        total = sum(votes.values())
+        top = max(votes, key=votes.get) if votes else ""
+        if total < 3 or votes.get(top) != total or color_family(top) != other:
+            return []
+        witness = "crown"
     changed = []
     for entry in entries:
         if str(entry.get("color", "")).lower() == base and str(entry.get("source", "")).startswith("pattern"):
             entry.update({"color": warm, "note": f"one coat: {warm} like {'/'.join(regions)}",
-                          "source": "measured:one_coat"})
+                          "source": f"{witness}:one_coat"})
             changed.append(f"{entry.get('region')}:{base}->{warm}")
     return changed
 
@@ -1392,9 +1411,22 @@ async def run_lite(
         tipping = votes.get("back_tipping") or "unknown"
         tipping_votes = votes.get("back_tipping_votes") or {}
         plain_back = tipping == "none" and tipping_votes.get("none", 0) == votes.get("samples", -1)
+        # ... or a majority none when the layout call itself was split with a
+        # solid sample: every real sable on file was sable in all three
+        # layout samples (e09 with none 2/3, e10), while a plain red jindo
+        # read sable 2 / solid 1 and none 2 / slight 1 came out with a black
+        # back and tail (shelter adult jindo 2); its back measured as tan as
+        # e10's sable, so the measurement cannot tell them apart
+        layout_solid = any(s.get("pattern") == "solid" for s in decision.samples or [])
+        if (decision.overlay == "sable" and not plain_back and layout_solid and tipping == "none"
+                and not tipping_votes.get("clear")):
+            plain_back = True
+            body_log["sable_split"] = {"layout": [s.get("pattern") for s in decision.samples or []],
+                                       "back_tipping": tipping_votes}
         sable_by_back = 1.0
         if decision.overlay == "sable" and plain_back:
-            body_log["sable_dropped"] = "back_tipping none from every sample"
+            body_log["sable_dropped"] = ("back_tipping none from every sample" if "sable_split" not in body_log
+                                         else "back_tipping none, layout split with solid")
             decision.overlay = None
             decision.pattern = "solid"
             decision.second_color = None
@@ -1640,9 +1672,11 @@ async def run_lite(
             for reading in measured.values():
                 if isinstance(reading, dict):
                     reading.setdefault("border", kind)
-        one_coat = one_coat_colour(appearance, measured)
-        if one_coat:
-            log["steps"]["one_coat_colour"] = one_coat
+    one_coat = one_coat_colour(appearance, measured or {},
+                               ((log["steps"].get("face") or {}).get("votes") or {}).get("crown"))
+    if one_coat:
+        log["steps"]["one_coat_colour"] = one_coat
+    if measured:
         palette, palette_report = ramps_from_measurement(appearance, measured)
     chocolate = chocolate_crown(appearance.get("region_colors") or [], measured)
     if chocolate:
