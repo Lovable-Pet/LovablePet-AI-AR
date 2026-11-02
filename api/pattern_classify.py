@@ -348,6 +348,17 @@ COLOUR_LIGHTNESS = {"white": 93, "cream": 88, "pink": 76, "fawn": 69, "tan": 56,
                     "chocolate": 23, "black": 7}
 
 
+def layout_ordered(sample: dict[str, Any]) -> dict[str, Any]:
+    """The sample with its base and second swapped when they run against
+    its layout's convention (LAYOUT_SECOND_IS_LIGHTER); as it was otherwise."""
+    base, second, layout = sample.get("base_color"), sample.get("second_color"), sample.get("pattern")
+    if (layout in LAYOUT_SECOND_IS_LIGHTER and base in COLOUR_LIGHTNESS and second in COLOUR_LIGHTNESS
+            and base != second
+            and (COLOUR_LIGHTNESS[second] > COLOUR_LIGHTNESS[base]) != LAYOUT_SECOND_IS_LIGHTER[layout]):
+        return {**sample, "base_color": second, "second_color": base}
+    return sample
+
+
 def consensus_layout(samples: list[dict[str, Any]]) -> dict[str, str] | None:
     """The ten regions' colours by majority over the samples' layouts, or
     None when fewer than two samples have a two-colour layout."""
@@ -462,6 +473,16 @@ async def classify_pattern(
         resolution = f"{resolution}; unresolved after {rounds} rounds, so other"
 
     agreeing = [s for s in all_samples if s["pattern"] == pattern] or all_samples
+    # bases that no majority named are voted again with each sample's pair in
+    # its layout's order (layout_ordered): a husky-grey jindo read saddle
+    # fawn/black, gray/cream and cream/gray - a three-way tie the record's
+    # "grey" broke, grey legs under a black back where the photo has cream
+    # legs under a grey one (shelter adult jindo 8); in order, cream/gray
+    # 2 of 3. Not when a majority agreed: a white puppy with a tan head read
+    # irish white/tan 3/3, against irish's lighter-second convention
+    named = Counter(s.get("base_color") for s in agreeing if s.get("base_color"))
+    if named and named.most_common(1)[0][1] * 2 <= len(agreeing):
+        agreeing = [layout_ordered(s) for s in agreeing]
     base = _majority([s.get("base_color", "") for s in agreeing], record_base_color) or record_base_color
     if base not in FUR_COLORS:
         base = record_base_color
