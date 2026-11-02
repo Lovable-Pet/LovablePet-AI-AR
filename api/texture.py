@@ -703,6 +703,17 @@ class MaskLibrary:
         self._cache["ear_rim"] = rim
         return rim
 
+    def ear_cup(self) -> np.ndarray | None:
+        """The whole inner ear, rim included, jittered as the regions are:
+        what skull paints under ears_inner (compose_body), so the rim's soft
+        split between the two leaves no gap for the base coat."""
+        if "ear_cup" not in self._cache:
+            mask = self._raw_mask("ears_inner")
+            if mask is not None and self.jitter is not None:
+                mask = _jitter_edge(mask, self.jitter)
+            self._cache["ear_cup"] = mask
+        return self._cache["ear_cup"]
+
     def get(self, region: str) -> np.ndarray | None:
         if region not in REGIONS:
             self.missing.append(f"{region} (not in the region enum)")
@@ -963,7 +974,19 @@ def compose_body(
 
     gradients_drawn: list[str] = []
     order = 0
-    for entry in observed + inferred:
+    # The ear's rim is a soft split of the cup between ears_inner and skull
+    # (MaskLibrary._ear_rim): a texel half each, painted one over the other,
+    # kept a quarter of the base coat - on a white dog with a black head a
+    # dotted grey-white line round the inside of each black ear (shelter
+    # chihuahua 10), unseen wherever the base is the head's colour, and no
+    # feathering runs between two regions of one colour. So skull goes first
+    # and covers the whole cup, and ears_inner is laid over it.
+    painting = observed + inferred
+    names = [e.get("region") for e in painting]
+    cup = masks.ear_cup() if "skull" in names and "ears_inner" in names else None
+    if cup is not None and names.index("ears_inner") < names.index("skull"):
+        painting.insert(names.index("ears_inner"), painting.pop(names.index("skull")))
+    for entry in painting:
         mask = masks.get(entry.get("region"))
         if mask is None:
             continue
@@ -1010,6 +1033,8 @@ def compose_body(
             applied = applied * _belly_reach(landmarks, mask, masks.jitter, masks.get("back"))
             if debug:
                 _save_debug(debug, f"02_{order:02d}_underside_reach", applied)
+        if region == "skull" and cup is not None:
+            applied = np.maximum(applied, cup)
 
         composed = _blend(composed, painted, applied)
         inner_color = str(entry.get("inner_color") or "").lower()
@@ -1160,10 +1185,15 @@ def compose_body(
                     # strip, and a whole tail came out coloured, on dogs with
                     # a white neck and a white tail (eval e13, shelter
                     # maltese 6 and 7, e15 - all five patched dogs)
-                    off = _patch_off_trunk(masks, landmarks, mask.shape)
-                    off = smooth_on_surface(off, landmarks.position, surface, PATCH_OFF_RAMP_M,
+                    hard = _patch_off_trunk(masks, landmarks, mask.shape)
+                    off = smooth_on_surface(hard, landmarks.position, surface, PATCH_OFF_RAMP_M,
                                             stride=max(SURFACE_STRIDE,
                                                        round(SURFACE_STRIDE * PATCH_OFF_RAMP_M / 0.035)))
+                    # ... the fade on the trunk's side only: a tail curled
+                    # over the back lies within the fade of the back itself
+                    # and came out black on a white-tailed piebald (shelter
+                    # chihuahua 10, its tail at 0.4 of the full lowering)
+                    off = np.maximum(off, hard)
                     field = field - PATCH_OFF_TRUNK * off
                     trunk = inside & (off < 0.5)
                     # on the top of the body: the back region runs down the
