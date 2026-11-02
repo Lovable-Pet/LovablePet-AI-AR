@@ -153,6 +153,31 @@ EDGE_JITTER_PX = 1.5
 # ... and the jittered edge is softened over this many texels, so it reads
 # as hairs crossing the line rather than a torn edge.
 EDGE_SOFT_PX = 1.0
+# ... except where a light underside meets a darker coat. A dog's cream or
+# white chest, belly, legs (inner or whole) and feet shade into its coat over a few
+# centimetres of mixed hairs, and drawn at the fur-level edge above they
+# read as pieces cut out and laid on: a straight cream band along the
+# belly, a cream block on the front of each stifle, a stripe down the
+# inside of every foreleg (shelter adult jindos, user 11-03: "다리 경계가
+# 근원적으로 부자연스러운 느낌"). Those regions, when light on a coat that is
+# not, are painted last with their weight averaged over the surface
+# (SOFT_LIGHT_SIGMA_M, through the position map, so seams do not show),
+# steepened by SOFT_LIGHT_GAIN and broken by the hair noise
+# (SOFT_LIGHT_JITTER per unit of it).
+SOFT_LIGHT_REGIONS = ("underside", "chest", "legs_lower", "paws")
+SOFT_LIGHT_SIGMA_M = 0.012
+SOFT_LIGHT_GAIN = 1.4
+SOFT_LIGHT_JITTER = 0.12
+SOFT_LIGHT_STRIDE = 7
+# ... and a light underside stays off the outer face of the thighs: the
+# underside mask takes in a fifth of the jindo's outer thigh, the stifle's
+# front, where the cream sat as a block. Where the surface faces away from
+# the midline more than this (the normal's lateral share), the base coat -
+# on the legs only, within this share of the feet's spread along the body
+# from the front or hind feet: dropped all along, the belly's light line
+# went from the side view too.
+UNDERSIDE_OUTWARD = 0.3
+UNDERSIDE_LEG_ZONE = 0.25
 # The template's own hair detail (the brightness map) is compressed toward
 # flat by this factor: 1.0 is the template's full hair contrast, 0 is flat
 # paint. Around half reads as fur that has been drawn rather than
@@ -1021,6 +1046,10 @@ def compose_body(
     cup = masks.ear_cup() if "skull" in names and "ears_inner" in names else None
     if cup is not None and names.index("ears_inner") < names.index("skull"):
         painting.insert(names.index("ears_inner"), painting.pop(names.index("skull")))
+    # light underside regions, painted after the rest and soft (SOFT_LIGHT_*)
+    soft_light: list[tuple[str, np.ndarray, np.ndarray]] = []
+    soft_ready = (landmarks is not None and landmarks.position is not None and landmarks.normal is not None
+                  and landmarks.position.shape[:2] == gray.shape)
     for entry in painting:
         mask = masks.get(entry.get("region"))
         if mask is None:
@@ -1079,14 +1108,25 @@ def compose_body(
                 _save_debug(debug, f"02_{order:02d}_underside_reach", applied)
         if region == "skull" and cup is not None:
             applied = np.maximum(applied, cup)
+        if (soft_ready and region == "underside" and color_family(color_name) == "light"
+                and color_family(base_color) != "light"):
+            applied = applied * _not_outward(landmarks, masks.jitter)
 
-        composed = _blend(composed, painted, applied)
+        if (soft_ready and region in SOFT_LIGHT_REGIONS and color_family(color_name) == "light"
+                and color_family(base_color) != "light"):
+            soft_light.append((f"{region}:{color_name}", painted, applied))
+        else:
+            composed = _blend(composed, painted, applied)
         inner_color = str(entry.get("inner_color") or "").lower()
         if (region == "legs_lower" and inner_color in FUR_COLORS and inner_color != color_name
                 and landmarks is not None and landmarks.normal is not None):
             inner = applied * _leg_inner(landmarks, masks.jitter,
                                          forward_too=str(entry.get("inner_faces") or "") != "inward")
-            composed = _blend(composed, paint_region(gray, inner_color, mask, palette), inner)
+            if soft_ready and color_family(inner_color) == "light" and color_family(color_name) != "light":
+                soft_light.append((f"legs_lower inner:{inner_color}",
+                                   paint_region(gray, inner_color, mask, palette), inner))
+            else:
+                composed = _blend(composed, paint_region(gray, inner_color, mask, palette), inner)
             gradients_drawn.append(f"legs_lower inner:{inner_color}")
             if debug:
                 _save_debug(debug, f"02_{order:02d}_legs_inner", inner)
@@ -1095,6 +1135,23 @@ def compose_body(
             tag = "inferred" if entry in inferred else "seen"
             _save_debug(debug, f"02_{order:02d}_{region}_{color_name}_{tag}_mask", applied)
             _save_debug(debug, f"02_{order:02d}_{region}_{color_name}_{tag}", composed)
+    # the light underside, last and soft (SOFT_LIGHT_*)
+    if soft_light:
+        valid_here = landmarks.valid if landmarks.valid is not None else (gray > -1)
+        smoothed = smooth_fields_on_surface([np.asarray(w, dtype=np.float32) for _, _, w in soft_light],
+                                            landmarks.position, valid_here, SOFT_LIGHT_SIGMA_M)
+        for (name, painted, _), soft in zip(soft_light, smoothed):
+            weight = (soft - 0.5) * SOFT_LIGHT_GAIN + 0.5
+            if masks.jitter is not None:
+                # the hair noise in the transition only: out in the coat it
+                # scattered white specks over a black flank
+                bell = np.clip(1.0 - np.abs(soft - 0.5) / 0.4, 0.0, 1.0)
+                weight = weight + SOFT_LIGHT_JITTER * masks.jitter * bell
+            weight = np.clip(weight, 0.0, 1.0) * valid_here
+            composed = _blend(composed, painted, weight)
+            if debug:
+                _save_debug(debug, f"02_soft_{name.replace(':', '_')}", weight)
+        report["soft_light"] = [name for name, _, _ in soft_light]
     # the band round each eye (ar_pipeline/open_face_masks.py): a
     # light-cheeked dog's cheek colour runs up round the eyes to the brows -
     # a black-and-tan's cream spectacles (eval demo e08). A piebald keeps its
@@ -1542,6 +1599,62 @@ def smooth_on_surface(field: np.ndarray, position: np.ndarray, valid: np.ndarray
     w = 1.0 / np.maximum(distance, 1e-5)
     out[all_rows, all_cols] = (np.sum(w * smoothed[nearest], axis=1) / w.sum(axis=1)).astype(np.float32)
     return out
+
+
+def smooth_fields_on_surface(fields: list[np.ndarray], position: np.ndarray, valid: np.ndarray,
+                             sigma_m: float, stride: int = SOFT_LIGHT_STRIDE) -> list[np.ndarray]:
+    """smooth_on_surface for several fields over one set of samples: the
+    gaussian weights are built once as a sparse matrix and applied to each."""
+    from scipy import sparse
+    from scipy.spatial import cKDTree
+
+    if not fields:
+        return []
+    height, width = fields[0].shape
+    rows, cols = np.nonzero(valid[::stride, ::stride])
+    rows, cols = rows * stride, cols * stride
+    points = position[rows, cols].astype(np.float64)
+    tree = cKDTree(points)
+    pairs = tree.sparse_distance_matrix(tree, 2.5 * sigma_m, output_type="coo_matrix")
+    weights = sparse.coo_matrix((np.exp(-pairs.data ** 2 / (2.0 * sigma_m * sigma_m)), (pairs.row, pairs.col)),
+                                shape=pairs.shape).tocsr()
+    weights = weights + sparse.identity(len(points), format="csr")   # the zero distances
+    norm = np.asarray(weights.sum(axis=1)).ravel()
+    all_rows, all_cols = np.nonzero(valid)
+    distance, nearest = tree.query(position[all_rows, all_cols].astype(np.float64), k=4, workers=-1)
+    near_w = 1.0 / np.maximum(distance, 1e-5)
+    near_w /= near_w.sum(axis=1, keepdims=True)
+    out = []
+    for field in fields:
+        smoothed = (weights @ field[rows, cols].astype(np.float64)) / norm
+        full = np.zeros((height, width), dtype=np.float32)
+        full[all_rows, all_cols] = np.sum(near_w * smoothed[nearest], axis=1).astype(np.float32)
+        out.append(full)
+    return out
+
+
+def _not_outward(landmarks, jitter: np.ndarray | None) -> np.ndarray:
+    """0 on the legs' outer faces (facing away from the midline more than
+    UNDERSIDE_OUTWARD, within UNDERSIDE_LEG_ZONE of the body's length from
+    the front or the hind feet), 1 elsewhere - the belly between the legs
+    keeps its sides, the light line a side view shows."""
+    side = np.sign(landmarks.position[..., 0])
+    outward = side * landmarks.normal[..., 0]
+    signed = (UNDERSIDE_OUTWARD - outward) / 0.15
+    if jitter is not None:
+        signed = signed + 0.3 * jitter
+    keep = np.clip(signed + 0.5, 0.0, 1.0)
+    feet = [landmarks.points.get(k) for k in ("paw_lf", "paw_rf", "paw_lb", "paw_rb")]
+    if any(p is None for p in feet):
+        return keep.astype(np.float32)
+    front = float(np.mean([landmarks.world("paw_lf")[1], landmarks.world("paw_rf")[1]]))
+    hind = float(np.mean([landmarks.world("paw_lb")[1], landmarks.world("paw_rb")[1]]))
+    reach = UNDERSIDE_LEG_ZONE * (hind - front)
+    y = landmarks.position[..., 1]
+    ramp = max(0.1 * (hind - front), 1e-3)
+    legs = np.maximum(np.clip((front + reach - y) / ramp + 0.5, 0.0, 1.0),
+                      np.clip((y - (hind - reach)) / ramp + 0.5, 0.0, 1.0))
+    return (1.0 - legs * (1.0 - keep)).astype(np.float32)
 
 
 def _sable_weight(gray: np.ndarray, masks: "MaskLibrary", landmarks, direction: np.ndarray | None,
