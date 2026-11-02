@@ -67,8 +67,9 @@ def main() -> None:
     parser.add_argument("--slug", required=True)
     parser.add_argument("--size", default="small")
     parser.add_argument("--out", default=None, help="write here instead of over the template GLB")
+    parser.add_argument("--glb", default=None, help="read this GLB instead of the template's")
     args = parser.parse_args()
-    glb = ROOT / "output" / f"skeleton_{args.slug}_{args.size}.glb"
+    glb = Path(args.glb) if args.glb else ROOT / "output" / f"skeleton_{args.slug}_{args.size}.glb"
 
     gltf = GLTF2().load(str(glb))
     blob = bytearray(gltf.binary_blob())
