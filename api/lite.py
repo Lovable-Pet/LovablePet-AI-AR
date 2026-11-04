@@ -268,6 +268,13 @@ def _lowpass_on_islands(x: np.ndarray, valid: np.ndarray, sigma: float) -> np.nd
 # so it was blended whole with whatever lay across its seam (a white paw
 # beside a black shard) and rimmed in grey
 TINY_ISLAND_TEXELS = 6000
+# ... and no thicker than this anywhere (texels from its rim): a piece of coat
+# a few centimetres across (20 such on the jindo, up to 4,300 texels) is no
+# confetti, the seam ring reaches only its rim, and filled from the surface
+# round it - the nearest texels of other charts, cell by cell - one at the
+# throat's black-and-white edge came out as crumpled shards of white in the
+# black (user, 11-05: "번개무늬 남아있어 색깔 경계면에")
+TINY_ISLAND_THICK_PX = 8.0
 
 # A thin strip of one UV chart packed inside another: fewer than
 # SLIVER_SAME_SHARE of the island texels on a ring SLIVER_RADIUS_PX round it
@@ -494,7 +501,9 @@ def _atlas_slivers(valid: np.ndarray, position: np.ndarray | None) -> np.ndarray
     return valid & (total > 0) & (same < SLIVER_SAME_SHARE * total)
 
 
-def _tiny_islands(valid: np.ndarray, max_texels: int) -> np.ndarray:
+def _tiny_islands(valid: np.ndarray, max_texels: int, max_thick: float | None = None) -> np.ndarray:
+    """Islands under `max_texels` and no more than `max_thick` texels from
+    their rim anywhere (TINY_ISLAND_THICK_PX)."""
     from scipy import ndimage
 
     labels, count = ndimage.label(valid)
@@ -503,6 +512,10 @@ def _tiny_islands(valid: np.ndarray, max_texels: int) -> np.ndarray:
     sizes = np.bincount(labels.ravel())
     small = sizes < max_texels
     small[0] = False
+    thick = TINY_ISLAND_THICK_PX if max_thick is None else max_thick
+    if thick is not None:
+        depth = ndimage.maximum(ndimage.distance_transform_edt(valid), labels, np.arange(count + 1))
+        small &= np.asarray(depth) <= thick
     return small[labels]
 
 
@@ -1766,7 +1779,13 @@ async def run_lite(
     # flatten_rims off: the rims are already the build's (restore_in_region),
     # and the finish step's rim measurement - the outer three texels against
     # 4-10 px in - read the model's outline at 4-10 px as the reference and
-    # darkened the correct rim toward it by 4.6 L, a line along every seam
+    # darkened the correct rim toward it by 4.6 L, a line along every seam.
+    # Off without a refine too: the texture is then the build itself, with
+    # no model outline to take out, and the correction - one offset per
+    # texel of rim, the median over every colour of coat at once - lifted
+    # the rims of a black-and-tan and a black-and-white coat's black from
+    # sRGB 27 to 43, a light zigzag along every seam of the black (user,
+    # 11-05: "경계면쪽 선 보이는 문제")
     # thin strips packed inside another chart take the surface's colour, so
     # the seam pass samples the right one (SLIVER_*)
     surface = _surface_position(masks_dir)
@@ -1779,7 +1798,7 @@ async def run_lite(
         texture = Image.fromarray(_fill_from_surface(np.asarray(texture.convert("RGB")).copy(), slivers, valid, surface))
     finished, finish_report = finish_painted(texture, base, masks_dir, template_glb, valid,
                                              eye_colour=appearance.get("eye_color"),
-                                             flatten_rims=not refined)
+                                             flatten_rims=False)
     finish_report["slivers_from_surface"] = int(slivers.sum())
     # confetti islands (claws, eyelid shells, seam fringe on a generated
     # mesh) come out of the finish as grey shards: the seam ring is wider
@@ -1823,6 +1842,16 @@ async def run_lite(
     marking_mask = build_report.get("marking_mask")
     finished, finish_report["head_shards_cleaned"] = _clean_head(
         finished, masks_dir, valid, keep=marking_mask > 0.3 if marking_mask is not None else None)
+    # the stray triangles once more, last (seams.fill_stray_triangles): the
+    # padding refill above took back what the finish painted under them, and
+    # a black-and-tan's tan foreleg kept its white triangle
+    if template_glb and Path(template_glb).exists() and surface is not None:
+        from .mesh import TemplateMesh
+        from .seams import fill_stray_triangles
+        stray_mesh = TemplateMesh.load(template_glb, finished.size)
+        out, finish_report["stray_triangles_last"] = fill_stray_triangles(
+            np.asarray(finished.convert("RGB"), dtype=np.float32), stray_mesh, surface, valid)
+        finished = Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
     finished.save(final_dir / f"{resolved.pet_id}.png")
     from .whiskers import whisker_colour
     whisker_rgb, finish_report["whiskers"] = whisker_colour(finished, template_dir)

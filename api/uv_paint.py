@@ -396,6 +396,16 @@ def finish_painted(painted: Image.Image, base_texture: Image.Image, masks_dir: s
     # template's own padding is the old coat's colour and bled in as an
     # orange rim along every seam.
     inside = ndimage.binary_erosion(valid, iterations=1)
+    # ... but an island the erosion takes whole (two texels across or less)
+    # keeps its own texels: refilled from the nearest other island, a
+    # 4-texel island at a white wrist took a black island's colour, and the
+    # seam pass, averaging it with the leg's vertices it shares a position
+    # with, drew a dark ring round the wrist (user, 11-05)
+    labels, count = ndimage.label(valid)
+    if count:
+        survives = np.zeros(count + 1, dtype=bool)
+        survives[np.unique(labels[inside])] = True
+        inside = inside | (valid & ~survives[labels])
     indices = ndimage.distance_transform_edt(~inside, return_distances=False, return_indices=True)
     composed = composed[indices[0], indices[1]]
 
@@ -422,6 +432,9 @@ def finish_painted(painted: Image.Image, base_texture: Image.Image, masks_dir: s
         position_path = geometry_dir_for(masks_dir) / "position.npy"
         position = np.load(position_path) if position_path.exists() else None
         composed, report["seams"] = smooth_seams(np.clip(composed, 0, 1), mesh, position=position, valid=valid)
+        if position is not None and position.shape[:2] == composed.shape[:2]:
+            from .seams import fill_stray_triangles
+            composed, report["stray_triangles"] = fill_stray_triangles(composed, mesh, position, valid)
 
     return Image.fromarray((to_srgb(np.clip(composed, 0, 1)) * 255).astype(np.uint8), mode="RGB"), report
 
