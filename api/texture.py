@@ -143,6 +143,10 @@ FEATHER_ALL_PX = 14
 # chart edge onto another part of the dog
 FEATHER_ALL_SEAM_M = 0.003
 FEATHER_ALL_DRIFT_M = (0.003, 0.008)
+# ... and where it drifts, the feather is drawn on the surface: a gaussian of
+# this many metres (about the atlas blur's), sampled every STRIDE texels
+FEATHER_ALL_SURFACE_SIGMA_M = 0.0056
+FEATHER_ALL_SURFACE_STRIDE = 4
 
 # STYLE - "hard boundary, fur-level blending, a touch of illustration"
 # ----------------------------------------------------------------------
@@ -153,6 +157,21 @@ EDGE_JITTER_PX = 1.5
 # ... and the jittered edge is softened over this many texels, so it reads
 # as hairs crossing the line rather than a torn edge.
 EDGE_SOFT_PX = 1.0
+# ... and an edge is one only where the texel across it is within this
+# many metres per texel of reach on the dog (see _jitter_edge)
+JITTER_SEAM_M = 0.004
+JITTER_RIM_FADE_PX = 4.0
+# ... except the body's regions, whose masks are smoothed over the surface
+# (ar_pipeline/smooth_masks.py): those edges are steepened from the mask by
+# SURFACE_EDGE_GAIN instead of jittered. The jitter is noise in the atlas,
+# not on the dog, so wherever an edge met a seam, a chart folded back on
+# itself or a fan of sliver charts, it broke differently on each side:
+# lightning bolts down a black-and-white or black-and-tan coat's shoulders,
+# flames of tan and white up its thighs (user, 11-05: "06 09 아직 번개무늬
+# 남아있어 색깔 경계면에"). A mask smoothed at 1.8 cm crosses 0.5 over ~4.6
+# cm; times 3, over ~1.5 cm.
+SURFACE_EDGE_REGIONS = ("back", "chest", "underside", "legs_lower", "paws")
+SURFACE_EDGE_GAIN = 3.0
 # ... except where a light underside meets a darker coat. A dog's cream or
 # white chest, belly, legs (inner or whole) and feet shade into its coat over a few
 # centimetres of mixed hairs, and drawn at the fur-level edge above they
@@ -167,7 +186,9 @@ EDGE_SOFT_PX = 1.0
 SOFT_LIGHT_REGIONS = ("underside", "chest", "legs_lower", "paws")
 SOFT_LIGHT_SIGMA_M = 0.012
 SOFT_LIGHT_GAIN = 1.4
-SOFT_LIGHT_JITTER = 0.12
+# (0.12 drew the atlas's streak noise across the soft edge: flames of white up
+# a black-and-white dog's thighs, broken at every seam - see SURFACE_EDGE_GAIN)
+SOFT_LIGHT_JITTER = 0.0
 SOFT_LIGHT_STRIDE = 7
 # ... and a light underside stays off the outer face of the thighs: the
 # underside mask takes in a fifth of the jindo's outer thigh, the stifle's
@@ -672,6 +693,18 @@ class MaskLibrary:
                 self._raw[region] = np.asarray(image, dtype=np.float32) / 255.0
         return self._raw[region]
 
+    def _surface(self) -> tuple[np.ndarray, np.ndarray] | None:
+        """(position map, valid) from the geometry beside the masks, None
+        without one or at another size."""
+        folder = self.dir.parent / "geometry"
+        if not (folder / "position.npy").exists() or not (folder / "valid.npy").exists():
+            return None
+        position = np.load(folder / "position.npy")
+        valid = self.valid if self.valid is not None else np.load(folder / "valid.npy") > 0.5
+        if position.shape[:2] != (self.size[1], self.size[0]) or valid.shape != position.shape[:2]:
+            return None
+        return position, valid
+
     def _islands(self) -> np.ndarray | None:
         """The atlas's UV islands, labelled; from the geometry's valid map
         (set by the caller, or beside the masks), None without one."""
@@ -752,7 +785,15 @@ class MaskLibrary:
             if rim is not None:
                 mask = np.clip(mask - rim, 0.0, 1.0) if region == "ears_inner" else np.maximum(mask, rim)
             if self.jitter is not None:
-                mask = _jitter_edge(mask, self.jitter)
+                if "surface" not in self._cache:
+                    self._cache["surface"] = self._surface()
+                if region in SURFACE_EDGE_REGIONS and self._cache["surface"] is not None:
+                    # smoothed on the surface already (smooth_masks): an edge
+                    # made sharper from the mask alone, the same on either
+                    # side of every seam, no noise (SURFACE_EDGE_GAIN)
+                    mask = np.clip((mask - 0.5) * SURFACE_EDGE_GAIN + 0.5, 0.0, 1.0).astype(np.float32)
+                else:
+                    mask = _jitter_edge(mask, self.jitter, surface=self._cache["surface"])
             self._cache[region] = mask
         return self._cache[region]
 
@@ -931,14 +972,49 @@ def _below_eyes(landmarks, jitter: np.ndarray | None) -> np.ndarray:
     return np.clip(signed, 0.0, 1.0).astype(np.float32)
 
 
-def _jitter_edge(mask: np.ndarray, jitter: np.ndarray, px: float = EDGE_JITTER_PX) -> np.ndarray:
+def _jitter_edge(mask: np.ndarray, jitter: np.ndarray, px: float = EDGE_JITTER_PX,
+                 surface: tuple[np.ndarray, np.ndarray] | None = None) -> np.ndarray:
     """Push a mask's edge in and out by the noise: the signed distance to the
     edge is offset by `px * jitter` and re-thresholded with a one-texel
-    soft edge. Interior and exterior far from the edge are untouched."""
+    soft edge. Interior and exterior far from the edge are untouched.
+
+    With `surface` (position map, valid) an edge counts only where the
+    nearest texel across it is on the islands and near on the dog
+    (JITTER_SEAM_M per texel of reach): across the padding, or where a chart
+    touches itself in the atlas, it is no edge. (Measured across the atlas,
+    the rim of a black shoulder one texel from the white lower leg - the
+    same chart, folded back on itself, 10 cm away on the dog - turned white
+    wherever the noise pushed, and the shoulder's seam ran as a light
+    lightning bolt down a black-and-white or black-and-tan coat's upper
+    arm; user, 11-05: "팔 경계 번개 모양 경계 자국".)"""
     inside = mask > 0.5
     if not inside.any() or inside.all():
         return mask
-    distance = ndimage.distance_transform_edt(inside) - ndimage.distance_transform_edt(~inside)
+    plain = ndimage.distance_transform_edt(inside) - ndimage.distance_transform_edt(~inside)
+    if surface is None or surface[1].shape != mask.shape:
+        distance = plain
+    else:
+        position, on = surface
+        far = 4.0 * px + 2.0
+        # outside texels: to the nearest inside texel on the islands, if it is near on the dog
+        d_out, (ri, ci) = ndimage.distance_transform_edt(~(inside & on), return_indices=True)
+        near_out = np.linalg.norm(position[ri, ci] - position, axis=-1) <= JITTER_SEAM_M * (d_out + 1.0)
+        # inside texels: likewise to the nearest outside one
+        d_in, (ro, co) = ndimage.distance_transform_edt(~(~inside & on), return_indices=True)
+        near_in = np.linalg.norm(position[ro, co] - position, axis=-1) <= JITTER_SEAM_M * (d_in + 1.0)
+        distance = np.where(inside, np.where(near_in, np.minimum(d_in, far), far),
+                            -np.where(near_out, np.minimum(d_out, far), far))
+        # the padding keeps the plain measure (it is refilled from the islands later)
+        distance = np.where(on, distance, plain)
+        jittered = np.clip((distance + px * jitter) / max(EDGE_SOFT_PX, 1e-3) + 0.5, 0.0, 1.0)
+        # near an island's rim the edge is left soft (the mask as it is,
+        # continuous over the seam): jittered on each side of a seam on its
+        # own, an edge running along one - the elbow, where the leg's chart
+        # ends - came out as a dotted line of the other colour on both
+        # sides (JITTER_RIM_FADE_PX)
+        rim = ndimage.distance_transform_edt(on)
+        fade = np.clip((rim - 1.0) / JITTER_RIM_FADE_PX, 0.0, 1.0)
+        return (fade * jittered + (1.0 - fade) * mask).astype(np.float32)
     offset = distance + px * jitter
     return np.clip(offset / max(EDGE_SOFT_PX, 1e-3) + 0.5, 0.0, 1.0).astype(np.float32)
 
@@ -980,7 +1056,13 @@ def _gradient_weight(landmarks, entry: dict[str, Any], mask: np.ndarray) -> np.n
     low, high = np.percentile(distance[inside], reach)
     if high - low < 1e-6:
         return None
-    t = np.where(inside, (np.nan_to_num(distance, nan=high) - low) / (high - low), 1.0)
+    t = (np.nan_to_num(distance, nan=high) - low) / (high - low)
+    # beyond the region the fade the nearest texel of it has (it was the
+    # fade's far end: a light region's soft edge reaches past its mask, and a
+    # white leg fading into black above its paw put a black band round the
+    # paw where the leg's edge met it - user, 11-05)
+    nearest = ndimage.distance_transform_edt(~inside, return_distances=False, return_indices=True)
+    t = t[nearest[0], nearest[1]]
     cap = float(entry.get("gradient_cap") or GRADIENT_CAP.get(anchor, 1.0))
     return (_smoothstep(t) * cap).astype(np.float32)
 
@@ -1140,17 +1222,27 @@ def compose_body(
         valid_here = landmarks.valid if landmarks.valid is not None else (gray > -1)
         smoothed = smooth_fields_on_surface([np.asarray(w, dtype=np.float32) for _, _, w in soft_light],
                                             landmarks.position, valid_here, SOFT_LIGHT_SIGMA_M)
-        for (name, painted, _), soft in zip(soft_light, smoothed):
-            weight = (soft - 0.5) * SOFT_LIGHT_GAIN + 0.5
-            if masks.jitter is not None:
-                # the hair noise in the transition only: out in the coat it
-                # scattered white specks over a black flank
-                bell = np.clip(1.0 - np.abs(soft - 0.5) / 0.4, 0.0, 1.0)
-                weight = weight + SOFT_LIGHT_JITTER * masks.jitter * bell
-            weight = np.clip(weight, 0.0, 1.0) * valid_here
-            composed = _blend(composed, painted, weight)
-            if debug:
-                _save_debug(debug, f"02_soft_{name.replace(':', '_')}", weight)
+        # painted together: how light the coat is here is the regions'
+        # weights summed, steepened once at its edge against the coat, and
+        # each light colour has its share of it. (Laid on one after another,
+        # two light regions meeting - a white leg and its white paw, the
+        # chest and the legs - each came to half there and let a quarter of
+        # the dark coat through: a dark broken ring round each wrist and
+        # dark lines inside the white along every edge between them; user,
+        # 11-05: "흑백 경계면에 알 수 없는 선들")
+        total = np.clip(np.sum(smoothed, axis=0), 0.0, 1.0)
+        weight = (total - 0.5) * SOFT_LIGHT_GAIN + 0.5
+        if masks.jitter is not None:
+            # the hair noise in the transition only: out in the coat it
+            # scattered white specks over a black flank
+            bell = np.clip(1.0 - np.abs(total - 0.5) / 0.4, 0.0, 1.0)
+            weight = weight + SOFT_LIGHT_JITTER * masks.jitter * bell
+        weight = np.clip(weight, 0.0, 1.0) * valid_here
+        light = sum(soft[..., None] * painted for (_, painted, _), soft in zip(soft_light, smoothed))
+        light = light / np.maximum(np.sum(smoothed, axis=0), 1e-6)[..., None]
+        composed = _blend(composed, light, weight)
+        if debug:
+            _save_debug(debug, "02_soft_light", weight)
         report["soft_light"] = [name for name, _, _ in soft_light]
     # the band round each eye (ar_pipeline/open_face_masks.py): a
     # light-cheeked dog's cheek colour runs up round the eyes to the brows -
@@ -1378,9 +1470,15 @@ def compose_body(
                 names.append(colour)
             index[mask > 0.5] = names.index(colour)
         reach = FEATHER_ALL_PX // 2
-        valid_here = index >= 0
+        # on the islands, region or not: where two soft masks are both near
+        # 0.5 the jitter can leave a texel in neither (index -1), and left
+        # out of the feather it kept the base coat - black specks in a line
+        # through the tan below a black-and-tan's elbow (user, 11-05). It
+        # counts as a colour of its own, so the feather takes it in.
         if masks.valid is not None and masks.valid.shape == gray.shape:
-            valid_here &= masks.valid
+            valid_here = masks.valid.copy()
+        else:
+            valid_here = index >= 0
         position = (landmarks.position if landmarks is not None and landmarks.position is not None
                     and landmarks.position.shape[:2] == gray.shape else None)
         boundary = np.zeros(gray.shape, dtype=bool)
@@ -1407,7 +1505,22 @@ def compose_body(
             # off the texel's own where the window took in far surfaces.
             drift = np.linalg.norm(_blur_inside(position, FEATHER_ALL_PX / 2.0, valid_here) - position, axis=-1)
             low, high = FEATHER_ALL_DRIFT_M
-            soft *= np.clip((high - drift) / (high - low), 0.0, 1.0)
+            gate = np.clip((high - drift) / (high - low), 0.0, 1.0)
+            # there the feather is drawn on the surface instead (left out, the
+            # jittered edge stayed hard where a chart touches itself in the
+            # atlas: a dotted line of black hair-tips in the tan below a
+            # black-and-tan's elbow; user, 11-05). (Drawn on the surface
+            # everywhere it left the fine seam lines it was meant to take
+            # away and added a few light specks.)
+            off = (gate < 0.999) & (soft > 0.01)
+            if off.any():
+                smoothed = smooth_fields_on_surface([composed[..., i] for i in range(composed.shape[-1])],
+                                                    position, valid_here, FEATHER_ALL_SURFACE_SIGMA_M,
+                                                    stride=FEATHER_ALL_SURFACE_STRIDE)
+                surface_blurred = np.stack(smoothed, axis=-1)
+                blurred = np.where(off[..., None], gate[..., None] * blurred + (1.0 - gate[..., None]) * surface_blurred,
+                                   blurred)
+                report["feather_all_on_surface"] = int(off.sum())
         composed = _blend(composed, blurred, np.clip(soft * 1.5, 0, 1))
         report["feather_all_texels"] = int(band.sum())
         if debug:
