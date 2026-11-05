@@ -26,19 +26,78 @@ def read(gltf: GLTF2, blob: bytes, index: int) -> np.ndarray:
     return np.stack([np.frombuffer(blob, dtype, width, start + i * stride) for i in range(acc.count)]).astype(np.float64)
 
 
-def append_accessor(gltf: GLTF2, blob: bytearray, data: np.ndarray, kind: str, bounds: bool = False) -> int:
-    """A new float accessor (and buffer view) for `data` at the end of `blob`."""
+def append_accessor(gltf: GLTF2, blob: bytearray, data: np.ndarray, kind: str, bounds: bool = False,
+                    component: int = 5126) -> int:
+    """A new accessor (and buffer view) for `data` at the end of `blob`,
+    float unless `component` names another type (joints, indices)."""
     while len(blob) % 4:
         blob.append(0)
-    raw = np.ascontiguousarray(data, dtype=np.float32).tobytes()
+    raw = np.ascontiguousarray(data, dtype=DTYPES[component]).tobytes()
     gltf.bufferViews.append(BufferView(buffer=0, byteOffset=len(blob), byteLength=len(raw)))
     blob.extend(raw)
-    acc = Accessor(bufferView=len(gltf.bufferViews) - 1, componentType=5126, count=len(data), type=kind)
+    acc = Accessor(bufferView=len(gltf.bufferViews) - 1, componentType=component, count=len(data), type=kind)
     if bounds:
         acc.min = [float(v) for v in np.atleast_1d(data.min(axis=0))]
         acc.max = [float(v) for v in np.atleast_1d(data.max(axis=0))]
     gltf.accessors.append(acc)
     return len(gltf.accessors) - 1
+
+
+def prune(gltf: GLTF2, blob: bytes) -> bytearray:
+    """Drop the accessors and buffer views nothing refers to any more (a
+    replaced clip's, a re-cut mesh's), and pack the buffer."""
+    used: set[int] = set()
+    for mesh in gltf.meshes:
+        for prim in mesh.primitives:
+            used.update(v for v in vars(prim.attributes).values() if isinstance(v, int))
+            if prim.indices is not None:
+                used.add(prim.indices)
+            for target in prim.targets or []:
+                used.update(v for v in target.values() if isinstance(v, int))
+    for skin in gltf.skins:
+        if skin.inverseBindMatrices is not None:
+            used.add(skin.inverseBindMatrices)
+    for anim in gltf.animations or []:
+        for s in anim.samplers:
+            used.update((s.input, s.output))
+    order = sorted(used)
+    remap = {old: new for new, old in enumerate(order)}
+    gltf.accessors = [gltf.accessors[i] for i in order]
+    for mesh in gltf.meshes:
+        for prim in mesh.primitives:
+            for key, v in vars(prim.attributes).items():
+                if isinstance(v, int):
+                    setattr(prim.attributes, key, remap[v])
+            if prim.indices is not None:
+                prim.indices = remap[prim.indices]
+            for target in prim.targets or []:
+                for key, v in list(target.items()):
+                    if isinstance(v, int):
+                        target[key] = remap[v]
+    for skin in gltf.skins:
+        if skin.inverseBindMatrices is not None:
+            skin.inverseBindMatrices = remap[skin.inverseBindMatrices]
+    for anim in gltf.animations or []:
+        for s in anim.samplers:
+            s.input, s.output = remap[s.input], remap[s.output]
+    views = sorted({a.bufferView for a in gltf.accessors if a.bufferView is not None}
+                   | {im.bufferView for im in gltf.images or [] if im.bufferView is not None})
+    packed, vmap, kept = bytearray(), {}, []
+    for old in views:
+        view = gltf.bufferViews[old]
+        while len(packed) % 4:
+            packed.append(0)
+        start = view.byteOffset or 0
+        chunk = blob[start:start + view.byteLength]
+        view.byteOffset = len(packed)
+        packed.extend(chunk)
+        vmap[old] = len(kept)
+        kept.append(view)
+    for item in list(gltf.accessors) + list(gltf.images or []):
+        if item.bufferView is not None:
+            item.bufferView = vmap[item.bufferView]
+    gltf.bufferViews = kept
+    return packed
 
 
 class Rig:
