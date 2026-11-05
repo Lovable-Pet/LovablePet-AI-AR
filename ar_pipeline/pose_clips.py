@@ -62,7 +62,7 @@ from pygltflib import GLTF2, Animation, AnimationChannel, AnimationChannelTarget
 from scipy.spatial.transform import Rotation
 
 from ar_pipeline import dog_mocap, video_motion
-from ar_pipeline.gltf_rig import Rig, append_accessor, read, sample_clip
+from ar_pipeline.gltf_rig import Rig, append_accessor, prune, read, sample_clip
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "archive" / "shiba" / "output" / "skeleton_shiba_small.glb"
@@ -319,6 +319,50 @@ WAG_CLEAR_M = 0.005
 # way, the sweep `vary` weaker half way through the loop
 STAND_WAG = {"tail_wag": {"length": 4.0, "hz": 2.25, "amps": (22.0, 12.0, 8.0, 5.0, 3.0, 2.0, 1.0),
                           "lag": 0.12, "lift": 18.0, "hips": 3.0, "vary": 0.15}}
+# barking (build_bark; user, 11-05: "짖을 수 있게 입도 움직이도록"), on a
+# template whose mouth opens (ar_pipeline/mouth.py): the stand with the head
+# carried `head_up` deg higher and the ears `ears` deg forward, a bout of
+# barks at `barks` (s) and a pause, `length` s in all. Each bark the jaw
+# opens `gape` deg in `open_s`, holds `hold_s` and shuts in `close_s` - 0.29 s
+# in all, a bark lasting 0.25-0.35 s (Yin & McCowan 2004, Anim. Behav. 68:343,
+# means 248-346 ms by context) and a dog's jaw opening to some 44 deg at
+# most (J. Vet. Dent. 2021); 30 deg made the thin lower jaw a duck's bill,
+# 28 once mouth.py had thickened it - and stays `between` deg open between
+# the barks of a bout (4 bared the teeth, a growl). The body barks too: the
+# head and chest moved 0.3-0.6 cm and the muzzle tipped 4 deg, and from where
+# the whole dog shows only the mouth seemed to move (TODO, 11-05: "짖을 때 몸
+# 동작 키우기"). So each bark is three movements, each a pulse (start from
+# the bark, up, hold, down - s):
+#   * `gather_s`, before it - the wind-up, against the throw: a breath in
+#     (breathe_jnt `inhale` wider), the body drawn `draw_back` m back, the
+#     head lowered (the neck `lower` deg forward and down, the muzzle `tuck`
+#     deg down), the ears pricked `prick` deg forward;
+#   * `throw_s`, the bark: the chest thrown `thrust` m forward and `dip` m
+#     down onto the forelegs, which brace (the paws stay, so the legs lean
+#     back from the shoulder), the neck lifted `lift` deg and the muzzle
+#     tossed `toss` deg up (NECK_SHARES of it on the neck): the head goes
+#     forward and up, the nose 4 cm (with the neck reaching forward instead
+#     the head went down as the chest dipped and the muzzle tipped 7 deg),
+#     the belly drawn in (breathe_jnt `exhale` narrower: a bark is a forced
+#     breath out), the ears flicked back `flick` deg;
+#   * `settle_s`, after it: the chest sinking `sink` m as the forelegs give
+#     and the head nodding `nod` deg below where it was, then back.
+# A bout's barks are not alike: each its own `strength` of the body's
+# movements and its own `gape`, the head turned `look` deg (+ to the dog's
+# left) for it - eased in over `look_s` (up, hold, down) up to the bark,
+# held through it and eased back. The tail,
+# carried `tail_lift` deg up, wags as tail_wag does but smaller. Keyed at
+# `fps`: at FPS the jaw opened 16 deg in one frame
+BARK = {"bark": {"length": 3.0, "fps": 60.0, "barks": (0.40, 1.20), "gape": (28.0, 26.0), "between": 2.0,
+                 "open_s": 0.083, "hold_s": 0.042, "close_s": 0.167,
+                 "strength": (1.0, 0.8), "look": (0.0, 6.0), "look_s": (0.3, 0.3, 0.6),
+                 "gather_s": (-0.22, 0.17, 0.02, 0.08), "inhale": 0.06, "draw_back": 0.006,
+                 "lower": 2.0, "tuck": 3.0, "prick": 5.0,
+                 "throw_s": (-0.03, 0.10, 0.05, 0.30), "thrust": 0.02, "dip": 0.003, "lift": 3.0,
+                 "toss": 12.0, "exhale": 0.07, "flick": 10.0,
+                 "settle_s": (0.15, 0.12, 0.04, 0.32), "sink": 0.005, "nod": 3.0,
+                 "head_up": 6.0, "ears": 6.0, "tail_lift": 12.0, "tail_hz": 2.0,
+                 "tail_amps": (16.0, 9.0, 6.0, 4.0, 2.0, 1.0, 1.0), "tail_lag": 0.12}}
 # a leg, the head or the tail this far under the floor is turned up out of it
 FLOOR_SLACK_M = 0.004
 LIFT_STEP_DEG = 5.0
@@ -1781,6 +1825,100 @@ def build_stand_wag(sk: Skeleton, keys: dict[str, Pose], name: str) -> dict:
     return {"times": np.arange(frames) / FPS, "rotations": rotations, "translations": translations, "report": report}
 
 
+def pulse(t: float, start: float, up: float, hold: float, down: float) -> float:
+    """0 -> 1 over `up` s from `start`, held `hold` s, -> 0 over `down` s."""
+    u = t - start
+    if u < 0 or u > up + hold + down:
+        return 0.0
+    return float(min(smooth(np.array(u / up)), 1.0 - smooth(np.array((u - up - hold) / down))))
+
+
+def build_bark(sk: Skeleton, keys: dict[str, Pose], name: str) -> dict:
+    """A dog barking on its stand (BARK): a bout of barks and a pause, each
+    bark the jaw dropping open about its hinge and shutting, gathered for
+    with a breath in, the body drawn back and the head lowered, thrown with
+    the head and neck tossed forward and up and the chest forward onto the
+    braced forelegs, the belly drawn in, then settling; the ears prick and
+    flick back, the
+    barks of a bout differ a little; all four paws stay where the stand has
+    them, the tail wags."""
+    spec = BARK[name]
+    base = keys["stand"].copy()
+    head, jaw = sk.j["head_jnt"], sk.j["jaw_jnt"]
+    neck_base = sk.j["neck_base_jnt"]
+    tail = [sk.j[n] for n in TAIL if n in sk.j]
+    ears = [sk.j[n] for n in ("L_ear_base_jnt", "R_ear_base_jnt") if n in sk.j]
+    turn(sk, base, tail[0], LEFT, spec["tail_lift"])
+    for i in ears:
+        turn(sk, base, i, LEFT, spec["ears"])
+    turn(sk, base, head, LEFT, -spec["head_up"])
+    base_world = sk.fk(base)
+    fps = spec.get("fps", FPS)
+    frames = int(round(spec["length"] * fps)) + 1
+    times = np.arange(frames) / fps
+    sweeps = max(1, round(spec["tail_hz"] * spec["length"]))
+    jaw_shape = (spec["open_s"], spec["hold_s"], spec["close_s"])
+    rotations = {i: [] for i in sk.joints}
+    translations, exhale = [], []
+    report = {"torso": [], "legs": [], "head": [], "tail": []}
+    heads = sk.mask(sk.subtree(sk.j["neck_base_jnt"]))
+    tails = sk.mask(tail)
+    legs_mask = sk.mask([j for leg in LEGS for j in sk.subtree(sk.leg(leg)[0])])
+    barks = list(zip(spec["barks"], spec["strength"], spec["gape"], spec["look"]))
+    look_up = spec["look_s"][0]
+
+    def pulses(t: float, shape: tuple) -> float:
+        """The bout's pulses of `shape` (start from the bark, up, hold,
+        down) at t, each by its bark's strength."""
+        return sum(s * pulse(t, t0 + shape[0], *shape[1:]) for t0, s, _, _ in barks)
+
+    for k, t in enumerate(times):
+        gape = max(g * pulse(t, t0, *jaw_shape) for t0, _, g, _ in barks)
+        flick = max(pulse(t, t0, *jaw_shape) for t0, _, _, _ in barks)
+        gather, throw, settle = (pulses(t, spec[key]) for key in ("gather_s", "throw_s", "settle_s"))
+        look = sum(d * pulse(t, t0 - look_up, *spec["look_s"]) for t0, _, _, d in barks)
+        # between the barks of a bout the mouth stays a little open
+        bout = pulse(t, spec["barks"][0] + spec["open_s"], 0.05,
+                     spec["barks"][-1] - spec["barks"][0] - spec["open_s"] - 0.05,
+                     spec["open_s"]) if len(spec["barks"]) > 1 else 0.0
+        pose = base.copy()
+        pose.t = base.t + FWD * (spec["thrust"] * throw - spec["draw_back"] * gather) \
+            - UP * (spec["dip"] * throw + spec["sink"] * settle)
+        # the neck: lowered, then lifted (+ turns the nose down)
+        turn(sk, pose, neck_base, LEFT, spec["lower"] * gather - spec["lift"] * throw)
+        # the muzzle: tucked, tossed up, nodding as it settles
+        tip = spec["tuck"] * gather - spec["toss"] * throw + spec["nod"] * settle
+        for joint, share in NECK_SHARES.items():
+            turn(sk, pose, sk.j[joint], LEFT, tip * share)
+        if look:
+            for joint, share in NECK_SHARES.items():
+                turn(sk, pose, sk.j[joint], UP, look * share)
+        for i in ears:
+            turn(sk, pose, i, LEFT, spec["prick"] * gather - spec["flick"] * flick)
+        phase = 2 * np.pi * sweeps * k / (frames - 1)
+        for n, i in enumerate(tail[:len(spec["tail_amps"])]):
+            turn(sk, pose, i, UP, spec["tail_amps"][n] * np.sin(phase - n * spec["tail_lag"]))
+        w = sk.fk(pose)
+        across = rot_of(w[head]) @ rot_of(sk.rest[head]).T @ LEFT
+        turn(sk, pose, jaw, across, max(gape, spec["between"] * bout))
+        pin(sk, pose, base_world)
+        w = sk.fk(pose)
+        report["torso"].append(sk.low(w, sk.torso)[0])
+        report["legs"].append(sk.low(w, legs_mask)[0])
+        report["head"].append(sk.low(w, heads)[0])
+        report["tail"].append(sk.low(w, tails)[0])
+        for i in sk.joints:
+            rotations[i].append(Rotation.from_matrix(pose.r.get(i, sk.rest_r[i])).as_quat())
+        translations.append(pose.t.copy())
+        exhale.append(1.0 + spec["inhale"] * gather - spec["exhale"] * throw)
+    # the neck smoothed over as long a time as at FPS
+    finish(sk, rotations, smooth_tail=False, neck_frames=int(round(NECK_SMOOTH_FRAMES * fps / FPS)))
+    breathe = breathing(times)
+    breathe[:, 1] *= np.array(exhale)
+    return {"times": times, "rotations": rotations, "translations": translations, "report": report,
+            "breathe": breathe}
+
+
 def paw_down_shares(heights: np.ndarray, lying: np.ndarray) -> np.ndarray:
     """(F, legs) how far to let each paw down (settle_paws): as near the
     floor as the captured paw is (PAW_DOWN_M), while lying, eased over
@@ -1917,63 +2055,6 @@ def build_captured(sk: Skeleton, poses: dict, captured_clips: dict, name: str) -
 
 # --- writing ------------------------------------------------------------------------------
 
-def _prune(gltf: GLTF2, blob: bytes) -> bytearray:
-    """Drop the accessors and buffer views nothing refers to any more (a
-    replaced clip's), and pack the buffer."""
-    used: set[int] = set()
-    for mesh in gltf.meshes:
-        for prim in mesh.primitives:
-            used.update(v for v in vars(prim.attributes).values() if isinstance(v, int))
-            if prim.indices is not None:
-                used.add(prim.indices)
-            for target in prim.targets or []:
-                used.update(v for v in target.values() if isinstance(v, int))
-    for skin in gltf.skins:
-        if skin.inverseBindMatrices is not None:
-            used.add(skin.inverseBindMatrices)
-    for anim in gltf.animations or []:
-        for s in anim.samplers:
-            used.update((s.input, s.output))
-    order = sorted(used)
-    remap = {old: new for new, old in enumerate(order)}
-    gltf.accessors = [gltf.accessors[i] for i in order]
-    for mesh in gltf.meshes:
-        for prim in mesh.primitives:
-            for key, v in vars(prim.attributes).items():
-                if isinstance(v, int):
-                    setattr(prim.attributes, key, remap[v])
-            if prim.indices is not None:
-                prim.indices = remap[prim.indices]
-            for target in prim.targets or []:
-                for key, v in list(target.items()):
-                    if isinstance(v, int):
-                        target[key] = remap[v]
-    for skin in gltf.skins:
-        if skin.inverseBindMatrices is not None:
-            skin.inverseBindMatrices = remap[skin.inverseBindMatrices]
-    for anim in gltf.animations or []:
-        for s in anim.samplers:
-            s.input, s.output = remap[s.input], remap[s.output]
-    views = sorted({a.bufferView for a in gltf.accessors if a.bufferView is not None}
-                   | {im.bufferView for im in gltf.images or [] if im.bufferView is not None})
-    packed, vmap, kept = bytearray(), {}, []
-    for old in views:
-        view = gltf.bufferViews[old]
-        while len(packed) % 4:
-            packed.append(0)
-        start = view.byteOffset or 0
-        chunk = blob[start:start + view.byteLength]
-        view.byteOffset = len(packed)
-        packed.extend(chunk)
-        vmap[old] = len(kept)
-        kept.append(view)
-    for item in list(gltf.accessors) + list(gltf.images or []):
-        if item.bufferView is not None:
-            item.bufferView = vmap[item.bufferView]
-    gltf.bufferViews = kept
-    return packed
-
-
 def breathing(times: np.ndarray) -> np.ndarray:
     """breathe_jnt's scale over `times`, a whole number of breaths."""
     length = float(times[-1] - times[0]) if len(times) > 1 else BREATH_S
@@ -1986,7 +2067,7 @@ def write(glb: Path, clips: dict[str, dict], cog: int, out: Path, breathe: int |
     gltf = GLTF2().load(str(glb))
     names = set(clips)
     gltf.animations = [a for a in gltf.animations or [] if a.name not in names]
-    blob = _prune(gltf, gltf.binary_blob())
+    blob = prune(gltf, gltf.binary_blob())
     for name, result in clips.items():
         times = np.asarray(result["times"], dtype=np.float32)
         time_acc = append_accessor(gltf, blob, times, "SCALAR", bounds=True)
@@ -2001,7 +2082,8 @@ def write(glb: Path, clips: dict[str, dict], cog: int, out: Path, breathe: int |
         anim.channels.append(AnimationChannel(sampler=len(anim.samplers) - 1,
                                               target=AnimationChannelTarget(node=cog, path="translation")))
         if breathe is not None and name not in NO_BREATH:
-            acc = append_accessor(gltf, blob, breathing(times.astype(np.float64)).astype(np.float32), "VEC3")
+            scales = result["breathe"] if "breathe" in result else breathing(times.astype(np.float64))
+            acc = append_accessor(gltf, blob, np.asarray(scales, dtype=np.float32), "VEC3")
             anim.samplers.append(AnimationSampler(input=time_acc, output=acc, interpolation="LINEAR"))
             anim.channels.append(AnimationChannel(sampler=len(anim.samplers) - 1,
                                                   target=AnimationChannelTarget(node=breathe, path="scale")))
@@ -2031,11 +2113,16 @@ def main() -> None:
     captured_clips = dog_mocap.load_clips()
     poses = dog_mocap.load()
     video = video_motion.load()
-    for name in args.clip or list(CLIPS) + list(CAPTURED_CLIPS) + list(STAND_WAG):
+    for name in args.clip or list(CLIPS) + list(CAPTURED_CLIPS) + list(STAND_WAG) + list(BARK):
         if name in CAPTURED_CLIPS:
             result = build_captured(sk, poses, captured_clips, name)
         elif name in STAND_WAG:
             result = build_stand_wag(sk, keys, name)
+        elif name in BARK:
+            if "jaw_jnt" not in sk.j or not sk.mask([sk.j["jaw_jnt"]]).any():
+                print(f"[pose_clips] {name}: skipped - the jaw carries no skin (ar_pipeline/mouth.py first)")
+                continue
+            result = build_bark(sk, keys, name)
         elif name in VIDEO_BASED and name in video:
             result = build_video(sk, keys, video, name)
         else:
