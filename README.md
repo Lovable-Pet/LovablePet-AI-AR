@@ -6,7 +6,8 @@ Spring 서버가 HTTP로 부른다 — 계약은 [docs/API.md](docs/API.md).
 ## 폴더
 
 ```
-api/              파이프라인 (기본 lite: api/lite.py), HTTP 서버 api/server.py, CLI python -m api.run
+api/              파이프라인 (기본 lite: api/lite.py), HTTP 서버 api/server.py, CLI python -m api.run,
+                  아이폰 AR용 GLB → USDZ api/usdz.py
 api/data/         생김새 분류기 template_pick.npz
 ar_pipeline/      템플릿 제작 Blender 스크립트 (드라이버 new_template.py)
 Dockerfile        서버 이미지 (CPU torch, api/, tests/scripts.py)
@@ -32,6 +33,11 @@ python -m api.run --record <기록.json> --photo <사진> --out output/runs/<이
 ```
 
 Blender(`BLENDER_EXE`)가 있으면 미리보기 PNG도 렌더하고, 없으면 GLB만 만든다.
+
+아이폰 AR(Quick Look)용 USDZ는 서버가 GLB 옆에 같이 만든다(`model.usdz`, idle 클립). 따로 만들려면
+`python -m api.usdz <GLB> [--clip <클립> | --all] [-o <출력>]` (Blender 없이 `usd-core`만 쓴다):
+뼈대·스킨·클립은 키 시각마다 그대로 옮기고(STEP·CUBICSPLINE은 그 사이를 채움), 모프는 기본 가중치로 굽고,
+Quick Look이 무시하는 정점 색(진도의 입 안)은 삼각형마다 8 px 칸에 구운 텍스처로 바꾼다.
 
 ## 도커로 실행
 

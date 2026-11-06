@@ -189,6 +189,16 @@ def _run_job_sync(job: dict[str, Any]) -> dict[str, Any]:
     for kind, path in (steps.get("renders") or {}).items():
         files[f"render_{kind}.png"] = Path(path)
     files = {name: str(p) for name, p in files.items() if Path(p).exists()}
+    if "model.glb" in files:
+        # the iPhone's AR (Quick Look) reads USDZ only: the same model, idle
+        # clip. A failure here leaves the GLB, the result, as it is
+        try:
+            from .usdz import glb_to_usdz
+            usdz = Path(files["model.glb"]).with_suffix(".usdz")
+            glb_to_usdz(files["model.glb"], usdz)
+            files["model.usdz"] = str(usdz)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[server] {job['job_id']}: no USDZ, {type(exc).__name__}: {exc}")
     from .glb import animation_names
     from .photo_quality import quality_view
     return {
@@ -197,6 +207,7 @@ def _run_job_sync(job: dict[str, Any]) -> dict[str, Any]:
         "photo": quality_view((steps.get("prepare") or {}).get("quality")),
         "size": _size_view(steps.get("size")),
         "model": {"glb_url": _url(job["job_id"], "model.glb"),
+                  "usdz_url": _url(job["job_id"], "model.usdz") if "model.usdz" in files else None,
                   "texture_url": _url(job["job_id"], "texture.png"),
                   "renders": {n[len("render_"):-4]: _url(job["job_id"], n) for n in files if n.startswith("render_")}},
         "animations": animation_names(files["model.glb"]) if "model.glb" in files else [],
@@ -308,7 +319,7 @@ async def get_file(job_id: str, name: str) -> FileResponse:
     path = (job or {}).get("_files", {}).get(name)
     if not path or not Path(path).exists():
         raise HTTPException(404, "no such file (job not done, or not produced)")
-    media = "model/gltf-binary" if name.endswith(".glb") else "image/png"
+    media = {".glb": "model/gltf-binary", ".usdz": "model/vnd.usdz+zip"}.get(Path(name).suffix, "image/png")
     return FileResponse(path, media_type=media, filename=f"{job['pet_id']}_{name}")
 
 
