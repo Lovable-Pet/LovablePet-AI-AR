@@ -25,7 +25,8 @@ getting up.
 HOW
 ---
 Only the poses and stretches the clips use are kept: POSES ->
-ar_pipeline/data/dog_poses.json (a few KB) and CLIPS ->
+ar_pipeline/data/dog_poses.json (a few KB) and CLIPS and TRANSITIONS (the
+changes of pose between held clips, kept as the dog moves) ->
 ar_pipeline/data/dog_clips.npz, each as the world rotations of the
 capture's joints, turned to face +z. A clip's pieces are joined end to
 start, the next turned and moved to carry on from where the last one is
@@ -64,6 +65,19 @@ CLIP_FPS = 24.0
 CLIPS = {"standing": [("D1_001_KAN01_001.bvh", 0.0, 11.5)],
          "play_dead": [("D1_071_KAN02_002.bvh", 7.5, 11.0), ("D1_071_KAN02_002.bvh", 13.0, 17.5),
                        ("D1_006_KAN01_002.bvh", 11.5, 17.5)]}
+# the changes of pose between the templates' held clips (pose_clips.TRANSITIONS),
+# each one stretch of a take kept as the dog moves - not looped, not brought
+# back to where it started. D1_013 is a dog doing as it is told in one spot -
+# sit, down, up again: standing still to sitting (the hind paws stepping
+# forward under it, the front paws back); sitting to standing (the front
+# paws stepping forward as it rises over its hind paws); standing to lying
+# down (stepping its front paws out and its hind paws in, then dropping). Its
+# getting up from lying down walks off with it (hips 55 cm forward), so that
+# one is D1_061's, which pulls its front paws back under it and rises in place.
+TRANSITIONS = {"sit_down": [("D1_013_KAN01_001.bvh", 8.15, 9.8)],
+               "stand_up": [("D1_013_KAN01_001.bvh", 1.7, 3.3)],
+               "lie_down": [("D1_013_KAN01_001.bvh", 31.65, 33.4)],
+               "get_up": [("D1_061_KAN01_001.bvh", 49.8, 51.1)]}
 CROSSFADE_S = 0.4
 LOOP_S = 0.6
 FEET = ("LeftHand_end", "RightHand_end", "LeftFoot_end", "RightFoot_end")
@@ -194,6 +208,7 @@ def _piece(bvh: BVH, floor: float, t0: float, t1: float, joints: list[str]) -> d
     pos = np.einsum("ij,fkj->fki", face, pos - origin)
     rot = np.einsum("ij,fkjl->fkil", face, rot)
     return {"rot": rot[:, [I[j] for j in joints]], "hips": pos[:, I["Hips"]], "spine": pos[:, I["Spine1"]],
+            "shoulders": 0.5 * (pos[:, I["LeftArm"]] + pos[:, I["RightArm"]]),
             "feet": pos[:, [I[f] for f in FEET]]}
 
 
@@ -252,8 +267,9 @@ def clean_rotations(rot: np.ndarray) -> np.ndarray:
     return out
 
 
-def extract_clip(bvh_dir: Path, pieces: list, joints: list[str], cache: dict) -> dict:
-    """The clip's pieces joined, looped in place, with planted paws marked."""
+def extract_clip(bvh_dir: Path, pieces: list, joints: list[str], cache: dict, loop: bool = True) -> dict:
+    """The clip's pieces joined, looped in place (`loop`; else left where the
+    dog went), with planted paws marked."""
     out = None
     k = int(round(CROSSFADE_S * CLIP_FPS))
     for file, t0, t1 in pieces:
@@ -274,6 +290,8 @@ def extract_clip(bvh_dir: Path, pieces: list, joints: list[str], cache: dict) ->
         head = {key: v[:k] for key, v in piece.items()}
         mixed = _blend(tail, head, w)
         out = {key: np.concatenate([out[key][:at], mixed[key], piece[key][k:]]) for key in out}
+    if not loop:
+        return _finish_clip(out)
     # back to where it started, a little each frame the dog moves (by how far
     # its hips go: spread evenly over the frames, the turn and the shift went
     # on while it lay still, and lying "dead" it slid 25 cm and turned)
@@ -283,7 +301,7 @@ def extract_clip(bvh_dir: Path, pieces: list, joints: list[str], cache: dict) ->
     turn = float(_heading(out["hips"][-1], out["spine"][-1]))
     turns = _yaw(-turn * u)
     end = _yaw(-turn)[0] @ (out["hips"][-1] * np.array([1.0, 0.0, 1.0]))
-    for key in ("hips", "spine"):
+    for key in ("hips", "spine", "shoulders"):
         out[key] = np.einsum("fij,fj->fi", turns, out[key]) - u[:, None] * end
     out["feet"] = np.einsum("fij,fkj->fki", turns, out["feet"]) - u[:, None, None] * end
     out["rot"] = np.einsum("fij,fkjl->fkil", turns, out["rot"])
@@ -293,6 +311,11 @@ def extract_clip(bvh_dir: Path, pieces: list, joints: list[str], cache: dict) ->
     last = {key: v[-m:] for key, v in out.items()}
     mixed = _blend(last, first, _smooth((np.arange(m) + 1) / m))
     out = {key: np.concatenate([out[key][:-m], mixed[key]]) for key in out}
+    return _finish_clip(out)
+
+
+def _finish_clip(out: dict) -> dict:
+    """Glitches out of the rotations and the planted paws marked."""
     out["rot"] = clean_rotations(out["rot"])
     speed = np.linalg.norm(np.gradient(out["feet"][..., [0, 2]], axis=0), axis=-1) * CLIP_FPS
     out["planted"] = (out["feet"][..., 1] < PLANT_HEIGHT_M) & (speed < PLANT_SPEED_MS)
@@ -324,12 +347,14 @@ def extract_clips(bvh_dir: Path) -> dict[str, np.ndarray]:
     pos, _ = b.worlds(np.array([stand_frame]))
     floor = float(np.min(pos[0, [b.index[f] for f in FEET], 1]))
     out["stand_hips_height"] = np.array((pos[0, b.index["Hips"], 1] - floor) * 0.01)
-    for name, pieces in CLIPS.items():
-        clip = extract_clip(bvh_dir, pieces, joints, cache)
+    for name, pieces, loop in [(n, p, True) for n, p in CLIPS.items()] + \
+            [(n, p, False) for n, p in TRANSITIONS.items()]:
+        clip = extract_clip(bvh_dir, pieces, joints, cache, loop)
         shape = clip["rot"].shape
         out[f"{name}/rot"] = Rotation.from_matrix(clip["rot"].reshape(-1, 3, 3)).as_quat().reshape(
             shape[0], shape[1], 4).astype(np.float32)
         out[f"{name}/hips"] = clip["hips"].astype(np.float32)
+        out[f"{name}/shoulders"] = clip["shoulders"].astype(np.float32)
         out[f"{name}/feet"] = clip["feet"].astype(np.float32)
         out[f"{name}/planted"] = clip["planted"]
         print(f"[dog_mocap] {name}: {shape[0]} frames ({shape[0] / CLIP_FPS:.1f} s), "
@@ -342,13 +367,15 @@ def load_clips() -> dict:
     data = np.load(CLIPS_NPZ)
     joints = [str(j) for j in data["joints"]]
     out: dict = {"stand_hips_height": float(data["stand_hips_height"])}
-    for name in CLIPS:
+    for name in (*CLIPS, *TRANSITIONS):
         if f"{name}/rot" not in data:
             continue
         q = data[f"{name}/rot"]
         mats = Rotation.from_quat(q.reshape(-1, 4)).as_matrix().reshape(q.shape[0], q.shape[1], 3, 3)
         out[name] = {"rot": {j: mats[:, k] for k, j in enumerate(joints)}, "hips": data[f"{name}/hips"],
                      "feet": data[f"{name}/feet"], "planted": data[f"{name}/planted"]}
+        if f"{name}/shoulders" in data:
+            out[name]["shoulders"] = data[f"{name}/shoulders"]
     return out
 
 

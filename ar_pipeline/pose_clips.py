@@ -1,5 +1,6 @@
-"""Five clips for a template - standing, sitting, shake, rollover,
-play_dead - posed on the template's own build.
+"""Clips for a template - standing, sitting, lying, shake, rollover,
+tail_wag, bark, the transitions between the held ones (sit_down, stand_up,
+lie_down, get_up) and play_dead - posed on the template's own build.
 
 WHY
 ---
@@ -47,6 +48,7 @@ that would touch the morph targets, split primitives and fixed normals).
     python -m ar_pipeline.pose_clips --slug jindo                 # work/anim/jindo_clips.glb
     python -m ar_pipeline.pose_clips --slug jindo --install       # into the template GLB
     python -m ar_pipeline.pose_clips --slug jindo --clip sitting  # one clip
+    python -m ar_pipeline.pose_clips --slug jindo --clip sit_down --clip stand_up --clip lie_down --clip get_up --install
 
 --install backs the GLB up to work/backup_anim_<slug>/ first (once).
 """
@@ -189,6 +191,15 @@ HINGE_MAX_DEG = {"B": (165.0, 145.0, None), "F": (145.0, 150.0, None)}
 # plane, by at most this much
 HINGE_IN_PLANE = 0.7
 HINGE_FIX_MAX_DEG = 25.0
+# the most the bones below a knee / elbow lean out of the plane the leg bends
+# in there (hinge_leg)
+HINGE_SIDE_DEG = 12.0
+# a paw within PAW_FLAT_M[0] of its toe's height at rest lies flat on the
+# floor (flat_paw), one over PAW_FLAT_M[1] as it is, between eased
+PAW_FLAT_M = (0.02, 0.05)
+# (a captured clip's paw: as its capture's is within PAW_FLAT_CAPTURE_M of the floor)
+PAW_FLAT_CAPTURE_M = (0.03, 0.06)
+LEGS_ORDER = {"LF": 0, "RF": 1, "LB": 2, "RB": 3}                 # dog_mocap.FEET's order
 # align_leg takes each bone's turn from the joint above bent this far, and
 # in a clip turns it about its length toward that by at most this a frame
 ALIGN_MID_DEG = 70.0
@@ -242,9 +253,13 @@ ROLL_SRC_S = (0.33, 1.42)
 # 뒷다리가 저래도 괜찮은지 … 실제 개가 가능한 자세인가". An elbow bends
 # 15-144 deg forward, a wrist -16..148 back, a knee 18-138 back, a hock
 # 16-141 forward: Jaegger et al. 2002, Labradors). Each leg its own: the
-# two sides alike to the degree, the legs moved like a puppet's.
-TUCK_LEGS = {"LB": ((70.0, 0.45), (-50.0, 0.2), (15.0, 0.1), (55.0, 0.0)),
-             "RB": ((55.0, 0.35), (-35.0, 0.2), (20.0, 0.1), (60.0, 0.0)),
+# two sides alike to the degree, the legs moved like a puppet's. The hind
+# legs folded about as far as lying down folds them - the knee some 130 deg,
+# the hock 100 - the paw under the thigh: folded less (the knees 90-120 deg,
+# the hocks 55-65), the hind legs unfolded as the dog went over and stuck up
+# off it stiff (user, 11-06: "구르기 뒷발좀 자연스럽게 … 뒤틀리지않았나").
+TUCK_LEGS = {"LB": ((80.0, 0.35), (-50.0, 0.15), (50.0, 0.05), (75.0, 0.0)),
+             "RB": ((72.0, 0.3), (-55.0, 0.15), (45.0, 0.05), (70.0, 0.0)),
              "LF": ((-20.0, 0.15), (75.0, 0.1), (-30.0, 0.0), (-60.0, 0.0)),
              "RF": ((-10.0, 0.12), (85.0, 0.1), (-15.0, 0.0), (-50.0, 0.0))}
 # rolling over, the folded legs hang loose: each swung about the body's
@@ -273,7 +288,9 @@ ROLL_FOLD_DEG = 140.0
 # the roll and FADE_S either side of it
 FACE_FRONT_SHARES = {"neck_base_jnt": 0.5, "neck_mid_jnt": 0.3, "head_jnt": 0.2}
 HOLD_SECONDARY = {"rollover": ("L_ear_base_jnt", "L_ear_tip_jnt", "R_ear_base_jnt", "R_ear_tip_jnt")}
+HOLD_SECONDARY["lying"] = HOLD_SECONDARY["rollover"]
 LYING_WAG = {"rollover": {"amps": (16.0, 9.0, 6.0, 4.0, 2.0, 1.0, 1.0), "hz": 2.0, "lag": 0.12, "fade_s": 0.3}}
+LYING_WAG["lying"] = LYING_WAG["rollover"]
 # within this many degrees of lying on its chest the tail is laid along the
 # floor as it is lying (it went 5 cm into it as the dog tipped over); further
 # round it passes under the body, where laid frame by frame it flipped 90 deg
@@ -690,13 +707,8 @@ def pin(sk: Skeleton, pose: Pose, key: dict, legs=tuple(LEGS)) -> None:
     bends it (bent as it is now, a near-straight foreleg flipped its elbow
     forward and back from frame to frame)."""
     for leg in legs:
-        a, b, c, d, e = sk.leg(leg)
-        line = key[c][:3, 3] - key[a][:3, 3]
-        bend = key[b][:3, 3] - key[a][:3, 3]
-        pole = bend - line * (bend @ line) / max(line @ line, 1e-12)
-        if np.linalg.norm(pole) < 1e-3 * np.linalg.norm(line):
-            pole = FWD if leg.endswith("B") else -FWD
-        plant(sk, pose, leg, key[c][:3, 3], lower_dirs(sk, key, leg), pole)
+        c = sk.leg(leg)[2]
+        plant(sk, pose, leg, key[c][:3, 3], lower_dirs(sk, key, leg), bend_of(sk, key, leg))
 
 
 def lower_leg(sk: Skeleton, leg: str) -> np.ndarray:
@@ -784,8 +796,9 @@ def drape_tail(sk: Skeleton, pose: Pose, settle: bool = False) -> None:
 
 # --- key poses ----------------------------------------------------------------------------
 
-def fold_hind(sk: Skeleton, pose: Pose, leg: str, lift_deg: float, splay: float = 0.0, dy: float = 0.0) -> None:
-    """A hind leg folded under a sitting dog: the femur SIT_KNEE_UP_DEG up
+def fold_hind(sk: Skeleton, pose: Pose, leg: str, lift_deg: float, splay: float = 0.0, dy: float = 0.0,
+              knee_up_deg: float = SIT_KNEE_UP_DEG) -> None:
+    """A hind leg folded under a sitting dog: the femur `knee_up_deg` up
     and forward from the hip, a little out, putting the knee by the flank;
     the shin from there down to the hock on the floor (or `lift_deg` up the
     metatarsus off it), the metatarsus and paw forward along the floor.
@@ -802,7 +815,7 @@ def fold_hind(sk: Skeleton, pose: Pose, leg: str, lift_deg: float, splay: float 
     paw_y = sk.rest[foot][1, 3] + dy
     lift = max(np.radians(lift_deg), np.arcsin(np.clip((r_hock - paw_y) / l3, -1.0, 1.0)))
     hock_y = paw_y + l3 * np.sin(lift)
-    up = np.radians(SIT_KNEE_UP_DEG)
+    up = np.radians(knee_up_deg)
     femur = FWD * np.cos(up) + UP * np.sin(up) + KNEE_SPLAY * side * LEFT
     femur = femur / np.linalg.norm(femur)
     knee_at = h + sk.length(hip, knee) * femur
@@ -1125,6 +1138,110 @@ def align_leg(sk: Skeleton, pose: Pose, leg: str, prev: list | None = None) -> l
     return out
 
 
+def hinge_leg(sk: Skeleton, pose: Pose, leg: str, most_deg: float = HINGE_SIDE_DEG) -> None:
+    """The bones below the knee / elbow swung into the plane the leg bends
+    in at the knee / elbow (within `most_deg` of it), so that the hock and
+    paw (wrist and paw) bend as hinges, the way the knee does - nearly
+    straight there, the plane the knee's axis at rest makes with the femur /
+    upper arm. Lying on its left hip or side, the captured dogs' left hind
+    hock bent 40-60 deg sideways, the heel out and the foot turned in under
+    the belly (user, 11-06: "왼쪽다리 뭔가 꺾이는거 ... 둘다 그런데")."""
+    a, b, c, d, e = sk.leg(leg)
+    w = sk.fk(pose)
+    u1, u2 = w[b][:3, 3] - w[a][:3, 3], w[c][:3, 3] - w[b][:3, 3]
+    n = np.cross(u1, u2)
+    s = float(np.linalg.norm(n) / max(np.linalg.norm(u1) * np.linalg.norm(u2), 1e-12))
+    r0 = [sk.rest[j][:3, 3] for j in (a, b, c)]
+    n0 = np.cross(r0[1] - r0[0], r0[2] - r0[1])
+    rest_axis = body_frame(sk, w, a) @ (n0 / np.linalg.norm(n0))
+    if s < 1e-6:
+        n = rest_axis
+    else:
+        n = n / np.linalg.norm(n)
+        if n @ rest_axis < 0:
+            n = -n
+        k = min(s / np.sin(np.radians(HINGE_STRAIGHT_DEG)), 1.0)    # nearly straight: the rest axis
+        n = k * n + (1.0 - k) * rest_axis
+        n = n / np.linalg.norm(n)
+    most = np.sin(np.radians(most_deg))
+    for i, child in ((c, d), (d, e)):
+        w = sk.fk(pose)
+        v = w[child][:3, 3] - w[i][:3, 3]
+        length = float(np.linalg.norm(v))
+        off = float(v @ n) / max(length, 1e-12)
+        if abs(off) <= most:
+            continue
+        inside = v - n * (v @ n)
+        if np.linalg.norm(inside) < 1e-9:
+            continue
+        inside = inside / np.linalg.norm(inside)
+        aim(sk, pose, i, child, inside * np.sqrt(1.0 - most * most) + n * np.sign(off) * most)
+
+
+def flat_paw(sk: Skeleton, pose: Pose, leg: str, weight: float = 1.0) -> None:
+    """The paw laid flat - turned as it is at rest, pads down, about the
+    vertical as the body is (the chest / pelvis it hangs from: by the way
+    the paw itself pointed, near straight down that swung 70 deg out and
+    back in a third of a second) - its toe where it is: the bone
+    above it (pastern / metatarsus) keeping its heading, pitched only as
+    far as keeps its upper end (wrist / hock) its own radius off the floor,
+    and the leg above reaching for that by two-bone IK, bent as it is;
+    `weight` of the way. The paw's bone points 44 (fore) / 59 (hind) deg
+    down when its pads are flat; laid near level, as the lying keys and the
+    capture had it, the pads faced 45-70 deg forward and the paw looked
+    flipped up or knuckled under (user, 11-06: "여전히 이상하잖아 직접봐
+    왼쪽다리")."""
+    if weight <= 1e-3:
+        return
+    a, b, c, d, e = sk.leg(leg)
+    w = sk.fk(pose)
+    keep = {i: pose.r.get(i, sk.rest_r[i]).copy() for i in (a, b, c, d)}
+    toe = w[e][:3, 3].copy()
+    paw_rest = sk.rest[e][:3, 3] - sk.rest[d][:3, 3]
+    h0 = paw_rest - UP * (paw_rest @ UP)
+    heading = body_frame(sk, w, leg_frame(sk, leg)) @ h0
+    heading = heading - UP * (heading @ UP)
+    if np.linalg.norm(heading) < 1e-6:
+        heading = h0
+    yaw = np.arctan2(np.cross(h0, heading) @ UP, h0 @ heading)
+    spin = rotm(UP, np.degrees(yaw))
+    paw = spin @ paw_rest                                   # the flat paw, toe to joint reversed
+    joint = toe - paw
+    pastern = w[d][:3, 3] - w[c][:3, 3]
+    length = float(np.linalg.norm(pastern))
+    flat_dir = pastern - UP * (pastern @ UP)
+    if np.linalg.norm(flat_dir) < 1e-6:
+        flat_dir = heading
+    flat_dir = flat_dir / np.linalg.norm(flat_dir)
+    # (pitched to keep the wrist / hock at its height - lying, the forearm
+    # or the hock stays on the floor and the pastern rises to the paw - but
+    # never lower than its own radius off the floor)
+    lift = (joint[1] - w[c][1, 3]) / length                 # sine of its pitch, + rising toward the paw
+    most = (joint[1] - sk.radius(c, d)) / length
+    lift = float(np.clip(min(lift, most), -1.0, 1.0))
+    pastern = (flat_dir * np.sqrt(1.0 - lift * lift) + UP * lift) * length
+    plant(sk, pose, leg, joint - pastern, (pastern, paw), w[b][:3, 3] - w[a][:3, 3])
+    w2 = sk.fk(pose)
+    set_world(sk, pose, w2, d, spin @ rot_of(sk.rest[d]))
+    if weight < 1.0:
+        for i in (a, b, c, d):
+            pose.r[i] = slerp_m(keep[i], pose.r[i], weight)
+
+
+def near_floor(sk: Skeleton, w: dict, leg: str) -> float:
+    """How fully a paw rests on the floor, by its toe's height over the
+    toe's height at rest (PAW_FLAT_M): 1 on it, 0 lifted clear."""
+    e = sk.leg(leg)[-1]
+    up = w[e][1, 3] - sk.rest[e][1, 3]
+    return float(np.clip((PAW_FLAT_M[1] - up) / (PAW_FLAT_M[1] - PAW_FLAT_M[0]), 0.0, 1.0))
+
+
+def flat_paws(sk: Skeleton, pose: Pose, legs=tuple(LEGS), share: float = 1.0) -> None:
+    """Each paw on the floor laid flat (flat_paw), as fully as it rests on it."""
+    for leg in legs:
+        flat_paw(sk, pose, leg, share * near_floor(sk, sk.fk(pose), leg))
+
+
 def limit_hinges(sk: Skeleton, pose: Pose, leg: str) -> None:
     """A knee, hock, elbow or wrist bent the wrong way past HINGE_MIN_DEG
     brought back to it (degrees of bend the way the joint bends at rest -
@@ -1163,8 +1280,26 @@ def key_down(sk: Skeleton, poses: dict) -> Pose:
     turn(sk, pose, upper, body_frame(sk, sk.fk(pose), pelvis) @ FWD, side * DOWN_UPPER_HIND_IN_DEG)
     for leg in LEGS:
         untwist_leg(sk, pose, leg)
+    # the hind hocks and paws bending as hinges (the captured left hind foot
+    # lay turned in under the belly, the heel out sideways)
+    for leg in ("LB", "RB"):
+        hinge_leg(sk, pose, leg)
+        untwist_leg(sk, pose, leg)
+    # the forequarters sternal and square, as a dog lying on one hip holds
+    # its chest - the chest up straight on the forelegs alike, the head
+    # straight ahead - and the back taking the turn from the rolled hips
+    # (the captured chest leaned 10 deg and turned 9, the left forepaw under
+    # it past the line of the body and the right out at twice the stance,
+    # the head turned with the chest - user, 11-06: "엎드려 구르기할때 발이랑
+    # 몸, 고개가 비틀려있는데")
+    pose = square(sk, pose, sk.subtree(sk.j["chest_jnt"]))
+    even_back(sk, pose)
     settle_front(sk, pose)
     face_front(sk, pose)
+    # the paws on the floor flat, pads down (laid near level, the forepaws'
+    # pads faced 45 deg forward and out and the left hind paw's 70)
+    flat_paws(sk, pose)
+    ground(sk, pose, support(sk))
     drape_tail(sk, pose, settle=True)
     return pose
 
@@ -1228,9 +1363,13 @@ def solve_keys(sk: Skeleton) -> dict[str, Pose]:
     poses = dog_mocap.load()
     sit, pitch = key_sit(sk)
     down = key_down(sk, poses)
+    # (rolled from the sphinx instead, square, its hind legs went from folded
+    # alike under it into the tuck and back and the roll went stiff - user,
+    # 11-06: "구르기 ... 너무 딱딱하고 부자연스러워 ... 뒷발이 특히 이상해짐":
+    # a dog rolls from lying on one hip, over onto that side)
     curl = key_curl(sk, down)
     keys = {"stand": key_stand(sk), "sit": sit, "down": down, "side": key_side(sk, poses),
-            "curl": curl, "tuck": key_tuck(sk, curl), "shake": key_shake(sk, sit)}
+            "curl": curl, "tuck": key_tuck(sk, curl), "shake": key_shake(sk, sit), "sphinx": crouch(sk, down)}
     keys["sit"].pitch = pitch                                   # for the report
     return keys
 
@@ -1374,6 +1513,8 @@ class Change:
     b: str
     t0: float
     t1: float
+    # eased over its own time (else as the shiba's body turns over it)
+    timed: bool = False
 
 
 @dataclass
@@ -1385,6 +1526,8 @@ class Roll:
 
 # segment times read off the shiba's clips (its body's orientation and its
 # paws' heights over time)
+# the shiba's clip each of these takes its timing and motion from (else its own name)
+SOURCE_CLIPS = {"lying": "rollover"}
 CLIPS = {
     # in its 12 s the shiba looks round to its right once (the viewer's left,
     # facing it) and back; played again mirrored, the dog looks to either
@@ -1394,14 +1537,31 @@ CLIPS = {
     # (the shiba's sitting clip looks round the same way, once)
     "sitting": [Hold("sit", 0.0, 12.0), Hold("sit", 12.0, 24.0, src_t0=0.0, mirror=True)],
     "shake": [Hold("sit", 0.0, 6.5)],
-    # (the hold after the roll carries the shiba's motion after its own)
-    "rollover": [Hold("down", 0.0, 0.33), Roll("down", 0.33, 1.83), Hold("down", 1.83, 8.0, src_t0=1.42)],
+    # from lying square (the lying clip's sphinx): the hips go over onto
+    # their side and the hind legs out to the other (a dog rolls from lying
+    # on one hip; 0.6 s), the legs fold, it rolls over (the shiba's roll),
+    # the legs unfold, and back square - held in the roll's down before and
+    # after (lie_flop and lie_square to and from the lying clip), the dog lay
+    # crooked for 6 s with a hind paw turned over out to the side (user,
+    # 11-06: "엎드려구르기 여전히 왼쪽으로 발이 뒤틀려있고"). (The holds carry
+    # the shiba's lying motion before / after its own roll.)
+    "rollover": [Hold("sphinx", 0.0, 0.4, src_t0=1.42), Change("sphinx", "down", 0.4, 1.0, timed=True),
+                 Hold("down", 1.0, 1.3, src_t0=0.0), Roll("down", 1.3, 2.8), Hold("down", 2.8, 3.5, src_t0=1.42),
+                 Change("down", "sphinx", 3.5, 4.1, timed=True), Hold("sphinx", 4.1, 5.0, src_t0=2.12)],
+    # lying down as told, square on its chest (a sphinx: crouch()), between
+    # lie_down and get_up: it breathes, wags along the floor and moves its
+    # ears as the roll's lying does, looking at whoever told it (without an
+    # end to come back to, the dog froze on the roll's first frame lying)
+    "lying": [Hold("sphinx", 0.0, 6.0, src_t0=1.42)],
 }
 # clips that are a real dog's motion from start to end (dog_mocap.CLIPS):
 # lying down, flopping onto its side and getting up. (Standing was the
 # capture's too, for a while: its weight shifts and turns on planted paws
 # set the template's straight legs askew - user, 11-03: "발을 왜 굳이
-# 삐딱하게" - so it is the template's own stance again, like idle.)
+# 삐딱하게" - so it is the template's own stance again, like idle. Built
+# from the template's own poses instead - lying down, a flop onto its side,
+# still, back and up - playing dead went stiff and lifeless: user, 11-06:
+# "죽은척이랑 구르기 이전대비 너무 딱딱하고 부자연스러워".)
 CAPTURED_CLIPS = ("play_dead",)
 # a captured paw on the floor and still is held where it came down, while
 # the dog's hips are above this share of their standing height (lying, the
@@ -1411,6 +1571,12 @@ CAPTURED_CLIPS = ("play_dead",)
 VIDEO_BASED = {"shake": "sit"}
 PLANT_UPRIGHT_SHARE = 0.5
 HOLD_EASE_FRAMES = 5
+# a captured paw within CONTACT_M of the floor is on it, still or sliding
+# (the capture's own mark, planted, also wants it still), its runs cleaned
+# of gaps up to CONTACT_GAP_FRAMES and of runs shorter than CONTACT_MIN_FRAMES
+CONTACT_M = 0.03
+CONTACT_GAP_FRAMES = 3
+CONTACT_MIN_FRAMES = 3
 # lying (hips below PLANT_UPRIGHT_SHARE), a paw the capture has within
 # PAW_DOWN_M[0] of the floor is let down onto it, one above PAW_DOWN_M[1]
 # left as it is, between eased; each joint turned at most PAW_DOWN_LIMIT_DEG
@@ -1418,12 +1584,104 @@ PAW_DOWN_M = (0.05, 0.09)
 PAW_DOWN_LIMIT_DEG = 45.0
 PAW_DOWN_EASE_FRAMES = 12
 LOOP_BLEND_S = 0.5
+# a captured clip's body levelled side to side while it leans less than
+# CAPTURED_LEVEL_DEG[0], not at all from [1] (lying on its side), each paw on
+# its own side (own_side), the corrections smoothed over
+# CAPTURED_SMOOTH_FRAMES
+CAPTURED_LEVEL_DEG = (15.0, 30.0)
+STANCE_SHARE = (0.8, 1.5)
+STANCE_KEEP = 0.35
+# with its chest up, the body tipped forward (CAPTURED_LEAN_MAX_DEG at most)
+# until its shoulders stand no higher than CAPTURED_SHOULDER_SHARE of the
+# rest pose's - [0] with the hips down to CAPTURED_LEAN_HIPS[0] of their
+# standing height, [1] from [1] up - resting on the floor by its hind end
+# from CAPTURED_LEAN_GROUND_DEG of tip on; a free paw moved SIDE_FOLLOW of
+# the way to its own side each frame; the legs smoothed over time over
+# CAPTURED_LEG_SMOOTH_FRAMES
+CAPTURED_LEAN_MAX_DEG = 40.0
+CAPTURED_SHOULDER_SHARE = (0.95, 1.0)
+CAPTURED_LEAN_HIPS = (0.6, 0.85)
+CAPTURED_LEAN_GROUND_DEG = 8.0
+SIDE_FOLLOW = 0.6
+CAPTURED_LEG_SMOOTH_FRAMES = 1.6
+# lying on its side (from SIDE_LYING_DEG[0] over onto it, fully from [1]),
+# a captured clip's forelegs laid out from the chest as (degrees from the
+# body's down toward its front, outward share) per bone, the leg underneath
+# straight out and the upper one on it a little ahead, drawn in toward it -
+# the captured dog lay with the upper foreleg across the lower at the wrists
+# and the paws curled over, pads up (user, 11-06: "죽은척할때 중간에 앞발
+# 비틀리는거만 개선")
+SIDE_LYING_DEG = (50.0, 70.0)
+SIDE_FORELEGS = {"lower": ((28.0, 0.0), (40.0, 0.0), (55.0, 0.0), (75.0, 0.0)),
+                 "upper": ((38.0, -0.12), (50.0, -0.05), (62.0, 0.0), (80.0, 0.0))}
+CAPTURED_SMOOTH_FRAMES = 2.0
+# TRANSITIONS: a change of pose between two held clips, played once - from
+# the first frame of the clip it leaves to the first frame of the one it goes
+# into (each held clip loops back onto its first frame), so that the client
+# plays loop -> transition -> loop (user, 11-05: interaction by touch and
+# voice - "앉아" from standing). Built from the template's own poses: the
+# captured dog's joint turns put on the template (as play_dead is) splayed
+# its hind legs like a frog's sitting down, crossed its forelegs, and turned
+# and tipped its body as the captured dog's (user, 11-05: "다리가 전체적으로
+# 부자연스럽게 꺾여서 ... 몸도 왜 삐딱하게 비트는건데"). So the capture
+# (dog_mocap.TRANSITIONS) gives only its timing - how its hips and its
+# shoulders go down or up (the rump first sitting down, the forequarters
+# first lying down, the forequarters first getting up) and when it moves
+# each paw. The body goes from the one clip's shape to the other's square
+# (no turn or lean of its own), its hips and shoulders at the capture's
+# heights brought onto the two clips' (the body tipped about its hips to
+# put the shoulders there), the head carried between the two clips'
+# carriage. Each leg is solved as the key poses solve theirs: the paw on
+# its spot, the knee / elbow bent the way the two clips bend it, the hock /
+# pastern turned from the one clip's to the other's as the body goes. A paw
+# stays where it is until the captured dog moves that paw, then steps
+# (STEP_LIFT_M high, a forepaw curling back TRANSITION_CURL_DEG) as far as
+# that move takes it of the way to the second clip's spot (the last all the
+# way); a paw the capture never moves steps once the body is STEP_AFTER of
+# the way. Lying down, the body goes down square onto hind legs folded
+# under it alike (a sphinx, crouch()) and lies there (the lying clip), which
+# the roll starts from and comes back to - lying down onto the roll's down
+# straight, the hips going over at the end looked crooked (user, 11-05:
+# "몸도 왜 삐딱하게"). (Going between a held clip and a lying pose that is
+# not square, the body would gather from / settle onto it over
+# LIE_SETTLE_S.) The ends are eased onto the clips' own frames over
+# TRANSITION_IN_S / TRANSITION_OUT_S.
+TRANSITIONS = {"sit_down": ("standing", "sitting"), "stand_up": ("sitting", "standing"),
+               "lie_down": ("standing", "lying"), "get_up": ("lying", "standing")}
+TRANSITION_IN_S = 0.2
+TRANSITION_OUT_S = 0.3
+LIE_SETTLE_S = 0.5
+STEP_LIFT_M = 0.04
+TRANSITION_CURL_DEG = 35.0
+STEP_S = 0.3
+STEP_MIN_S = 0.29
+STEP_GAP_S = 0.08
+STEP_TOLERANCE_M = 0.02
+STEP_AFTER = 0.85
+# a captured paw moving faster than this along the floor is stepping
+STEP_SPEED_MS = 0.25
+# the capture's shoulders going up or down by more than this are followed
+# as they go; less (sitting, standing up), their small dip on top of the hips'
+SHOULDER_CHANGE_M = 0.05
+LYING_CHEST_SHARE = 0.6
+KNEE_BIAS = 0.15
+# the sphinx's femur from the hip, degrees up from forward (a sit's: +40)
+CROUCH_KNEE_UP_DEG = -15.0
+# the head carried between the two clips' carriage: the share of the turn
+# each neck joint takes (the head the rest)
+NECK_CARRY = {"neck_base_jnt": 0.35, "neck_mid_jnt": 0.35}
+BOW_SHARE = 0.6
+REACH_SHARE = 0.98
+REACH_PITCH_DEG = 30.0
+REACH_SMOOTH_FRAMES = 1.5
+REACH_HOLD_FRAMES = 2
 # breathing, as the idle clip does it (build_template): breathe_jnt's scale
 # swells by BREATH_SWELL along its own y once every BREATH_S or so (fitted
-# to the clip's length so it loops), in every clip but the roll
+# to the clip's length so it loops), in every clip but the roll and the
+# transitions (a breath fitted into 1.5 s heaved)
 BREATH_SWELL = 0.03
 BREATH_S = 4.0
-NO_BREATH = ("rollover",)
+NO_BREATH = ("rollover",) + tuple(TRANSITIONS)
 TAIL_SMOOTH_FRAMES = 4
 NECK_SMOOTH_FRAMES = 3
 # rolling over, the head is turned out of the floor frame by frame about an
@@ -1435,7 +1693,7 @@ ROLL_NECK_SMOOTH_FRAMES = 6
 # as the side they are on comes down, jumped 24 deg in a frame
 ROLL_LEG_SMOOTH_FRAMES = 3
 # lying poses rest on whatever is lowest, torso or legs
-LYING = ("down", "side")
+LYING = ("down", "side", "sphinx")
 # held poses whose paws stay where the key pose put them (not the captured
 # down: re-solved by IK its folded hind legs came out twisted 60 deg from
 # the capture's, and lying, its paws barely move)
@@ -1443,7 +1701,8 @@ PINNED = {"stand": tuple(LEGS), "sit": tuple(LEGS)}
 
 
 def build_clip(sk: Skeleton, src: Source, keys: dict[str, Pose], name: str) -> dict:
-    times, frames, worlds = src.clip(name)
+    source = SOURCE_CLIPS.get(name, name)
+    times, frames, worlds = src.clip(source)
     segments = CLIPS[name]
     key_world = {k: sk.fk(p) for k, p in keys.items()}
     end = segments[-1].t1
@@ -1459,7 +1718,7 @@ def build_clip(sk: Skeleton, src: Source, keys: dict[str, Pose], name: str) -> d
         h = h - h[0]
         held = h[(times > 1.3) & (times < 4.2)] if len(h) == len(times) else h
         offer = h / max(float(np.median(held)), 1e-6)
-    roll = src.roll(name) if any(isinstance(s, Roll) for s in segments) else None
+    roll = src.roll(source) if any(isinstance(s, Roll) for s in segments) else None
     rolls = [s for s in segments if isinstance(s, Roll)]
 
     def tucked(t: float) -> float:
@@ -1491,6 +1750,8 @@ def build_clip(sk: Skeleton, src: Source, keys: dict[str, Pose], name: str) -> d
     for k, t in enumerate(times):
         seg = next(s for s in segments if s.t0 - 1e-6 <= t <= s.t1 + 1e-6)
         fold = tucked(float(t))
+        lying = ((isinstance(seg, Hold) and seg.key in LYING)
+                 or (isinstance(seg, Change) and seg.a in LYING and seg.b in LYING))
         if isinstance(seg, Hold):
             pose = keys[seg.key].copy()
             if fold > 0:
@@ -1505,7 +1766,7 @@ def build_clip(sk: Skeleton, src: Source, keys: dict[str, Pose], name: str) -> d
                 weight = min(weight, (t - seg.t0) / SECONDARY_RAMP_S)
             # and before the clip's end, which loops back onto the key pose
             weight = min(weight, (seg.t1 - t) / (SECONDARY_RAMP_S if seg.t1 < end - 1e-6 else SECONDARY_END_S))
-            secondary(sk, src, name, k_src, k_ref, float(np.clip(weight, 0.0, 1.0)), pose, seg.mirror,
+            secondary(sk, src, source, k_src, k_ref, float(np.clip(weight, 0.0, 1.0)), pose, seg.mirror,
                       HOLD_SECONDARY.get(name, SECONDARY))
             if fold > 0 or seg.key in LYING:
                 # (one floor rule through a lying hold and the folding
@@ -1524,9 +1785,13 @@ def build_clip(sk: Skeleton, src: Source, keys: dict[str, Pose], name: str) -> d
             if seg.key not in PINNED and fold == 0:
                 lift_legs(sk, pose)
         elif isinstance(seg, Change):
-            u = src.progress(name, seg.t0, seg.t1)[k]
+            if seg.timed:
+                u = float(smooth(np.array((t - seg.t0) / (seg.t1 - seg.t0))))
+            else:
+                u = src.progress(source, seg.t0, seg.t1)[k]
             pose = blend(sk, keys[seg.a], keys[seg.b], float(u))
-            ground(sk, pose)
+            # (from one way of lying to another, on the floor as a lying hold)
+            ground(sk, pose, roll_support if lying else None)
             lift_legs(sk, pose)
         else:
             # the shiba's roll, its ROLL_SRC_S stretched over the segment
@@ -1554,7 +1819,7 @@ def build_clip(sk: Skeleton, src: Source, keys: dict[str, Pose], name: str) -> d
             ground(sk, pose, sk.torso)
             lift_head(sk, pose, limit=ROLL_HEAD_LIFT_DEG)
         lift_head(sk, pose)
-        if isinstance(seg, Roll) or fold > 0 or seg.key in LYING:
+        if isinstance(seg, Roll) or fold > 0 or lying:
             # the head is lifted by turning the neck at its base, and the
             # throat under the turn went into the floor (8 cm rolling over):
             # lying, the body rests on the neck and head too
@@ -1606,10 +1871,11 @@ def lying_wag(sk: Skeleton, spec: dict, times: np.ndarray, rolls: list, rotation
 
 
 def finish(sk: Skeleton, rotations: dict, smooth_tail: bool = True, neck_frames: int = NECK_SMOOTH_FRAMES,
-           leg_frames: int = 0) -> None:
+           leg_frames: int = 0, loop: bool = True) -> None:
     """Quaternions on one hemisphere frame to frame, and the tail smoothed
     over time: laid along the floor frame by frame, and left alone
-    mid-roll, it jumped 40-90 deg where one met the other."""
+    mid-roll, it jumped 40-90 deg where one met the other. (`loop`: the
+    clip's ends smoothed into each other; else each into itself.)"""
     for qs in rotations.values():
         for k in range(1, len(qs)):
             if np.dot(qs[k], qs[k - 1]) < 0:
@@ -1623,7 +1889,8 @@ def finish(sk: Skeleton, rotations: dict, smooth_tail: bool = True, neck_frames:
     for joint, width in smoothed_joints:
         qs = np.asarray(rotations[joint])
         kernel = np.exp(-0.5 * (np.arange(-width, width + 1) / (width / 2)) ** 2)
-        padded = np.concatenate([qs[-width:], qs, qs[:width]])    # the clip loops
+        padded = (np.concatenate([qs[-width:], qs, qs[:width]]) if loop          # the clip loops
+                  else np.concatenate([np.repeat(qs[:1], width, 0), qs, np.repeat(qs[-1:], width, 0)]))
         smoothed = np.stack([np.convolve(padded[:, c], kernel / kernel.sum(), mode="valid") for c in range(4)], 1)
         rotations[joint] = list(smoothed / np.linalg.norm(smoothed, axis=1, keepdims=True))
 
@@ -1947,6 +2214,64 @@ def settle_paws(sk: Skeleton, pose: Pose, legs, shares: np.ndarray) -> None:
             pose.r[i] = slerp_m(pose.r.get(i, sk.rest_r[i]), down.r.get(i, sk.rest_r[i]), share)
 
 
+def cleaned(mask: np.ndarray, gap: int = CONTACT_GAP_FRAMES, least: int = CONTACT_MIN_FRAMES) -> np.ndarray:
+    """A looping (F, paws) mask with each paw's gaps of up to `gap` frames
+    filled and its runs shorter than `least` frames dropped."""
+    F = len(mask)
+    out = np.zeros_like(mask)
+    for n in range(mask.shape[1]):
+        m = np.tile(mask[:, n], 3)
+        for a, b in runs(~m):
+            if 0 < a and b < len(m) and b - a <= gap:
+                m[a:b] = True
+        for a, b in runs(m):
+            if b - a < least:
+                m[a:b] = False
+        out[:, n] = m[F:2 * F]
+    return out
+
+
+def within_reach(sk: Skeleton, w: dict, leg: str, toe: np.ndarray) -> np.ndarray:
+    """`toe` (on the floor) moved along the floor toward the hip / shoulder
+    until the leg reaches it (REACH_SHARE of its two upper bones from the
+    hip / shoulder to the hock / wrist), the bones below as they are."""
+    a, b, c, _, e = sk.leg(leg)
+    lower = w[e][:3, 3] - w[c][:3, 3]
+    root = w[a][:3, 3]
+    reach = REACH_SHARE * (sk.length(a, b) + sk.length(b, c))
+    d = toe - lower - root
+    if np.linalg.norm(d) <= reach:
+        return toe
+    level = d - UP * (d @ UP)
+    across = float(np.sqrt(max(reach * reach - (d @ UP) ** 2, 0.0)))
+    return root + UP * (d @ UP) + level / max(np.linalg.norm(level), 1e-9) * across + lower
+
+
+def body_roll(sk: Skeleton, w: dict) -> float:
+    """How far the body lies over onto its side (degrees, + onto its right)."""
+    across = body_frame(sk, w, sk.cog) @ LEFT
+    return float(np.degrees(np.arcsin(np.clip(across[1], -1.0, 1.0))))
+
+
+def own_side(sk: Skeleton, w: dict, leg: str, toe: np.ndarray, keep: float = STANCE_KEEP,
+             share: tuple = STANCE_SHARE) -> np.ndarray:
+    """`toe` moved across the body (along the floor) toward the rest stance's
+    half width from the line of the body - `keep` of the way it is off that
+    kept - and on its own side, `share` of that half width (the captured dog
+    stood with both forepaws to its left, one at 1.8 times the stance and the
+    other at 0.6)."""
+    hips = np.mean([w[sk.j[n]][:3, 3] for n in ("L_hip_jnt", "R_hip_jnt")], axis=0)
+    chest = w[sk.j["chest_jnt"]][:3, 3]
+    ahead = chest - hips
+    ahead = ahead - UP * (ahead @ UP)
+    across = np.cross(UP, ahead / max(np.linalg.norm(ahead), 1e-9))       # toward the dog's left
+    side = 1.0 if leg.startswith("L") else -1.0
+    half = abs(sk.rest[sk.leg(leg)[-1]][0, 3])
+    off = side * float((toe - 0.5 * (hips + chest)) @ across)
+    want = float(np.clip(half + keep * (off - half), share[0] * half, share[1] * half))
+    return toe + side * (want - off) * across
+
+
 def build_captured(sk: Skeleton, poses: dict, captured_clips: dict, name: str) -> dict:
     """A real dog's motion (dog_mocap) on the template, frame by frame:
     each mapped joint turned as the dog's turned from its standing pose,
@@ -1963,13 +2288,15 @@ def build_captured(sk: Skeleton, poses: dict, captured_clips: dict, name: str) -
     hips, planted = clip["hips"], clip["planted"]
     upright = hips[:, 1] > PLANT_UPRIGHT_SHARE * captured_clips["stand_hips_height"]
     legs = ("LF", "RF", "LB", "RB")                      # dog_mocap.FEET's order
-    # how firmly each paw is held, eased in and out over HOLD_EASE_FRAMES:
-    # switched on and off at once, a paw that had drifted from where the
-    # template's own leg would put it swung the leg 50-80 deg in a frame
-    hold = (planted & upright[:, None]).astype(float)
-    box = np.ones(HOLD_EASE_FRAMES) / HOLD_EASE_FRAMES
-    hold = np.stack([np.convolve(np.r_[hold[-HOLD_EASE_FRAMES:, n], hold[:, n], hold[:HOLD_EASE_FRAMES, n]], box,
-                                 mode="same")[HOLD_EASE_FRAMES:-HOLD_EASE_FRAMES] for n in range(len(legs))], 1)
+    # a paw held while the captured dog has it on the floor, still or sliding
+    # (held only while still, the hold let go as the captured paw slid along
+    # the floor getting up, and the template's longer leg rose 5 cm off it -
+    # user, 11-06: "왼발이 내려가다가 튀는느낌"); and how firmly, eased in and
+    # out over twice HOLD_EASE_FRAMES: switched on and off at once, a paw that
+    # had drifted from where the template's own leg would put it swung the
+    # leg 50-80 deg in a frame
+    contact = cleaned(clip["feet"][:, :, 1] < CONTACT_M)
+    hold = (contact & upright[:, None]).astype(float)
     toe_rest_y = {leg: sk.rest[sk.leg(leg)[-1]][1, 3] for leg in legs}
     held: dict[str, np.ndarray] = {}
     floor = support(sk)
@@ -1981,8 +2308,11 @@ def build_captured(sk: Skeleton, poses: dict, captured_clips: dict, name: str) -
     heads = sk.mask(sk.subtree(sk.j["neck_base_jnt"]))
     tails = sk.mask([sk.j[n] for n in TAIL if n in sk.j])
     legs_mask = sk.mask([j for leg in LEGS for j in sk.subtree(sk.leg(leg)[0])])
-    bones: dict[str, list] = {}
-    for k in range(len(hips)):
+    chest, chest_rest_y = sk.j["chest_jnt"], sk.rest[sk.j["chest_jnt"]][1, 3]
+    hindmost = sk.torso | sk.mask([j for leg in ("LB", "RB") for j in sk.subtree(sk.leg(leg)[1])])
+
+    def base(k: int, bones: dict) -> Pose:
+        """The captured dog's pose at frame k on the template, on the floor."""
         pose = sk.rest_pose.copy()
         for i in order:
             set_world(sk, pose, sk.fk(pose), i, turns_by_frame[names[i]][k] @ rot_of(sk.rest[i]))
@@ -1992,33 +2322,225 @@ def build_captured(sk: Skeleton, poses: dict, captured_clips: dict, name: str) -
         even_back(sk, pose)
         for leg in LEGS:
             bones[leg] = align_leg(sk, pose, leg, bones.get(leg))
+            # (and the hock / wrist and paw bending as hinges: lying on its
+            # left side, the left hind heel stuck out sideways and the foot
+            # turned in under the belly - hinge_leg)
+            hinge_leg(sk, pose, leg)
             limit_hinges(sk, pose, leg)
         even_neck(sk, pose)
         w = sk.fk(pose)
         at = w[sk.cog][:3, 3]
         shift(sk, pose, np.array([hips[k, 0] * scale - at[0], 0.0, hips[k, 2] * scale - at[2]]))
         ground(sk, pose, floor)
+        return pose
+
+    def on_floor_tipped(pose: Pose, deg: float) -> None:
+        """Rest the body on the floor - tipped forward `deg`, by all but the
+        forelegs, which the hold puts on it, more so the further it tips
+        (CAPTURED_LEAN_GROUND_DEG): by the forelegs as the capture swings
+        them, the tipped body was lifted back up and the forepaws were no
+        nearer the floor; switched from one to the other at once, the body
+        dropped 4-5 cm in a frame."""
+        w = sk.fk(pose)
+        share = float(np.clip(deg / CAPTURED_LEAN_GROUND_DEG, 0.0, 1.0))
+        y = (1.0 - share) * sk.low(w, floor)[0] + share * sk.low(w, hindmost)[0]
+        shift(sk, pose, np.array([0.0, -y, 0.0]))
+
+    def levelled(pose: Pose, deg: float) -> Pose:
+        """`pose` turned `deg` about the body's length, back on the floor."""
+        if abs(deg) > 1e-6:
+            ahead = body_frame(sk, sk.fk(pose), sk.cog) @ FWD
+            turn(sk, pose, sk.cog, ahead - UP * (ahead @ UP), deg)
+            ground(sk, pose, floor)
+        return pose
+
+    # the body level side to side until it lies on its side (CAPTURED_LEVEL_DEG),
+    # and while its chest is up, tipped forward (CAPTURED_LEAN_MAX_DEG at most:
+    # more and the sit became a crouch) until the forepaws the captured dog
+    # has down reach the floor - the captured dog stood and sat leaning 10-15
+    # deg onto its right side, and sitting down and getting up held its
+    # chest higher than the template's long back lets its forepaws reach the
+    # floor: they hung 8-15 cm up (user, 11-06: "죽은척할때도 다리가 살짝
+    # 부자연스럽게 비틀리는데")
+    level, lean, bones0 = np.zeros(len(hips)), np.zeros(len(hips)), {}
+    # and how firmly each paw is put on its own side of the body: less as the
+    # body goes over onto its side, not at all lying on it; a hind paw also
+    # less as the chest comes down (lying on one hip a dog has both hind legs
+    # out to one side) - eased over time (switched on at once as the dog came
+    # up off its side, a foreleg swung 110-146 deg in a frame)
+    fore, hind, flat = np.zeros(len(hips)), np.zeros(len(hips)), np.zeros(len(hips))
+    under = np.zeros(len(hips))                          # +1: lying on its left side, -1 on its right
+    lo, hi = CAPTURED_LEVEL_DEG
+    for k in range(len(hips)):
+        pose = base(k, bones0)
+        roll = body_roll(sk, sk.fk(pose))
+        level[k] = -roll * float(np.clip((hi - abs(roll)) / (hi - lo), 0.0, 1.0))
+        pose = levelled(pose, level[k])
+        w = sk.fk(pose)
+        roll = body_roll(sk, w)
+        fore[k] = float(np.clip((hi - abs(roll)) / (hi - lo), 0.0, 1.0))
+        flat[k] = float(np.clip((abs(roll) - SIDE_LYING_DEG[0]) / (SIDE_LYING_DEG[1] - SIDE_LYING_DEG[0]), 0.0, 1.0))
+        under[k] = 1.0 if roll < 0 else -1.0
+        hind[k] = fore[k] * float(np.clip((w[chest][1, 3] / chest_rest_y - LYING_CHEST_SHARE) / 0.1, 0.0, 1.0))
+        if abs(body_roll(sk, w)) < CAPTURED_LEVEL_DEG[1] and w[chest][1, 3] > LYING_CHEST_SHARE * chest_rest_y:
+            goals = []
+            for n, leg in enumerate(legs[:2]):
+                if clip["feet"][k, n, 1] < PAW_DOWN_M[0]:
+                    c, e = sk.leg(leg)[2], sk.leg(leg)[-1]
+                    toe = w[e][:3, 3]
+                    goals.append((leg, np.array([toe[0], toe_rest_y[leg], toe[2]]), w[e][:3, 3] - w[c][:3, 3]))
+            need = pitch_to_reach(sk, pose, goals)
+            if goals:
+                # and the shoulders no higher than a straight foreleg stands
+                # them, a little lower while the hips are down
+                # (CAPTURED_SHOULDER_SHARE, from the hips' share of their
+                # standing height CAPTURED_LEAN_HIPS): sitting down and
+                # getting up the template's shoulders rose 4-6 cm over that,
+                # and at that height the forelegs still stood straight, their
+                # paws 2-4 cm up
+                low = float(np.clip((CAPTURED_LEAN_HIPS[1] - hips[k, 1] / captured_clips["stand_hips_height"])
+                                    / (CAPTURED_LEAN_HIPS[1] - CAPTURED_LEAN_HIPS[0]), 0.0, 1.0))
+                share = CAPTURED_SHOULDER_SHARE[1] + low * (CAPTURED_SHOULDER_SHARE[0] - CAPTURED_SHOULDER_SHARE[1])
+                top = share * sk.rest[sk.j["L_shoulder_jnt"]][1, 3]
+                for deg in np.arange(max(need, 0.0), CAPTURED_LEAN_MAX_DEG + 1e-6, 1.0):
+                    tipped = pitched(sk, pose, float(deg))
+                    on_floor_tipped(tipped, float(deg))
+                    wp = sk.fk(tipped)
+                    if max(wp[sk.j[nm]][1, 3] for nm in ("L_shoulder_jnt", "R_shoulder_jnt")) <= top:
+                        need = float(deg)
+                        break
+                else:
+                    need = CAPTURED_LEAN_MAX_DEG
+            lean[k] = min(need, CAPTURED_LEAN_MAX_DEG)
+    from scipy.ndimage import gaussian_filter1d
+    level = gaussian_filter1d(level, CAPTURED_SMOOTH_FRAMES, mode="wrap")
+    lean = gaussian_filter1d(lean, CAPTURED_SMOOTH_FRAMES, mode="wrap")
+    fore = gaussian_filter1d(fore, 2 * CAPTURED_SMOOTH_FRAMES, mode="wrap")
+    hind = gaussian_filter1d(hind, 2 * CAPTURED_SMOOTH_FRAMES, mode="wrap")
+    flat = gaussian_filter1d(flat, 2 * CAPTURED_SMOOTH_FRAMES, mode="wrap")
+    # a paw the dog has down held, too, while it sits down, sits and gets up
+    # - a forepaw unless the dog lies on its side, a hind paw while the chest
+    # is up - not only while it stands: let go, the left hind paw touched
+    # down sitting and rose 4-5 cm off the floor again at once, and the left
+    # forepaw hung 5-6 cm up getting up (user, 11-06: "왼발이 내려가다가
+    # 튀는느낌")
+    # how flat each paw is laid (flat_paw): as near the floor as the captured
+    # paw is (PAW_FLAT_CAPTURE_M), not lying on its side, eased over time
+    # (by the template's own paw height frame by frame, it came and went as
+    # the paw stepped and the leg jerked)
+    near = np.clip((PAW_FLAT_CAPTURE_M[1] - clip["feet"][:, :, 1]) / (PAW_FLAT_CAPTURE_M[1] - PAW_FLAT_CAPTURE_M[0]),
+                   0.0, 1.0) * (1.0 - flat[:, None])
+    flatness = np.clip(gaussian_filter1d(near, 2 * CAPTURED_SMOOTH_FRAMES, axis=0, mode="wrap"), 0.0, 1.0)
+    hold[:, :2] = np.maximum(hold[:, :2], contact[:, :2] & (fore[:, None] > 0.5))
+    hold[:, 2:] = np.maximum(hold[:, 2:], contact[:, 2:] & (hind[:, None] > 0.5))
+    box = np.ones(HOLD_EASE_FRAMES) / HOLD_EASE_FRAMES
+    for _ in range(2):                              # (twice: eased in and out, not at a steady rate)
+        hold = np.stack([np.convolve(np.r_[hold[-HOLD_EASE_FRAMES:, n], hold[:, n], hold[:HOLD_EASE_FRAMES, n]], box,
+                                     mode="same")[HOLD_EASE_FRAMES:-HOLD_EASE_FRAMES] for n in range(len(legs))], 1)
+    bones: dict[str, list] = {}
+    follow = {leg: np.zeros(3) for leg in legs}
+    spots: list[dict] = [{} for _ in range(len(hips))]           # where each held paw is held, frame by frame
+    head = sk.j["head_jnt"]
+    for k in range(len(hips)):
+        pose = levelled(base(k, bones), level[k])
+        looking = rot_of(sk.fk(pose)[head])
+        pose = pitched(sk, pose, lean[k])
+        if lean[k] > 0.5:
+            # (the head carried as the dog carries it, not tipped down with the
+            # body toward the floor)
+            carry_head(sk, pose, looking)
+        on_floor_tipped(pose, float(lean[k]))
+        firmly = {"LF": fore[k], "RF": fore[k], "LB": hind[k], "RB": hind[k]}
         for n, leg in enumerate(legs):
             if hold[k, n] < 1e-3:
                 held.pop(leg, None)
                 continue
             if leg not in held:
-                toe = sk.fk(pose)[sk.leg(leg)[-1]][:3, 3]
+                w = sk.fk(pose)
+                toe = w[sk.leg(leg)[-1]][:3, 3]
                 held[leg] = np.array([toe[0], toe_rest_y[leg], toe[2]])
+                held[leg] = held[leg] + firmly[leg] * (own_side(sk, w, leg, held[leg]) - held[leg])
+            elif not planted[k, n]:
+                # (the captured paw sliding along the floor, or yet to come
+                # down or just up as the hold eases in or out: the spot
+                # moved with it)
+                step = (clip["feet"][k, n] - clip["feet"][k - 1, n]) * scale
+                held[leg] = held[leg] + np.array([step[0], 0.0, step[2]])
+            # the spot not across the line of the body, frame by frame
+            # (standing, the captured dog slid its right hind paw 7 cm over
+            # under it; moved there for good, a paw the capture then slid out
+            # went on out to 18 cm)
+            w = sk.fk(pose)
+            inside = own_side(sk, w, leg, held[leg], keep=1.0, share=(STANCE_SHARE[0], np.inf))
+            spot = held[leg] + firmly[leg] * (inside - held[leg])
+            # (a spot out of the leg's reach - the template's long back holds
+            # its shoulders higher than the captured dog's sitting down and
+            # getting up - drawn in along the floor until the leg reaches it:
+            # held out there, the leg reached for it straight and lifted the
+            # paw 2-3 cm, and let go it dropped back - user, 11-06: "왼발이
+            # 내려가다가 튀는느낌")
+            spot = within_reach(sk, w, leg, spot)
             firm = pose.copy()
-            hold_paw(sk, firm, leg, held[leg])
+            hold_paw(sk, firm, leg, spot)
             for i in sk.leg(leg)[:4]:
                 pose.r[i] = slerp_m(pose.r.get(i, sk.rest_r[i]), firm.r.get(i, sk.rest_r[i]), float(hold[k, n]))
+            spots[k][leg] = spot
         lift_head_level(sk, pose)
-        # (the head lifted by the neck's base pushed the throat and the
-        # breast 3-4 cm into the floor while the dog lay on its side)
-        rest_on(sk, pose, floor, necks)
-        settle_paws(sk, pose, legs, down[k])
+        if max(fore[k], hind[k]) > 0.5:
+            # not lying on its side: a free leg the tipped body put into the
+            # floor lifted out of it at its hip / shoulder, and the body only
+            # raised, by its torso and neck (rested on all its lower legs,
+            # the body rose 3-6 cm over a foreleg stepping under it as it got
+            # up, and the held forepaw with it - user, 11-06: "왼발이
+            # 내려가다가 튀는느낌")
+            for n, leg in enumerate(legs):
+                if hold[k, n] < 0.5:
+                    lift(sk, pose, sk.leg(leg)[0], lower_leg(sk, leg), slack=LEG_SLACK_M)
+            w = sk.fk(pose)
+            y = min(sk.low(w, sk.torso)[0], sk.low(w, necks)[0] + NECK_SLACK_M)
+            if y < 0:
+                shift(sk, pose, np.array([0.0, -y, 0.0]))
+        else:
+            # (the head lifted by the neck's base pushed the throat and the
+            # breast 3-4 cm into the floor while the dog lay on its side)
+            rest_on(sk, pose, floor, necks)
+        if flat[k] > 1e-3:
+            laid = pose.copy()
+            for leg in ("LF", "RF"):
+                role = "lower" if (leg == "LF") == (under[k] > 0) else "upper"
+                shape_leg(sk, laid, leg, SIDE_FORELEGS[role], chest)
+                untwist_leg(sk, laid, leg)
+                lift(sk, laid, sk.leg(leg)[0], lower_leg(sk, leg), slack=LEG_SLACK_M)
+                for i in sk.leg(leg):
+                    pose.r[i] = slerp_m(pose.r.get(i, sk.rest_r[i]), laid.r.get(i, sk.rest_r[i]), float(flat[k]))
+        # (the foreleg on top less as it lies on its side - it rests on the
+        # one underneath; that one fully: let down only as the laid forelegs
+        # gave way, it rose 6 cm off the floor rolling up off its side)
+        below = "LF" if under[k] > 0 else "RF"
+        fore_share = [1.0 if leg == below else 1.0 - flat[k] for leg in ("LF", "RF")]
+        settle_paws(sk, pose, legs, down[k] * np.array(fore_share + [1.0, 1.0]))
         # (the paws held and let down by turns that keep no axis; and held
         # by the knee, a hind paw stood on a hock bent the wrong way again)
         for leg in LEGS:
             bones[leg] = align_leg(sk, pose, leg, bones[leg])
+            # (a paw on the floor flat, pads down, unless the dog lies on its
+            # side - there its paws lie on their sides: see flat_paw)
+            flat_paw(sk, pose, leg, flatness[k, LEGS_ORDER[leg]])
+            hinge_leg(sk, pose, leg)
             limit_hinges(sk, pose, leg)
+        # a paw off the floor kept on its own side too (stepping as it got
+        # up, the captured dog crossed its forepaws and a hind paw under it),
+        # the move followed a share SIDE_FOLLOW of the way each frame (set
+        # anew each frame, it came and went from one frame to the next and
+        # the legs twitched - user, 11-06: "중간에 경련와서 부자연스러움")
+        w = sk.fk(pose)
+        for n, leg in enumerate(legs):
+            toe = w[sk.leg(leg)[-1]][:3, 3]
+            want = (own_side(sk, w, leg, toe) - toe) * firmly[leg] * (1.0 - hold[k, n])
+            follow[leg] = follow[leg] + SIDE_FOLLOW * (want - follow[leg])
+            if np.linalg.norm(follow[leg]) > 1e-4:
+                hold_paw(sk, pose, leg, toe + follow[leg])
+                w = sk.fk(pose)
         drape_tail(sk, pose)
         w = sk.fk(pose)
         report["torso"].append(sk.low(w, sk.torso)[0])
@@ -2044,13 +2566,544 @@ def build_captured(sk: Skeleton, poses: dict, captured_clips: dict, name: str) -
         u = float(smooth(np.array((n + 1) / m)))
         translations[k] = translations[k] + (translations[0] - translations[k]) * u
     finish(sk, rotations)
-    # the body's height smoothed a little: its lowest point moves between
-    # parts of the body from frame to frame
+    # the legs smoothed over time (CAPTURED_LEG_SMOOTH_FRAMES) and the held
+    # paws put back on their spots after: turned frame by frame by IK, the
+    # holds, the side corrections and the hinge limits jittered and the legs
+    # twitched (user, 11-06: "중간에 경련와서 부자연스러움")
+    from scipy.ndimage import gaussian_filter1d
+    for leg in LEGS:
+        for i in sk.leg(leg)[:4]:
+            qs = gaussian_filter1d(np.asarray(rotations[i]), CAPTURED_LEG_SMOOTH_FRAMES, axis=0, mode="wrap")
+            rotations[i] = list(qs / np.linalg.norm(qs, axis=1, keepdims=True))
+    # (the body's height smoothed a little first: its lowest point moves
+    # between parts of the body from frame to frame)
     t = np.asarray(translations)
     kernel = np.exp(-0.5 * (np.arange(-2, 3) / 1.0) ** 2)
     padded = np.concatenate([t[-2:, 1], t[:, 1], t[:2, 1]])
     t[:, 1] = np.convolve(padded, kernel / kernel.sum(), mode="valid")
-    return {"times": np.arange(len(hips)) / FPS, "rotations": rotations, "translations": list(t), "report": report}
+    F = len(hips)
+    for k in range(F):
+        # (over the blend back onto the start, the spots and the holds
+        # blended as the frames are: re-held up to it and not over it, the
+        # paws jumped 1-2 cm where it began)
+        u = float(smooth(np.array((k - (F - m) + 1) / m))) if k >= F - m else 0.0
+        targets = {}
+        for n, leg in enumerate(legs):
+            a, b = spots[k].get(leg), spots[0].get(leg)
+            weight = (1.0 - u) * (hold[k, n] if a is not None else 0.0) + u * (hold[0, n] if b is not None else 0.0)
+            if weight > 1e-3:
+                targets[n] = (b if a is None else a if b is None else (1.0 - u) * a + u * b, weight)
+        if not targets:
+            continue
+        pose = Pose({i: Rotation.from_quat(rotations[i][k]).as_matrix() for i in sk.joints}, t[k])
+        for n, (spot, weight) in targets.items():
+            leg = legs[n]
+            firm = pose.copy()
+            hold_paw(sk, firm, leg, spot)
+            for i in sk.leg(leg)[:4]:
+                r = slerp_m(pose.r[i], firm.r[i], float(weight))
+                q = Rotation.from_matrix(r).as_quat()
+                rotations[i][k] = q if np.dot(q, rotations[i][k]) >= 0 else -q
+    return {"times": np.arange(len(hips)) / FPS, "rotations": rotations, "translations": list(t), "report": report,
+            "corrections": {"hold": hold, "lean": lean, "level": level, "fore": fore, "hind": hind, "flat": flat}}
+
+
+# --- transitions --------------------------------------------------------------------------
+
+def first_frame(sk: Skeleton, built: dict, name: str) -> Pose:
+    """Clip `name`'s first frame as a pose: this run's, if it built the clip,
+    else the GLB's."""
+    if name in built:
+        result = built[name]
+        r = {i: Rotation.from_quat(result["rotations"][i][0]).as_matrix() for i in sk.joints}
+        return Pose(r, np.asarray(result["translations"][0], dtype=np.float64).copy())
+    _, frames = sample_clip(sk.rig, name, FPS)
+    rest = sk.rig.rest_trs
+    r = {i: Rotation.from_quat(frames[0].get(i, rest[i])[1]).as_matrix() for i in sk.joints}
+    return Pose(r, np.asarray(frames[0].get(sk.cog, rest[sk.cog])[0], dtype=np.float64).copy())
+
+
+def runs(mask: np.ndarray) -> list[tuple[int, int]]:
+    """[start, end) of each run of True in `mask`."""
+    edges = np.flatnonzero(np.diff(np.r_[0, mask.astype(int), 0]))
+    return list(zip(edges[::2], edges[1::2]))
+
+
+def reach_short(sk: Skeleton, pose: Pose, goals: list) -> float:
+    """How far (m) the farthest of `goals` [(leg, toe point, the vector of
+    the bones below the hock / wrist)] lies beyond its leg's reach - the hip /
+    shoulder to the hock / wrist, REACH_SHARE of the two bones' length."""
+    w = sk.fk(pose)
+    out = -np.inf
+    for leg, toe, lower in goals:
+        a, b, c, _, _ = sk.leg(leg)
+        out = max(out, float(np.linalg.norm(toe - lower - w[a][:3, 3]))
+                  - REACH_SHARE * (sk.length(a, b) + sk.length(b, c)))
+    return out
+
+
+def pitch_to_reach(sk: Skeleton, pose: Pose, goals: list) -> float:
+    """The least turn of the body nose-up or nose-down about its hips
+    (degrees, + nose-down) that brings every paw of `goals` within reach;
+    or, if none does, the nearest."""
+    if not goals or reach_short(sk, pose, goals) <= 0:
+        return 0.0
+    best, best_short = 0.0, reach_short(sk, pose, goals)
+    for deg in sorted(np.arange(-REACH_PITCH_DEG, REACH_PITCH_DEG + 1e-6, 1.0), key=abs):
+        short = reach_short(sk, pitched(sk, pose, deg), goals)
+        if short <= 0:
+            return float(deg)
+        if short < best_short:
+            best, best_short = float(deg), short
+    return best
+
+
+def hips_line(sk: Skeleton, w: dict) -> tuple[np.ndarray, np.ndarray]:
+    """(the point between the hips, the point between the shoulders)."""
+    hips = np.mean([w[sk.j[n]][:3, 3] for n in ("L_hip_jnt", "R_hip_jnt")], axis=0)
+    shoulders = np.mean([w[sk.j[n]][:3, 3] for n in ("L_shoulder_jnt", "R_shoulder_jnt")], axis=0)
+    return hips, shoulders
+
+
+def pitched(sk: Skeleton, pose: Pose, deg: float) -> Pose:
+    """`pose` turned `deg` nose-down about the line through its hips."""
+    out = pose.copy()
+    if abs(deg) < 1e-9:
+        return out
+    w = sk.fk(out)
+    hips = [sk.j[n] for n in ("L_hip_jnt", "R_hip_jnt")]
+    pivot = np.mean([w[h][:3, 3] for h in hips], axis=0)
+    across = w[hips[0]][:3, 3] - w[hips[1]][:3, 3]               # toward the dog's left
+    across = across - UP * (across @ UP)
+    turn(sk, out, sk.cog, across / max(np.linalg.norm(across), 1e-9), deg)
+    shift(sk, out, pivot - np.mean([sk.fk(out)[h][:3, 3] for h in hips], axis=0))
+    return out
+
+
+def bend_of(sk: Skeleton, w: dict, leg: str) -> np.ndarray:
+    """Which way the leg's knee / elbow stands off the line from the hip /
+    shoulder to the hock / wrist (unit; pin's pole)."""
+    a, b, c, _, _ = sk.leg(leg)
+    line = w[c][:3, 3] - w[a][:3, 3]
+    bend = w[b][:3, 3] - w[a][:3, 3]
+    pole = bend - line * (bend @ line) / max(line @ line, 1e-12)
+    if np.linalg.norm(pole) < 1e-3 * np.linalg.norm(line):
+        pole = FWD if leg.endswith("B") else -FWD
+    return pole / np.linalg.norm(pole)
+
+
+def unit(v: np.ndarray) -> np.ndarray:
+    return v / max(np.linalg.norm(v), 1e-12)
+
+
+def toward(a: np.ndarray, b: np.ndarray, u: float) -> np.ndarray:
+    """The direction `u` of the way from direction `a` to direction `b`."""
+    a = a / np.linalg.norm(a)
+    return slerp_m(np.eye(3), swing(a, b), float(np.clip(u, 0.0, 1.0))) @ a
+
+
+def lies(sk: Skeleton, pose: Pose) -> bool:
+    """Lying: the chest below LYING_CHEST_SHARE of its standing height."""
+    chest = sk.j["chest_jnt"]
+    return bool(sk.fk(pose)[chest][1, 3] < LYING_CHEST_SHARE * sk.rest[chest][1, 3])
+
+
+def other_side(sk: Skeleton, i: int) -> int:
+    """The joint on the other side of the body (the joint itself on the midline)."""
+    name = (sk.rig.gltf.nodes[i].name or "").split(".")[0]
+    for a, b in (("LB_", "RB_"), ("RB_", "LB_"), ("LF_", "RF_"), ("RF_", "LF_"), ("L_", "R_"), ("R_", "L_")):
+        if name.startswith(a):
+            return sk.j.get(b + name[len(a):], i)
+    return i
+
+
+def square(sk: Skeleton, pose: Pose, joints) -> Pose:
+    """`pose` the same on both sides for `joints`: each turned (in the world,
+    from rest) half way between its own turn and its partner's reflected
+    left for right - the body's lean and its turn about the vertical gone -
+    and the body moved onto the midline."""
+    w = sk.fk(pose)
+    turns = {i: rot_of(w[i]) @ rot_of(sk.rest[i]).T for i in sk.joints}
+    out = pose.copy()
+    for i in sk.order:
+        if i in joints:
+            even = slerp_m(turns[i], MIRROR @ turns[other_side(sk, i)] @ MIRROR, 0.5)
+            set_world(sk, out, sk.fk(out), i, even @ rot_of(sk.rest[i]))
+    shift(sk, out, np.array([-sk.fk(out)[sk.cog][0, 3], 0.0, 0.0]))
+    return out
+
+
+def crouch(sk: Skeleton, down: Pose) -> Pose:
+    """The roll's down squared up into a sphinx: the hips level with the
+    chest instead of rolled onto their side, the back straight, the hind legs
+    folded under it alike - as a sit folds them, the femur CROUCH_KNEE_UP_DEG
+    from forward (the knee by the belly, the hock on the floor beside the
+    hip, the paw forward)."""
+    hind = {j for leg in ("LB", "RB") for j in sk.leg(leg)}
+    tail = {sk.j[n] for n in TAIL if n in sk.j}
+    pose = square(sk, down, [i for i in sk.joints if i not in hind and i not in tail])
+    ground(sk, pose)
+    for leg in ("LB", "RB"):
+        on_floor(sk, pose, leg, lambda p, dy, leg=leg: fold_hind(sk, p, leg, 0.0, dy=dy,
+                                                                 knee_up_deg=CROUCH_KNEE_UP_DEG))
+    # (the paws flat, pads down: see flat_paw)
+    flat_paws(sk, pose)
+    ground(sk, pose, support(sk))
+    drape_tail(sk, pose)
+    return pose
+
+
+def progress(y: np.ndarray) -> np.ndarray:
+    """How far `y` has gone from its first value to its last (0..1, never back)."""
+    if abs(y[-1] - y[0]) < 1e-6:
+        return np.zeros(len(y))
+    return np.maximum.accumulate(np.clip((y - y[0]) / (y[-1] - y[0]), 0.0, 1.0))
+
+
+def paw_moves(feet: np.ndarray) -> list[list[tuple[int, int]]]:
+    """Per paw, the [start, end) frames over which the captured dog moves it
+    along the floor faster than STEP_SPEED_MS (pauses of two frames bridged),
+    a frame either side."""
+    from scipy.ndimage import uniform_filter1d
+    speed = uniform_filter1d(np.linalg.norm(np.gradient(feet[..., [0, 2]], axis=0), axis=-1) * FPS, 3,
+                             axis=0, mode="nearest")
+    out = []
+    for n in range(feet.shape[1]):
+        merged: list[tuple[int, int]] = []
+        for s, e in runs(speed[:, n] > STEP_SPEED_MS):
+            if merged and s - merged[-1][1] <= 2:
+                merged[-1] = (merged[-1][0], e)
+            else:
+                merged.append((s, e))
+        out.append([(max(s - 1, 0), min(e + 1, len(speed))) for s, e in merged if e - s >= 2])
+    return out
+
+
+def slow(steps: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Steps [start, end) lengthened to STEP_MIN_S, half each way, as far as
+    the steps before and after leave room (a paw the capture whisked along
+    the floor in 0.1-0.15 s stepped too fast to read)."""
+    need = int(round(STEP_MIN_S * FPS))
+    out = []
+    for k, (s, e) in enumerate(steps):
+        grow = need - (e - s)
+        if grow > 0:
+            before = out[-1][1] if out else -10 ** 6
+            after = steps[k + 1][0] if k + 1 < len(steps) else 10 ** 6
+            s = max(s - grow // 2, before, 0)
+            e = min(s + need, after)
+        out.append((s, e))
+    return out
+
+
+def unit_lower(sk: Skeleton, w: dict, leg: str) -> tuple[np.ndarray, np.ndarray]:
+    """The directions of the two bones below the hock / wrist."""
+    d1, d2 = lower_dirs(sk, w, leg)
+    return d1 / np.linalg.norm(d1), d2 / np.linalg.norm(d2)
+
+
+def carry_head(sk: Skeleton, pose: Pose, head_world: np.ndarray) -> None:
+    """The head turned to `head_world` (its rotation in the world), the
+    neck taking NECK_CARRY of the turn joint by joint and the head the rest."""
+    head = sk.j["head_jnt"]
+    fix = Rotation.from_matrix(head_world @ rot_of(sk.fk(pose)[head]).T).as_rotvec()
+    angle = float(np.linalg.norm(fix))
+    if angle > 1e-9:
+        for joint, share in NECK_CARRY.items():
+            turn(sk, pose, sk.j[joint], fix, np.degrees(angle) * share)
+    set_world(sk, pose, sk.fk(pose), head, head_world)
+
+
+def orthonormal(m: np.ndarray) -> np.ndarray:
+    """The rotation nearest `m`."""
+    u, _, vt = np.linalg.svd(m)
+    r = u @ vt
+    if np.linalg.det(r) < 0:
+        u[:, -1] *= -1
+        r = u @ vt
+    return r
+
+
+def local_of(sk: Skeleton, w: dict, i: int) -> np.ndarray:
+    """Joint i's rotation from its parent in the pose whose fk is `w`."""
+    return rot_of(w[sk.parent[i]]).T @ rot_of(w[i])
+
+
+def aim_tail(sk: Skeleton, pose: Pose, tail: list, wa: dict, wb: dict, u: float) -> None:
+    """Each tail bone turned toward its direction `u` of the way from wa's to
+    wb's (each in the pelvis's frame, so that it goes with the body) by way
+    of laid straight back (sitting, swept round the haunch straight from the
+    stand's carriage, it went through the thigh): from where it is, the
+    least turn, so that it does not twist about its length; the last joint
+    (no bone below it) turned from wa's to wb's."""
+    pelvis = sk.j["pelvis_jnt"]
+    w = sk.fk(pose)
+    frame = rot_of(w[pelvis])
+    ahead = body_frame(sk, w, sk.cog) @ FWD
+    level = ahead - UP * (ahead @ UP)
+    back = frame.T @ -(level / max(np.linalg.norm(level), 1e-9))
+    for i, j in zip(tail, tail[1:]):
+        da = rot_of(wa[pelvis]).T @ (wa[j][:3, 3] - wa[i][:3, 3])
+        db = rot_of(wb[pelvis]).T @ (wb[j][:3, 3] - wb[i][:3, 3])
+        d = toward(da, back, u / 0.5) if u < 0.5 else toward(back, db, (u - 0.5) / 0.5)
+        aim(sk, pose, i, j, frame @ d)
+    pose.r[tail[-1]] = slerp_m(local_of(sk, wa, tail[-1]), local_of(sk, wb, tail[-1]), u)
+
+
+def turned_from(sk: Skeleton, a: Pose, b: Pose) -> float:
+    """The most any joint is turned from pose a to pose b (degrees)."""
+    return max(np.degrees(Rotation.from_matrix(a.r.get(i, sk.rest_r[i]) @ b.r.get(i, sk.rest_r[i]).T).magnitude())
+               for i in sk.joints)
+
+
+def exact_ends(sk: Skeleton, rotations: dict, start: Pose, end: Pose) -> None:
+    """The first and last frames exactly `start` and `end` (smoothing moved them)."""
+    for k, pose in ((0, start), (len(rotations[sk.joints[0]]) - 1, end)):
+        for i in sk.joints:
+            q = Rotation.from_matrix(pose.r.get(i, sk.rest_r[i])).as_quat()
+            rotations[i][k] = q if np.dot(q, rotations[i][k]) >= 0 else -q
+
+
+def build_transition(sk: Skeleton, captured_clips: dict, name: str, start: Pose, end: Pose) -> dict:
+    """A change of pose from `start` (a held clip's first frame) to `end`
+    (another's), on the template's own poses, timed by the captured dog's
+    (dog_mocap.TRANSITIONS) - see TRANSITIONS."""
+    clip = captured_clips[name]
+    legs = ("LF", "RF", "LB", "RB")                      # dog_mocap.FEET's order
+    a = crouch(sk, start) if lies(sk, start) else start  # the poses the body goes between
+    b = crouch(sk, end) if lies(sk, end) else end
+    # a lying end not square already (the roll's down) gathered from / settled
+    # onto over LIE_SETTLE_S
+    lie_a, lie_b = turned_from(sk, a, start) > 3.0, turned_from(sk, b, end) > 3.0
+    wa, wb = sk.fk(a), sk.fk(b)
+    toes = {leg: sk.leg(leg)[-1] for leg in legs}
+    tail = [sk.j[n] for n in TAIL if n in sk.j]
+    leg_joints = {j for leg in LEGS for j in sk.leg(leg)}
+    body = [i for i in sk.joints if i not in leg_joints and i not in tail]
+    # -- the capture's timing, over the stretch from just before anything
+    # moves to just after the last of it
+    uh = progress(clip["hips"][:, 1])
+    shoulders = clip["shoulders"][:, 1]
+    follow = abs(shoulders[-1] - shoulders[0]) > SHOULDER_CHANGE_M
+    us = progress(shoulders) if follow else uh
+    scale = sk.rest[sk.cog][1, 3] / captured_clips["stand_hips_height"]
+    dip = np.zeros(len(uh)) if follow else \
+        (shoulders - (shoulders[0] + (shoulders[-1] - shoulders[0]) * uh)) * scale
+    moves = paw_moves(clip["feet"])
+    busy = (np.gradient(uh) > 1e-3) | (np.gradient(us) > 1e-3)
+    for paw_moved in moves:
+        for s, e in paw_moved:
+            busy[s:e] = True
+    first = max(int(np.argmax(busy)) - 2, 0)
+    last = min(len(busy) - int(np.argmax(busy[::-1])) + 2, len(busy) - 1)
+    span = last - first + 1
+    # -- the paws: each stays on its spot until the captured dog moves that
+    # paw, then steps as far as that move takes it of the way to b's spot
+    spot_a = {leg: wa[toes[leg]][:3, 3].copy() for leg in legs}
+    spot_b = {leg: wb[toes[leg]][:3, 3].copy() for leg in legs}
+    feet = clip["feet"]
+    plans, late = {}, []
+    for n, leg in enumerate(legs):
+        plans[leg] = []
+        if np.linalg.norm(spot_b[leg] - spot_a[leg]) <= STEP_TOLERANCE_M:
+            continue
+        mine = [(max(s, first) - first, min(e, last + 1) - first) for s, e in moves[n] if e > first and s <= last]
+        mine = [(s, e) for s, e in mine if e - s >= 2]
+        gone = [float(feet[first + e - 1, n, 2] - feet[first + s, n, 2]) for s, e in mine]
+        total = sum(gone)
+        if mine and abs(total) > 0.02 and all(g * total >= 0 for g in gone):
+            share = np.cumsum(gone) / total
+            share[-1] = 1.0
+            plans[leg] = [(s, e, float(f)) for (s, e), f in zip(slow(mine), share)]
+        else:
+            late.append(leg)
+    # a paw the capture never moves steps once the body is STEP_AFTER of the
+    # way, one after another, hind paws first, and not while the paw on its
+    # own side is off the floor (the two right paws up at once, the dog
+    # rocked onto its left)
+    went = 0.5 * (uh[first:last + 1] + us[first:last + 1])
+    k0 = int(np.searchsorted(went, STEP_AFTER))
+    for leg in sorted(late, key=lambda x: (x.endswith("F"), x)):
+        mate = {"LF": "LB", "LB": "LF", "RF": "RB", "RB": "RF"}[leg]
+        length = int(round(STEP_S * FPS))
+        for s0, e0, _ in plans[mate]:
+            if s0 < k0 + length and k0 < e0:
+                k0 = e0
+        plans[leg] = [(k0, k0 + length, 1.0)]
+        k0 += length + int(round(STEP_GAP_S * FPS))
+    main_frames = max(span, max((s[1] for p in plans.values() for s in p), default=0) + 2)
+
+    def paw(leg: str, m: int) -> tuple[np.ndarray, float]:
+        """Where the paw is at main frame m, and how far into a step it is
+        (0: standing on its spot)."""
+        here = spot_a[leg]
+        for s, e, f in plans[leg]:
+            there = spot_a[leg] + (spot_b[leg] - spot_a[leg]) * f
+            if m < s:
+                return here, 0.0
+            if m < e:
+                r = (m - s + 1) / (e - s + 1)
+                # (lifted as sin, the paw left the floor at full speed and
+                # the leg jerked as the step began)
+                return here + (there - here) * float(smooth(np.array(r))) + UP * STEP_LIFT_M * np.sin(np.pi * r) ** 2, r
+            here = there
+        return here, 0.0
+
+    # lying down, the forequarters go down as the forepaws walk out (a dog
+    # lowers its chest as it reaches): following the captured dog's
+    # shoulders alone, the jindo stood tall on two straight forelegs reaching
+    # far ahead before it dropped (user, 11-06: "너가 볼때 아쉬운부분
+    # 개선"), so the shoulders go at least BOW_SHARE of the way down that the
+    # forepaws are out
+    us_main = us[first:last + 1].copy()
+    if follow and shoulders[-1] < shoulders[0]:
+        out = np.array([np.mean([np.linalg.norm(paw(leg, m)[0] - spot_a[leg])
+                                 / max(np.linalg.norm(spot_b[leg] - spot_a[leg]), 1e-9) for leg in ("LF", "RF")])
+                        for m in range(span)])
+        us_main = np.maximum(us_main, BOW_SHARE * np.clip(out, 0.0, 1.0))
+
+    # -- the trunk frame by frame: its shape from a's to b's, its hips and
+    # shoulders at the capture's heights brought onto a's and b's, the head
+    # carried from a's carriage to b's
+    hip_a, sh_a = hips_line(sk, wa)
+    hip_b, sh_b = hips_line(sk, wb)
+    head = sk.j["head_jnt"]
+    trunks = []
+    for m in range(span):
+        c = first + m
+        u = float(0.5 * (uh[c] + us_main[m]))
+        pose = blend(sk, a, b, u, nodes=body)
+        pose.t = a.t + (b.t - a.t) * u
+        hip_y = hip_a[1] + (hip_b[1] - hip_a[1]) * uh[c]
+        sh_y = sh_a[1] + (sh_b[1] - sh_a[1]) * us_main[m] + dip[c]
+        hip_at = hip_a + (hip_b - hip_a) * uh[c]
+        hip, sh = hips_line(sk, sk.fk(pose))
+        length = np.linalg.norm(sh - hip)
+        have = np.degrees(np.arcsin(np.clip((sh[1] - hip[1]) / length, -1.0, 1.0)))
+        want = np.degrees(np.arcsin(np.clip((sh_y - hip_y) / length, -1.0, 1.0)))
+        pose = pitched(sk, pose, have - want)
+        hip, _ = hips_line(sk, sk.fk(pose))
+        shift(sk, pose, np.array([hip_at[0] - hip[0], hip_y - hip[1], hip_at[2] - hip[2]]))
+        low = sk.low(sk.fk(pose), sk.torso)[0]
+        if low < 0:
+            shift(sk, pose, UP * -low)
+        carry_head(sk, pose, slerp_m(rot_of(wa[head]), rot_of(wb[head]), u))
+        trunks.append((pose, float(uh[c]), float(us_main[m])))
+    # a knee put as near as it goes to where the femur points, that turned
+    # from a's to b's: the sit's knee stands out by the flank off the line
+    # from the hip to the hock, and that sideways bend turned to from the
+    # stand's forward one splayed the half-sat dog's knees out like a frog's
+    # (user, 11-05: "다리가 ... 부자연스럽게 꺾여서"); nearly straight, the leg
+    # bends the way a knee does (forward). An elbow bends the way the two
+    # clips bend theirs, from the one to the other (put by the upper arm, it
+    # flipped forward 90-110 deg in a frame as the forepaw reached out ahead)
+    upper_a = {leg: unit(wa[sk.leg(leg)[1]][:3, 3] - wa[sk.leg(leg)[0]][:3, 3]) for leg in legs}
+    upper_b = {leg: unit(wb[sk.leg(leg)[1]][:3, 3] - wb[sk.leg(leg)[0]][:3, 3]) for leg in legs}
+    bend_a = {leg: bend_of(sk, wa, leg) for leg in legs}
+    bend_b = {leg: bend_of(sk, wb, leg) for leg in legs}
+    low_a = {leg: unit_lower(sk, wa, leg) for leg in legs}
+    low_b = {leg: unit_lower(sk, wb, leg) for leg in legs}
+    poses, lean = [], []
+    for m in range(main_frames):
+        pose, u_h, u_s = trunks[min(m, span - 1)]
+        pose = pose.copy()
+        across = rot_of(sk.fk(pose)[sk.cog]) @ LEFT
+        wants, goals = {}, []
+        for leg in legs:
+            u = u_h if leg.endswith("B") else u_s
+            toe, r = paw(leg, m)
+            d1, d2 = toward(low_a[leg][0], low_b[leg][0], u), toward(low_a[leg][1], low_b[leg][1], u)
+            if leg.endswith("F") and 0 < r < 1:
+                # the forepaw curls back off the floor as it steps
+                curl = rotm(across, TRANSITION_CURL_DEG * np.sin(np.pi * r) ** 2)
+                d1, d2 = curl @ d1, curl @ d2
+            c, d, e = sk.leg(leg)[2:]
+            lower = d1 * sk.length(c, d) + d2 * sk.length(d, e)
+            pole = (toward(upper_a[leg], upper_b[leg], u) + KNEE_BIAS * FWD if leg.endswith("B")
+                    else toward(bend_a[leg], bend_b[leg], u))
+            wants[leg] = (toe, r, (d1, d2), lower, pole)
+            # (a stepping paw too: left out, the body rose as the paw came
+            # off the floor and the leg reached for its step straight)
+            goals.append((leg, toe, lower))
+        lean.append(pitch_to_reach(sk, pose, goals))
+        poses.append((pose, wants, 0.5 * (u_h + u_s)))
+    from scipy.ndimage import gaussian_filter1d, maximum_filter1d, minimum_filter1d
+    # the lean each frame needs held over the frames about it, then smoothed
+    # (smoothed alone, a frame's need was halved and the leg snapped straight
+    # reaching for its spot, and back - user, 11-06: "중간에 경련와서")
+    lean = np.array(lean)
+    width = 2 * REACH_HOLD_FRAMES + 1
+    lean = (maximum_filter1d(np.maximum(lean, 0.0), width, mode="nearest")
+            + minimum_filter1d(np.minimum(lean, 0.0), width, mode="nearest"))
+    lean = gaussian_filter1d(lean, REACH_SMOOTH_FRAMES, mode="nearest")
+    # -- the timeline: getting up, the gathering first; lying down, the
+    # settling after; else the ends eased onto the clips' frames
+    settle = int(round(LIE_SETTLE_S * FPS))
+    overlap = 3
+    begin = settle - overlap if lie_a else 0             # the main motion's first frame
+    frames = begin + main_frames + (settle - overlap if lie_b else 0)
+    times = np.arange(frames) / FPS
+    rotations = {i: [] for i in sk.joints}
+    translations = []
+    report = {"torso": [], "legs": [], "head": [], "tail": [], "slip": []}
+    heads = sk.mask(sk.subtree(sk.j["neck_base_jnt"]))
+    tails = sk.mask(tail)
+    legs_mask = sk.mask([j for leg in LEGS for j in sk.subtree(sk.leg(leg)[0])])
+    tail_now = {i: a.r.get(i, sk.rest_r[i]).copy() for i in tail}
+    for k in range(frames):
+        m = int(np.clip(k - begin, 0, main_frames - 1))
+        pose, wants, went_m = poses[m]
+        pose = pitched(sk, pose, float(lean[m]))
+        # (tipped onto the floor as it lies down, raised back out of it: the
+        # chest went 3 cm into it)
+        low = sk.low(sk.fk(pose), sk.torso)[0]
+        if low < 0:
+            shift(sk, pose, UP * -low)
+        slip = np.zeros(len(legs))
+        for n, leg in enumerate(legs):
+            toe, r, lower_dirs_, lower, pole = wants[leg]
+            plant(sk, pose, leg, toe - lower, lower_dirs_, pole)
+            if r == 0:
+                slip[n] = float(np.linalg.norm(sk.fk(pose)[toes[leg]][:3, 3] - toe))
+        for i in tail:
+            pose.r[i] = tail_now[i]
+        aim_tail(sk, pose, tail, wa, wb, float(smooth(np.array(went_m))))
+        # (carried from frame to frame, the rotations drifted off true until
+        # one would not read as a rotation)
+        tail_now = {i: Rotation.from_matrix(orthonormal(pose.r[i])).as_matrix() for i in tail}
+        drape_tail(sk, pose)
+        # the ends onto the clips' own frames
+        if lie_a:
+            if k < settle:
+                pose = blend(sk, start, pose, float(smooth(np.array(k / settle))))
+        else:
+            pose = blend(sk, start, pose, float(smooth(np.array(k / (TRANSITION_IN_S * FPS)))))
+        if lie_b:
+            ks = begin + main_frames - overlap
+            if k >= ks:
+                pose = blend(sk, pose, end, float(smooth(np.array((k - ks) / max(frames - 1 - ks, 1)))))
+        else:
+            out = TRANSITION_OUT_S * FPS
+            pose = blend(sk, pose, end, float(smooth(np.array((k - (frames - 1 - out)) / out))))
+        if lie_a or lie_b:
+            lift_legs(sk, pose)
+        if k == 0:
+            pose = start.copy()
+        elif k == frames - 1:
+            pose = end.copy()
+        w = sk.fk(pose)
+        report["torso"].append(sk.low(w, sk.torso)[0])
+        report["legs"].append(sk.low(w, legs_mask)[0])
+        report["head"].append(sk.low(w, heads)[0])
+        report["tail"].append(sk.low(w, tails)[0])
+        report["slip"].append(slip)
+        for i in sk.joints:
+            rotations[i].append(Rotation.from_matrix(pose.r.get(i, sk.rest_r[i])).as_quat())
+        translations.append(pose.t.copy())
+    finish(sk, rotations, loop=False)
+    exact_ends(sk, rotations, start, end)
+    return {"times": times, "rotations": rotations, "translations": translations, "report": report,
+            "lean": lean, "plans": plans}
 
 
 # --- writing ------------------------------------------------------------------------------
@@ -2063,9 +3116,9 @@ def breathing(times: np.ndarray) -> np.ndarray:
     return np.stack([np.ones_like(times), 1.0 + BREATH_SWELL * swell, np.ones_like(times)], axis=1)
 
 
-def write(glb: Path, clips: dict[str, dict], cog: int, out: Path, breathe: int | None = None) -> None:
+def write(glb: Path, clips: dict[str, dict], cog: int, out: Path, breathe: int | None = None, drop=()) -> None:
     gltf = GLTF2().load(str(glb))
-    names = set(clips)
+    names = set(clips) | set(drop)
     gltf.animations = [a for a in gltf.animations or [] if a.name not in names]
     blob = prune(gltf, gltf.binary_blob())
     for name, result in clips.items():
@@ -2098,11 +3151,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--slug", required=True)
     parser.add_argument("--size", default="small")
-    parser.add_argument("--clip", action="append", help="only these clips (default: all five)")
+    parser.add_argument("--clip", action="append", help="only these clips (default: all)")
     parser.add_argument("--glb", default=None, help="pose this GLB (a built dog) instead of the template")
     parser.add_argument("--source", default=str(SOURCE))
     parser.add_argument("--out", default=None)
     parser.add_argument("--install", action="store_true")
+    parser.add_argument("--drop", action="append", default=[], help="clips to take out of the GLB")
     args = parser.parse_args()
     glb = Path(args.glb) if args.glb else ROOT / "output" / f"skeleton_{args.slug}_{args.size}.glb"
     sk = Skeleton(glb)
@@ -2113,8 +3167,15 @@ def main() -> None:
     captured_clips = dog_mocap.load_clips()
     poses = dog_mocap.load()
     video = video_motion.load()
-    for name in args.clip or list(CLIPS) + list(CAPTURED_CLIPS) + list(STAND_WAG) + list(BARK):
-        if name in CAPTURED_CLIPS:
+    # (the transitions last: they start and end on the held clips' first
+    # frames, this run's if it builds them)
+    for name in args.clip or list(CLIPS) + list(CAPTURED_CLIPS) + list(STAND_WAG) + list(BARK) + list(TRANSITIONS):
+        if name in TRANSITIONS:
+            a, b = TRANSITIONS[name]
+            result = build_transition(sk, captured_clips, name, first_frame(sk, clips, a), first_frame(sk, clips, b))
+            print(f"[pose_clips] {name}: {a} -> {b}, a held paw off its spot by at most "
+                  f"{np.max(result['report'].pop('slip')) * 100:.1f} cm")
+        elif name in CAPTURED_CLIPS:
             result = build_captured(sk, poses, captured_clips, name)
         elif name in STAND_WAG:
             result = build_stand_wag(sk, keys, name)
@@ -2140,7 +3201,7 @@ def main() -> None:
         out = glb
     else:
         out = Path(args.out) if args.out else ROOT / "work" / "anim" / f"{args.slug}_clips.glb"
-    write(glb, clips, sk.cog, out, sk.j.get("breathe_jnt"))
+    write(glb, clips, sk.cog, out, sk.j.get("breathe_jnt"), drop=args.drop)
     print(f"[pose_clips] wrote {out} ({out.stat().st_size / 1e6:.1f} MB)")
 
 

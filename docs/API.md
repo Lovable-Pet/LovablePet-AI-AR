@@ -14,7 +14,7 @@ Spring 서버가 보호소 기록과 사진을 보내면, 파이프라인이 그
                      ├──GET /v1/jobs/{id}/files/model.glb──▶ GLB 받아서 S3/정적 경로에 저장
                      ├──GET /v1/jobs/{id}/files/model.usdz─▶ USDZ도 같이 저장 (아이폰 AR용)
                      ▼
-앱/AR 페이지 ── three.js GLTFLoader로 GLB 로드, idle 재생, 탭하면 behavior.tap_animation
+앱/AR 페이지 ── three.js GLTFLoader로 GLB 로드, 대기 루프 재생, 탭·명령으로 클립 재생 (ANIMATION.md)
               └ 아이폰: USDZ를 AR Quick Look으로 (iOS Safari에는 WebXR이 없다)
 ```
 
@@ -240,16 +240,23 @@ new THREE.GLTFLoader().load(pet.glbUrl, (gltf) => {
   scene.add(dog);
   const mixer = new THREE.AnimationMixer(dog);
   mixer.timeScale = pet.behavior.playback_rate;
+  let current = null;
   const play = (name) => {
     const clip = THREE.AnimationClip.findByName(gltf.animations, name);
-    if (clip) mixer.clipAction(clip).reset().play();
+    if (!clip) return;
+    const next = mixer.clipAction(clip).reset().play();
+    if (current && current !== next) current.crossFadeTo(next, 0.25, false);   // 이전 클립을 끄지 않으면 둘이 섞인다
+    current = next;
   };
-  play('idle');
+  play(THREE.AnimationClip.findByName(gltf.animations, 'standing') ? 'standing' : 'idle');
   onTap = () => play(pet.behavior.tap_animation);   // 'tail_wag' 등
   animateHooks.push((dt) => mixer.update(dt));       // 렌더 루프에서 mixer.update(delta)
 });
 </script>
 ```
+
+진도 템플릿 개는 앉아·엎드려·일어나·손·굴러·짖어·빵 명령용 클립(자세 전환 포함 13개)이 들어 있다.
+명령·전환을 재생하는 방법(상태 흐름, three.js 코드, 음성 명령)은 [ANIMATION.md](ANIMATION.md)에 정리했다.
 
 ### 아이폰 (USDZ)
 
