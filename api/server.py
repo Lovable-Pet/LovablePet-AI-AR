@@ -190,8 +190,8 @@ def _run_job_sync(job: dict[str, Any]) -> dict[str, Any]:
         files[f"render_{kind}.png"] = Path(path)
     files = {name: str(p) for name, p in files.items() if Path(p).exists()}
     if "model.glb" in files:
-        # the iPhone's AR (Quick Look) reads USDZ only: the same model, idle
-        # clip. A failure here leaves the GLB, the result, as it is
+        # the iPhone's AR (Quick Look) reads USDZ only: the same model, its
+        # rest loop. A failure here leaves the GLB, the result, as it is
         try:
             from .usdz import glb_to_usdz
             usdz = Path(files["model.glb"]).with_suffix(".usdz")
