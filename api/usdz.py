@@ -7,8 +7,8 @@ pipeline already makes, with the same mesh, skin, skeleton and texture, and
 one of its clips:
 
 - Quick Look plays one animation, the file's timeline, on a loop. So a USDZ
-  carries one clip (default `idle`, what the app plays at rest); `--all`
-  writes one file per clip.
+  carries one clip (default the loop the app plays at rest: the jindo's
+  look-around `standing`, else `idle`); `--all` writes one file per clip.
 - The skeleton keeps glTF's joints, rest pose and inverse bind matrices; the
   scene root above it (the real-size scale, api/size.py) becomes the
   SkelRoot's transform. Joint transforms are sampled at every key time of the
@@ -25,7 +25,7 @@ Only what Quick Look renders goes in: Mesh, SkelRoot, Skeleton,
 SkelAnimation, UsdPreviewSurface with UsdUVTexture and the st reader, PNG or
 JPEG textures, Y up, metres.
 
-    python -m api.usdz output/runs/<run>/final/<pet>.glb             # <pet>.usdz, idle
+    python -m api.usdz output/runs/<run>/final/<pet>.glb             # <pet>.usdz, rest loop
     python -m api.usdz <glb> --clip bark -o bark.usdz
     python -m api.usdz <glb> --all                                   # <pet>_<clip>.usdz each
 """
@@ -48,7 +48,10 @@ from pygltflib import GLTF2
 from pxr import Gf, Kind, Sdf, Usd, UsdGeom, UsdShade, UsdSkel, Vt
 from scipy.spatial.transform import Rotation, Slerp
 
-DEFAULT_CLIP = "idle"
+# the loop the app plays at rest, the first of these the GLB has (as in
+# docs/API.md's three.js code): the jindo's look-around `standing`, else the
+# breathing-only `idle` of the other templates. Quick Look shows only this
+REST_CLIPS = ("standing", "idle")
 # glTF accessor component type -> numpy dtype, and the divisor of a normalized one
 _DTYPE = {5120: np.int8, 5121: np.uint8, 5122: np.int16, 5123: np.uint16, 5125: np.uint32, 5126: np.float32}
 _NORM = {5120: 127.0, 5121: 255.0, 5122: 32767.0, 5123: 65535.0}
@@ -454,8 +457,8 @@ def _skinned_points(points: np.ndarray, joints: np.ndarray, weights: np.ndarray,
 
 
 def glb_to_usdz(glb_path: str | Path, usdz_path: str | Path, clip: str | None = None) -> dict[str, Any]:
-    """Write `glb_path` with clip `clip` (default idle, else the first; "" for
-    none) as the USDZ `usdz_path`. Returns what went in."""
+    """Write `glb_path` with clip `clip` (default the rest loop, REST_CLIPS,
+    else the first; "" for none) as the USDZ `usdz_path`. Returns what went in."""
     glb_path, usdz_path = Path(glb_path), Path(usdz_path)
     glb = _Glb(glb_path)
     gltf = glb.gltf
@@ -463,7 +466,7 @@ def glb_to_usdz(glb_path: str | Path, usdz_path: str | Path, clip: str | None = 
         raise UsdzError(f"{glb_path}: requires {gltf.extensionsRequired}")
     anims = {a.name or f"clip_{i}": a for i, a in enumerate(gltf.animations or [])}
     if clip is None:
-        clip = DEFAULT_CLIP if DEFAULT_CLIP in anims else next(iter(anims), "")
+        clip = next((c for c in REST_CLIPS if c in anims), next(iter(anims), ""))
     if clip and clip not in anims:
         raise UsdzError(f"no clip {clip!r}; {glb_path.name} has {list(anims)}")
     anim = anims.get(clip) if clip else None
@@ -708,7 +711,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("glb", type=Path)
     ap.add_argument("-o", "--out", type=Path, help="output .usdz (default: next to the GLB); a folder with --all")
-    ap.add_argument("--clip", help=f"clip to play (default {DEFAULT_CLIP!r}, else the first; '' for none)")
+    ap.add_argument("--clip", help=f"clip to play (default the first of {REST_CLIPS}, else the first; "
+                                   "'' for none)")
     ap.add_argument("--all", action="store_true", help="one USDZ per clip")
     args = ap.parse_args()
     if args.all:

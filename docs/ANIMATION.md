@@ -221,9 +221,28 @@ micButton.onclick = () => rec.start();   // 사용자 동작으로 시작해야 
 ```
 
 - 지원: Chrome·Edge·Android Chrome, iOS Safari 14.5 이상(`webkitSpeechRecognition`). 없으면 명령 버튼만 보여 준다.
+  아이폰은 페이지 안 3D 뷰에서만 된다. AR(Quick Look) 안에서는 안 된다(6장).
 - "손"은 다른 말에도 자주 들어가므로(손님 등) 한 단어로 말했을 때만 받는다.
 
-## 6. 그 밖에
+## 6. 아이폰 (AR Quick Look)
+
+iOS Safari에는 WebXR이 없어서 아이폰의 AR 버튼은 애플의 AR Quick Look을 띄우고, Quick Look은 서버가 만든 USDZ(`usdz_url`)를
+연다([API.md](API.md#아이폰-usdz)). Quick Look은 페이지와 따로 도는 뷰어라 그 안에서는 이 문서의 코드가 돌지 않고,
+파일에 든 대기 루프 하나(진도 `standing`, 그 외 `idle`)를 반복할 뿐이다.
+
+| 아이폰 화면 | 대기 루프 | 탭 | 명령 버튼 | 음성 |
+|---|---|---|---|---|
+| 페이지 안 3D 뷰 (three.js / model-viewer) | ✅ | ✅ | ✅ | ✅ iOS Safari 14.5 이상 |
+| AR (Quick Look) | ✅ | ❌ | ❌ | ❌ |
+
+- 아이폰에서는 명령·음성을 3D 뷰에서 받고, AR은 "내 방에 둔 개 보기"로 쓴다. AR 버튼 옆에 "AR에서는 명령을 못 해요" 정도를 적어 두면 좋다.
+- AR을 닫으면 페이지로 돌아온다. AR은 열 때마다 대기 루프부터 시작한다.
+- 자세별 USDZ를 만들어 지금 자세로 AR을 여는 방식은, 자세를 바꿀 때마다 AR을 닫았다 다시 열어야 해서 쓰지 않는다.
+- Quick Look 자체는 USDZ에 넣은 애플의 탭 규칙(preliminary behaviors: 탭하면 애니메이션 재생 등)을 실행할 수 있다. 우리 USDZ에는 아직 없다.
+- 안드로이드 Chrome은 WebXR AR이 페이지 안에서 돌아서 AR 중에도 이 문서의 코드가 동작한다.
+  WebXR이 안 되는 기기에서 model-viewer가 Scene Viewer(별도 앱)로 넘어가면 아이폰 AR과 같다.
+
+## 7. 그 밖에
 
 - **좌표**: 바닥이 y = 0, 개의 앞이 +z, 개의 왼쪽이 +x. 몸은 원점 근처에서만 움직인다.
   전환 중 최대 7cm 이동하고, `play_dead`·`rollover`는 제자리로 돌아온다. AR에서는 원점을 바닥 평면에 놓으면 된다.

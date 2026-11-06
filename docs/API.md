@@ -176,7 +176,7 @@ multipart:
 | 요청 | 결과 |
 |---|---|
 | `GET /v1/jobs/{id}/files/model.glb` | GLB (`model/gltf-binary`), 약 10MB |
-| `GET /v1/jobs/{id}/files/model.usdz` | 같은 모델의 USDZ (`model/vnd.usdz+zip`), 약 5~7MB, idle 클립. 변환이 실패하면 `usdz_url`이 null이고 작업은 그대로 done |
+| `GET /v1/jobs/{id}/files/model.usdz` | 같은 모델의 USDZ (`model/vnd.usdz+zip`), 약 5~7MB, 대기 루프 클립(진도 `standing`, 그 외 `idle`). 변환이 실패하면 `usdz_url`이 null이고 작업은 그대로 done |
 | `GET /v1/jobs/{id}/files/texture.png` | 털 텍스처 2048² |
 | `GET /v1/jobs/{id}/files/render_side.png` 등 | 미리보기 (render=true일 때) |
 | `DELETE /v1/jobs/{id}` | 끝난 작업의 파일 삭제 (204). 진행 중이면 409 |
@@ -265,15 +265,20 @@ GLB처럼 받아 저장해서 내려주면 된다 (`usdz_url`; 서빙할 때 `Co
 USDZ는 GLB와 같은 메시·스킨·뼈대·털 텍스처, 같은 실제 크기이고, 진도의 입 안(정점 색)은 작은 텍스처로 구워 넣었다.
 
 ```html
-<!-- model-viewer: 안드로이드/데스크톱은 GLB, 아이폰 AR 버튼은 USDZ -->
+<!-- model-viewer: 안드로이드/데스크톱은 GLB, 아이폰 AR 버튼은 USDZ.
+     restClip = animations에 'standing'이 있으면 'standing', 없으면 'idle' (위 three.js 코드와 같다) -->
 <model-viewer src="${pet.glbUrl}" ios-src="${pet.usdzUrl}" ar ar-modes="webxr scene-viewer quick-look"
-              autoplay animation-name="idle" camera-controls></model-viewer>
+              autoplay animation-name="${restClip}" camera-controls></model-viewer>
 <!-- 또는 링크 하나로 Quick Look 바로 열기 (a 안에 img가 꼭 있어야 한다) -->
 <a rel="ar" href="${pet.usdzUrl}"><img src="${pet.thumbnailUrl}"></a>
 ```
 
-Quick Look은 파일의 애니메이션 하나를 반복 재생만 한다(탭 반응 없음). 그래서 `model.usdz`에는 `idle` 하나만 들어 있다.
+Quick Look은 파일의 애니메이션 하나를 반복 재생만 한다. 그래서 `model.usdz`에는 대기 루프 하나만 들어 있다
+(진도는 `standing`, 그 외 템플릿은 `idle` - 위 three.js 코드가 처음 트는 클립과 같다).
 다른 클립이 필요하면 파이프라인 쪽에서 `python -m api.usdz <GLB> --clip bark` (클립마다 한 파일: `--all`).
+
+Quick Look 안에서는 페이지 코드가 돌지 않아 탭·명령·음성이 안 된다. 아이폰에서 명령·음성은 페이지 안 3D 뷰에서 받는다
+([ANIMATION.md](ANIMATION.md) 6장).
 
 ## 비용과 시간 (한 마리)
 

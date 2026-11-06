@@ -34,7 +34,8 @@ python -m api.run --record <기록.json> --photo <사진> --out output/runs/<이
 
 Blender(`BLENDER_EXE`)가 있으면 미리보기 PNG도 렌더하고, 없으면 GLB만 만든다.
 
-아이폰 AR(Quick Look)용 USDZ는 서버가 GLB 옆에 같이 만든다(`model.usdz`, idle 클립). 따로 만들려면
+아이폰 AR(Quick Look)용 USDZ는 서버가 GLB 옆에 같이 만든다(`model.usdz`, 대기 루프 클립: 진도 `standing`, 그 외 `idle`;
+Quick Look 안에서는 명령·음성이 안 된다 - `docs/ANIMATION.md` 6장). 따로 만들려면
 `python -m api.usdz <GLB> [--clip <클립> | --all] [-o <출력>]` (Blender 없이 `usd-core`만 쓴다):
 뼈대·스킨·클립은 키 시각마다 그대로 옮기고(STEP·CUBICSPLINE은 그 사이를 채움), 모프는 기본 가중치로 굽고,
 Quick Look이 무시하는 정점 색(진도의 입 안)은 삼각형마다 8 px 칸에 구운 텍스처로 바꾼다.
