@@ -33,9 +33,22 @@ place's texels (a partial overlap, PULL_KEEP) has those corners pulled in
 toward its centre instead. --partial-only does that alone, for a template
 this already fixed.
 
+Whatever still reads another place - corners each on their own surface
+with another place's strip between them, a partial overlap that pulling in
+does not clear, a bilinear tap anywhere inside (tap_wrong) - is flattened
+to one texel of its own surface whose neighbourhood is that surface too
+(flat_texel). The jindo puppy's bib kept 114 + 109 such triangles over its
+black shoulder strip after the 11-01 runs (shelter puppy 11's black flecks
+on the chest, 11-08).
+
+--glb <dog.glb> fixes a dog already built from the template (same position
+map) instead of the template; its texture stays as it is, since the moved
+corners land on texels it painted for the surface they lie on.
+
 Usage:
     python -m ar_pipeline.fix_uv_overlaps --slug chihuahua [--size small] [--reference work/.../x.glb]
     python -m ar_pipeline.fix_uv_overlaps --slug jindo_puppy --partial-only [--out x.glb]
+    python -m ar_pipeline.fix_uv_overlaps --slug jindo_puppy --glb output/runs/<set>/<dog>/final/<id>.glb
 Back up output/skeleton_<slug>_<size>.glb first; without --out this edits it in place.
 """
 
@@ -64,6 +77,13 @@ MISMATCH_M = 0.02
 # texel baked MISMATCH_M or more from the triangle (the least wrong one if
 # none does).
 PULL_KEEP = (0.85, 0.7, 0.55, 0.4, 0.25, 0.1)
+# A flattened triangle's texel: of the FLAT_CANDIDATES baked nearest it in
+# 3D, the one whose (2 * FLAT_WINDOW_PX + 1)^2 window holds the most texels
+# of this surface (mip level 3 averages 8 x 8)
+FLAT_CANDIDATES = 48
+FLAT_WINDOW_PX = 4
+# a bilinear tap lighter than this is not counted by tap_wrong
+TAP_MIN_WEIGHT = 0.15
 COMPONENTS = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4}
 DTYPES = {5126: np.float32, 5125: np.uint32, 5123: np.uint16, 5121: np.uint8}
 
@@ -189,11 +209,15 @@ def main() -> None:
     parser.add_argument("--size", default="small")
     parser.add_argument("--reference", default=None, help="GLB whose positions match the baked position map")
     parser.add_argument("--out", default=None, help="write here instead of over the template GLB")
+    parser.add_argument("--glb", default=None,
+                        help="a dog built from the template (same topology) to fix instead of the template; "
+                             "its texture is left as it is - the moved corners land on texels it already "
+                             "painted for the surface they lie on")
     parser.add_argument("--partial-only", action="store_true",
                         help="pull in the partial overlaps only (a template this already fixed: what the centre "
                              "test still finds are fur tufts off the surface, already on their nearest texel)")
     args = parser.parse_args()
-    glb = ROOT / "output" / f"skeleton_{args.slug}_{args.size}.glb"
+    glb = Path(args.glb) if args.glb else ROOT / "output" / f"skeleton_{args.slug}_{args.size}.glb"
     geometry = ROOT / "output" / "templates" / f"{args.slug}_{args.size}" / "geometry"
     position = np.load(geometry / "position.npy").astype(np.float32)
     valid = np.load(geometry / "valid.npy") > 0.5
@@ -243,8 +267,14 @@ def main() -> None:
     if pulls:
         print(f"[uv] {len(pulls)} more triangles reach over other places' texels at a corner: "
               f"{sum(p[1] for p in pulls.values())} texels, {sum(p[2] for p in pulls.values())} left once pulled in")
-    if not bad.any() and not pulls:
-        return
+    # ... and one that still covers another place's texels however far its
+    # corners are pulled in is flattened like a whole one (fix_whole)
+    stuck = [t for t, p in pulls.items() if p[2] > 0]
+    for t in stuck:
+        del pulls[t]
+        bad[t] = True
+    if stuck:
+        print(f"[uv] {len(stuck)} of them still reach over once pulled in: flattened instead")
 
     count = uv.shape[0]
     copies: list[int] = []        # source vertex of each appended vertex
@@ -271,6 +301,26 @@ def main() -> None:
     if pulls:
         print(f"[uv] {moved} corners pulled in ({len(copies)} vertices copied in all)")
 
+    # last, what the renderer would still read from another place anywhere
+    # inside a triangle (tap_wrong): flattened to one texel of its own surface
+    every_uv = np.concatenate([uv, np.asarray(copy_uv, dtype=np.float32).reshape(-1, 2)])
+    source_of = np.concatenate([np.arange(count), np.asarray(copies, dtype=np.int64)])
+    still = np.nonzero(tap_wrong(every_uv[tri].astype(np.float64), points[source_of[tri]].astype(np.float64),
+                                 position, valid))[0]
+    if len(still):
+        rows, cols = np.nonzero(valid)
+        tree = cKDTree(position[rows, cols].astype(np.float64))
+        for t in still:
+            r, c = flat_texel(points[source_of[tri[t]]].mean(axis=0), tree, rows, cols, position, valid)
+            flat_uv = np.array([(c + 0.5) / w, (r + 0.5) / h], dtype=np.float32)
+            for j in range(3):
+                copies.append(int(source_of[tri[t, j]])); copy_uv.append(flat_uv)
+                tri[t, j] = count + len(copies) - 1
+        print(f"[uv] {len(still)} triangles still read another place's texels between their corners: "
+              f"flattened ({len(copies)} vertices copied in all)")
+    if not copies and not moved:
+        return
+
     source = np.asarray(copies, dtype=np.int64)
     for name, idx in attributes.items():
         values = uv if name == "TEXCOORD_0" else data[name]
@@ -296,6 +346,51 @@ def main() -> None:
     print(f"[uv] wrote {out}")
 
 
+def tap_wrong(corner_uv: np.ndarray, corner_xyz: np.ndarray, position: np.ndarray, valid: np.ndarray) -> np.ndarray:
+    """Per triangle (corner UVs (T, 3, 2) in 0..1, corner positions (T, 3, 3)):
+    does the renderer read another place's texel anywhere inside it - at a
+    grid of points over the triangle, any of the four bilinear taps with
+    weight TAP_MIN_WEIGHT or more that is baked MISMATCH_M or more from the
+    point. Stricter than wrong_wedges (texel centres inside the triangle):
+    beside a strip of another place 2-6 texels wide the taps reach into the
+    strip though no texel centre of it lies inside the triangle."""
+    h, w = valid.shape
+    s = np.linspace(0.04, 0.92, 6)
+    a, b = np.meshgrid(s, s)
+    keep = a + b <= 0.96
+    bary = np.stack([1.0 - a[keep] - b[keep], a[keep], b[keep]], axis=-1)
+    puv = np.einsum("sk,tkc->tsc", bary, corner_uv)
+    pxyz = np.einsum("sk,tkc->tsc", bary, corner_xyz)
+    x, y = puv[..., 0] * w - 0.5, puv[..., 1] * h - 0.5
+    x0, y0 = np.floor(x).astype(np.int64), np.floor(y).astype(np.int64)
+    fx, fy = x - x0, y - y0
+    wrong = np.zeros(corner_uv.shape[0], dtype=bool)
+    for dy, dx, weight in ((0, 0, (1 - fx) * (1 - fy)), (0, 1, fx * (1 - fy)), (1, 0, (1 - fx) * fy), (1, 1, fx * fy)):
+        ty, tx = np.clip(y0 + dy, 0, h - 1), np.clip(x0 + dx, 0, w - 1)
+        far = valid[ty, tx] & (np.linalg.norm(position[ty, tx] - pxyz, axis=-1) > MISMATCH_M)
+        wrong |= (far & (weight >= TAP_MIN_WEIGHT)).any(axis=1)
+    return wrong
+
+
+def flat_texel(point: np.ndarray, tree: cKDTree, rows: np.ndarray, cols: np.ndarray, position: np.ndarray,
+               valid: np.ndarray) -> tuple[int, int]:
+    """(row, col) of a texel baked near `point` whose FLAT_WINDOW_PX
+    neighbourhood is baked near it too: of the FLAT_CANDIDATES nearest in
+    3D, the one with the most such neighbours (the nearest itself can sit
+    at the edge of a strip of another place)."""
+    h, w = valid.shape
+    _, near = tree.query(point.astype(np.float64), k=FLAT_CANDIDATES)
+    best, best_score = int(near[0]), -1
+    r = FLAT_WINDOW_PX
+    for i in np.atleast_1d(near):
+        y, x = int(rows[i]), int(cols[i])
+        y0, y1, x0, x1 = max(y - r, 0), min(y + r + 1, h), max(x - r, 0), min(x + r + 1, w)
+        same = valid[y0:y1, x0:x1] & (np.linalg.norm(position[y0:y1, x0:x1] - point, axis=-1) < MISMATCH_M)
+        if int(same.sum()) > best_score:
+            best, best_score = int(i), int(same.sum())
+    return int(rows[best]), int(cols[best])
+
+
 def fix_whole(tri: np.ndarray, uv: np.ndarray, points: np.ndarray, centre: np.ndarray, bad: np.ndarray,
               position: np.ndarray, valid: np.ndarray, copies: list[int], copy_uv: list[np.ndarray]) -> int:
     """The triangles whose centre samples another place (`bad`) moved onto
@@ -312,7 +407,6 @@ def fix_whole(tri: np.ndarray, uv: np.ndarray, points: np.ndarray, centre: np.nd
     corner_island = islands[rows[nearest], cols[nearest]]
     new_uv = dict(zip(corners.tolist(), corner_uv))
     island_of = dict(zip(corners.tolist(), corner_island.tolist()))
-    _, centre_nearest = tree.query(centre[bad].astype(np.float64), workers=-1)
 
     used_by_good = np.zeros(uv.shape[0], dtype=bool)
     used_by_good[tri[~bad].ravel()] = True
@@ -320,9 +414,18 @@ def fix_whole(tri: np.ndarray, uv: np.ndarray, points: np.ndarray, centre: np.nd
     flat = 0
     for k, t in enumerate(np.nonzero(bad)[0]):
         corners_t = tri[t]
-        if len({island_of[int(v)] for v in corners_t}) > 1:
-            # the corners would span islands: one texel for the whole triangle
-            r, c = rows[centre_nearest[k]], cols[centre_nearest[k]]
+        moved = np.stack([new_uv[int(v)] for v in corners_t]).astype(np.float64)
+        if (len({island_of[int(v)] for v in corners_t}) > 1
+                or wrong_wedges(moved, points[corners_t].astype(np.float64), position, valid).any()):
+            # the corners would span islands, or each corner is on its own
+            # texel but the triangle between them crosses another place's
+            # (the jindo puppy's white bib corners either side of the black
+            # shoulder strip wedged into the same chart: shelter puppy 11's
+            # black flecks on the chest, user: "가슴에 알수없는 조각"): one
+            # texel for the whole triangle, one whose neighbourhood is this
+            # surface too, so the filter's taps and the browser's mip levels
+            # read it as well
+            r, c = flat_texel(centre[t], tree, rows, cols, position, valid)
             flat_uv = np.array([(c + 0.5) / w, (r + 0.5) / h], dtype=np.float32)
             for j, v in enumerate(corners_t):
                 copies.append(int(v)); copy_uv.append(flat_uv)
