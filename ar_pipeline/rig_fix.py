@@ -118,6 +118,11 @@ SHOULDER_SHARE = 0.6
 # went half with the shin and swung out sideways like a frog's thigh -
 # user, 11-03: "뒷다리도 매우 어색하고")
 LEG_SECTION_HALF_M = 0.008
+# the cross-section is taken within 15 cm of the joint front to back, then
+# again round the middle it found, up to this many times: round the
+# retriever's old knee, 4.6 cm behind its thigh, the window cut off the
+# front of the thigh and the knee came out 5.4 cm behind the middle
+LEG_CENTRE_PASSES = 4
 # within a hind leg each bone takes the skin between its joint's height and
 # the next one's, blended over HIND_BLEND_M either side of a line
 # HIND_SHIFT_M below the joint, so the outside of the fold (the front of the
@@ -164,6 +169,40 @@ HEAD_BLEND_M = 0.015
 # the seam between the tail's skin and the body's, by their distances to the
 # two chains
 TAIL_SEAM_M = 0.01
+# a hanging tail's free length (free_tail): the mesh cut level from this far
+# above the tail's root joint down, in steps of FREE_TAIL_STEP_M
+FREE_TAIL_ABOVE_M = 0.05
+FREE_TAIL_STEP_M = 0.005
+# ... and its root, fused into the croup above that, only as wide as the tail
+# (tail_column): by the distances to the chains alone tail_1 took the whole
+# top of the retriever's rump, 24 cm across for a 7 cm tail, and the croup
+# turned with the tail - so its wag had to start at the free length, half
+# way down the buttocks (user, 11-08: "꼬리흔들어지는 시작점이 맞지 않는
+# 느낌임. 좀더 위여야할 것 같아"). The width is the free tail's within
+# TAIL_ROOT_TOP_M of its top; the skin beside it goes to the body, blended
+# over TAIL_ROOT_BLEND_M
+TAIL_ROOT_TOP_M = 0.03
+TAIL_ROOT_BLEND_M = 0.008
+# ... and the tube above the free length the tail's whole (tail_tube): the
+# retriever's tail is a tube of its own up to 0.48 m and a notch in the
+# croup's outline above, but the front half of the tube, a centimetre or two
+# behind the pelvis joint, went with the rump, and the tail swung with its
+# front face left on the buttocks (user, 11-08: "꼬리 이거 연결부위 보면
+# 좀더 위까지 꼬리로하고 엉덩이랑 떨어지게 해도될것같은데"). The tube's front
+# face is told from the rump just in front of it by facing: forward (normal
+# along +z past TAIL_TUBE_FACING) against back
+TAIL_TUBE_MARGIN_M = 0.005
+TAIL_TUBE_BELOW_M = 0.01
+TAIL_TUBE_FACING = 0.3
+# the rump's skin within TAIL_SOFT_M of the tail's (free length and tube,
+# behind the hips) goes partly with it, up to TAIL_SOFT_SHARE right at it:
+# one surface with the tail's front there, held to the pelvis it stretched
+# into a web a triangle wide as the tail lifted from its root
+TAIL_SOFT_M = 0.025
+TAIL_SOFT_SHARE = 0.8
+# a hanging tail's share of the skin by distance fades out from this far in
+# front of its root joint to this far (m): none of the back
+TAIL_ROOT_FRONT_M = (0.01, 0.03)
 # neck cross-sections: this thick, within this of the old neck axis
 SECTION_HALF_M = 0.01
 SECTION_RADIUS_M = 0.18
@@ -214,21 +253,145 @@ def hind_shares(pos: np.ndarray, at: dict[str, np.ndarray], chain: tuple[str, ..
     return np.stack([1.0 - knee, knee - hock, hock - paw, paw], axis=1)
 
 
-def leg_centre(pos: np.ndarray, at: dict[str, np.ndarray], joint: str, y: float) -> tuple[float, float] | None:
+def hanging_tail(at: dict[str, np.ndarray]) -> list[np.ndarray]:
+    """The tail's joints from the last one above the hips down: the part of
+    a tail hanging beside the hind legs (the retriever's, to 12 cm off the
+    floor). [] for a tail carried over the back (the jindo's), so its rig
+    is as before."""
+    tail = [at[n] for n in TAIL_CHAIN[1:] if n in at]
+    hips = [at[n][1] for n in ("L_hip_jnt", "R_hip_jnt") if n in at]
+    if len(tail) < 2 or not hips:
+        return []
+    below = [k for k, p in enumerate(tail) if p[1] < min(hips)]
+    if not below:
+        return []
+    return tail[max(below[0] - 1, 0):]
+
+
+def free_tail(pos: np.ndarray, tri: np.ndarray | None, at: dict[str, np.ndarray]) -> np.ndarray:
+    """The skin of a hanging tail's free length: the mesh cut level at
+    heights from just above the tail's root down (FREE_TAIL_STEP_M), the
+    piece holding the tail's tip at the first height where no hind paw is
+    in it. The retriever's tail is a tube hanging free of the thighs below
+    0.45 m, its front face 1-5 cm behind them; that face was nearer the
+    legs' chains than the tail's and went with the legs, so the tail swung
+    with its front glued to the thighs (user, 11-08: "꼬리흔드는것도
+    엉덩이에 붙어서 흔들리는 느낌"). All False without a hanging tail, the
+    triangles, or such a height."""
+    none = np.zeros(len(pos), dtype=bool)
+    tail = hanging_tail(at)
+    paws = [at[n] for n in ("LB_toes_jnt", "RB_toes_jnt") if n in at]
+    if len(tail) < 2 or tri is None or not paws:
+        return none
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    # one vertex per position: UV seams split them
+    _, weld = np.unique(np.round(pos / 1e-5).astype(np.int64), axis=0, return_inverse=True)
+    weld = weld.ravel()
+    n = int(weld.max()) + 1
+    welded = np.zeros((n, 3))
+    welded[weld] = pos
+    edges = weld[np.concatenate([tri[:, [0, 1]], tri[:, [1, 2]], tri[:, [2, 0]]])]
+    tip = int(np.argmin(np.linalg.norm(welded - tail[-1], axis=1)))
+    paw_ids = [int(np.argmin(np.linalg.norm(welded - p, axis=1))) for p in paws]
+    for y in np.arange(tail[0][1] + FREE_TAIL_ABOVE_M, tail[-1][1], -FREE_TAIL_STEP_M):
+        below = welded[:, 1] < y
+        if not below[tip]:
+            break
+        keep = below[edges[:, 0]] & below[edges[:, 1]]
+        graph = coo_matrix((np.ones(int(keep.sum())), (edges[keep, 0], edges[keep, 1])), shape=(n, n))
+        _, label = connected_components(graph, directed=False)
+        if all(label[p] != label[tip] for p in paw_ids):
+            return (label == label[tip])[weld]
+    return none
+
+
+def vertex_normals(pos: np.ndarray, tri: np.ndarray) -> np.ndarray:
+    """Area-weighted vertex normals of the triangles."""
+    face = np.cross(pos[tri[:, 1]] - pos[tri[:, 0]], pos[tri[:, 2]] - pos[tri[:, 0]])
+    n = np.zeros_like(pos)
+    for c in range(3):
+        np.add.at(n, tri[:, c], face)
+    return n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-12)
+
+
+def tail_tube(pos: np.ndarray, tri: np.ndarray | None, at: dict[str, np.ndarray], free: np.ndarray) -> np.ndarray:
+    """The rest of a hanging tail's tube above its free length (`free`,
+    free_tail), up to its root (see TAIL_TUBE_FACING): within the free
+    tail's width of its midline and its depth of the tube's middle - the
+    chain carried along by the free top's offset from it - (each and
+    TAIL_TUBE_MARGIN_M), each vertex behind that middle or facing forward,
+    the tube's front face toward the body (the rump in front of it faces
+    back). (Without the depth, the breast's midline, facing forward too,
+    went to the tail.) All False without a free tail."""
+    none = np.zeros(len(pos), dtype=bool)
+    if tri is None or not free.any():
+        return none
+    q = pos[free]
+    mid, top = float(np.median(q[:, 0])), float(q[:, 1].max())
+    ring = q[q[:, 1] > top - TAIL_ROOT_TOP_M]
+    half = float(np.percentile(np.abs(ring[:, 0] - mid), 95))
+    chain = np.array([at[n] for n in TAIL_CHAIN[1:] if n in at])
+    order = np.argsort(chain[:, 1])
+    chain_z = lambda y: np.interp(y, chain[order, 1], chain[order, 2])
+    middle = chain_z(pos[:, 1]) + float(np.median(ring[:, 2]) - chain_z(top - TAIL_ROOT_TOP_M / 2))
+    reach = float(np.percentile(np.abs(ring[:, 2] - np.median(ring[:, 2])), 95)) + TAIL_TUBE_MARGIN_M
+    inside = ((np.abs(pos[:, 0] - mid) < half + TAIL_TUBE_MARGIN_M) & (pos[:, 1] > top - TAIL_TUBE_BELOW_M)
+              & (pos[:, 1] < chain[:, 1].max()) & (np.abs(pos[:, 2] - middle) < reach) & ~free)
+    return inside & ((pos[:, 2] < middle) | (vertex_normals(pos, tri)[:, 2] > TAIL_TUBE_FACING))
+
+
+def tail_column(pos: np.ndarray, own_tail: np.ndarray) -> np.ndarray:
+    """(N,) how far each vertex lies within a hanging tail's own width of
+    its midline (see TAIL_ROOT_TOP_M): 1 inside, 0 beyond, blended; all 1
+    without a free tail (`own_tail`, free_tail)."""
+    if not own_tail.any():
+        return np.ones(len(pos))
+    q = pos[own_tail]
+    mid = float(np.median(q[:, 0]))
+    top = q[q[:, 1] > q[:, 1].max() - TAIL_ROOT_TOP_M]
+    half = float(np.percentile(np.abs(top[:, 0] - mid), 95))
+    return 1.0 / (1.0 + np.exp(-(half - np.abs(pos[:, 0] - mid)) / TAIL_ROOT_BLEND_M))
+
+
+def tail_skin(pos: np.ndarray, at: dict[str, np.ndarray], leg_chain: tuple[str, ...]) -> np.ndarray:
+    """The skin nearer a hanging tail's chain than the leg's (all False
+    without one)."""
+    tail = hanging_tail(at)
+    leg = [at[n] for n in leg_chain if n in at]
+    if len(tail) < 2 or len(leg) < 2:
+        return np.zeros(len(pos), dtype=bool)
+    return polyline_distance(pos, tail) < polyline_distance(pos, leg)
+
+
+def leg_centre(pos: np.ndarray, at: dict[str, np.ndarray], joint: str, y: float,
+               exclude: np.ndarray | None = None) -> tuple[float, float] | None:
     """(x, z) of the middle of the leg's cross-section at height `y` round
-    `joint` (its side of the body, within 15 cm of it front to back)."""
+    `joint` (its side of the body, within 15 cm of it front to back),
+    leaving out the `exclude` skin (the tail's)."""
     side = np.sign(at[joint][0])
-    hit = (side * pos[:, 0] > 0.015) & (np.abs(pos[:, 2] - at[joint][2]) < 0.15) & \
-        (np.abs(pos[:, 1] - y) < LEG_SECTION_HALF_M)
-    if hit.sum() < 10:
-        return None
-    q = pos[hit]
-    return float(q[:, 0].min() + q[:, 0].max()) / 2, float(q[:, 2].min() + q[:, 2].max()) / 2
+    around, found = at[joint][2], None
+    for _ in range(LEG_CENTRE_PASSES):
+        hit = (side * pos[:, 0] > 0.015) & (np.abs(pos[:, 2] - around) < 0.15) & \
+            (np.abs(pos[:, 1] - y) < LEG_SECTION_HALF_M)
+        if exclude is not None:
+            hit &= ~exclude
+        if hit.sum() < 10:
+            return found
+        q = pos[hit]
+        centre = (float(q[:, 0].min() + q[:, 0].max()) / 2, float(q[:, 2].min() + q[:, 2].max()) / 2)
+        if found is not None and abs(centre[1] - found[1]) < 1e-4:
+            break
+        found, around = centre, centre[1]
+    return found
 
 
 def body_weights(names: list[str], index: dict[str, int], at: dict[str, np.ndarray], pos: np.ndarray,
-                 dominant_name: np.ndarray, old: np.ndarray) -> np.ndarray:
-    """The torso, neck, head, tail and ears' weights (see HOW), dense."""
+                 dominant_name: np.ndarray, old: np.ndarray, own_tail: np.ndarray | None = None,
+                 tube: np.ndarray | None = None) -> np.ndarray:
+    """The torso, neck, head, tail and ears' weights (see HOW), dense;
+    `own_tail` (free_tail) and `tube` (tail_tube) the tail's whatever the
+    distances say."""
     n_joints = len(names)
     body = [node for node in BODY_CHAIN if all(n in index for n in node)]
     weights = chain_weights(pos, [at[node[0]] for node in body], [tuple(index[n] for n in node) for node in body],
@@ -253,8 +416,50 @@ def body_weights(names: list[str], index: dict[str, int], at: dict[str, np.ndarr
         d_tail = polyline_distance(pos, tail_pts[1:])
         d_body = polyline_distance(pos, [at[node[0]] for node in body])
         share = 1.0 / (1.0 + np.exp(-(d_body - d_tail) / TAIL_SEAM_M))
+        whole = None
+        if own_tail is not None:
+            whole = own_tail | tube if tube is not None else own_tail
+            share = share * tail_column(pos, own_tail)
+            if own_tail.any():
+                # (and none of the back in front of the tail's root: up on the
+                # croup the back's skin lies as far from the body's chain as
+                # from the tail's, and a strip of it 17 cm long went half to
+                # tail_1 and swayed with the wag)
+                root_z = at[tail_names[1]][2]
+                share = share * np.clip((root_z + TAIL_ROOT_FRONT_M[1] - pos[:, 2])
+                                        / (TAIL_ROOT_FRONT_M[1] - TAIL_ROOT_FRONT_M[0]), 0.0, 1.0)
+            share = np.where(whole, 1.0, share)
+            if whole.any() and TAIL_SOFT_M > 0:
+                # (see TAIL_SOFT_M)
+                from scipy.spatial import cKDTree
+                # (only round its top: lower down the free length hangs
+                # 1-5 cm behind the thighs, and they would swing with it)
+                top = float(pos[own_tail, 1].max()) if own_tail.any() else float(pos[whole, 1].min())
+                # (the rump's skin by the tail's front face lies up to 2 cm
+                # in front of the hip joints: kept to behind them, it stayed
+                # the pelvis's and tore 1 cm into 8 sitting)
+                behind = (~whole) & (pos[:, 2] < max(at[n][2] for n in ("L_hip_jnt", "R_hip_jnt") if n in at)
+                                     + TAIL_SOFT_M * 2)
+                near = behind & (pos[:, 1] > top - TAIL_SOFT_M)
+                if near.any():
+                    d = cKDTree(pos[whole]).query(pos[near])[0]
+                    u = np.clip(1.0 - d / TAIL_SOFT_M, 0.0, 1.0)
+                    soft = np.zeros(len(pos))
+                    soft[near] = TAIL_SOFT_SHARE * u * u * (3 - 2 * u)
+                    share = np.maximum(share, soft)
+                    whole = whole | (soft > 0)
         tail = share > 0.5
         along_tail = chain_weights(pos, tail_pts, [(index[n],) for n in tail_names], n_joints)
+        if whole is not None and whole.any():
+            # the tail's own skin (and the rump's by it, TAIL_SOFT_M) on the
+            # tail's joints alone: along the chain from the pelvis, the front
+            # face of the retriever's tail - the joints run down its back,
+            # 6-7 cm behind it - lay as near the pelvis joint, just in front
+            # of it, and 608 of its vertices went wholly to the pelvis: the
+            # tail swung with its front face left on the rump, torn 1 cm into
+            # 11 sitting (user, 11-08: "꼬리부분 여전히 문제있네")
+            own = chain_weights(pos, tail_pts[1:], [(index[n],) for n in tail_names[1:]], n_joints)
+            along_tail = np.where(whole[:, None], own, along_tail)
         weights = weights * (1.0 - share[:, None]) + along_tail * share[:, None]
     # the ears keep their ear bones' share, the rest on the head
     ears = np.isin(dominant_name, EAR_PARTS)
@@ -273,7 +478,8 @@ def body_weights(names: list[str], index: dict[str, int], at: dict[str, np.ndarr
     return weights
 
 
-def new_weights(rig: Rig, pos: np.ndarray, joints: np.ndarray, weights: np.ndarray) -> tuple[np.ndarray, dict]:
+def new_weights(rig: Rig, pos: np.ndarray, joints: np.ndarray, weights: np.ndarray,
+                tri: np.ndarray | None = None) -> tuple[np.ndarray, dict]:
     """(dense weights over the skin's joints, report)."""
     names = [(rig.gltf.nodes[j].name or "").split(".")[0] for j in rig.joints]
     index = {n: k for k, n in enumerate(names)}
@@ -313,6 +519,21 @@ def new_weights(rig: Rig, pos: np.ndarray, joints: np.ndarray, weights: np.ndarr
     slope = np.where(np.array([leg[1] == "B" for leg in legs])[stack.argmin(axis=1)],
                      HIND_MEMBERSHIP_SLOPE, FRONT_MEMBERSHIP_SLOPE)
     to_legs = 1.0 / (1.0 + np.exp(-slope * (d_core / CORE_RADIUS - nearest)))
+    # ... and none of a tail hanging between the hocks: where the tail's
+    # chain is nearer than the leg's, the skin goes on to the body's and the
+    # tail's chains (body_weights). The retriever's tail, down to 12 cm off
+    # the floor, was half its hind legs' (some 8,000 vertices each against
+    # the jindo's 1,450) and would have folded with the thighs
+    tail_pts = hanging_tail(at)
+    if len(tail_pts) > 1:
+        d_tail = polyline_distance(pos, tail_pts)
+        d_leg = np.min([seg_ds[leg].min(axis=1) for leg in legs], axis=0)
+        to_legs = to_legs / (1.0 + np.exp(-(d_tail - d_leg) / TAIL_SEAM_M))
+    # and none of its free length or the tube above it, which go to the
+    # tail's chain whole
+    own_tail = free_tail(pos, tri, at)
+    tube = tail_tube(pos, tri, at, own_tail)
+    to_legs = np.where(own_tail | tube, 0.0, to_legs)
     member_total = np.zeros(len(pos))
     leg_dense = np.zeros_like(old)
     for k_leg, leg in enumerate(legs):
@@ -332,7 +553,7 @@ def new_weights(rig: Rig, pos: np.ndarray, joints: np.ndarray, weights: np.ndarr
         report[leg] = int((editable & (member > 0.5)).sum())
     member_total = np.minimum(member_total, 1.0)
     # the rest of the skin along the body's and the tail's chains
-    body = body_weights(names, index, at, pos, dominant_name, old)
+    body = body_weights(names, index, at, pos, dominant_name, old, own_tail, tube)
     mixed = leg_dense + (1.0 - member_total)[:, None] * body
     out[editable] = mixed[editable]
     # the strongest MAX_INFLUENCES, normalised
@@ -342,6 +563,9 @@ def new_weights(rig: Rig, pos: np.ndarray, joints: np.ndarray, weights: np.ndarr
     kept[rows, order] = out[rows, order]
     kept /= np.maximum(kept.sum(axis=1, keepdims=True), 1e-9)
     report["edited"] = int(editable.sum())
+    if own_tail.any():
+        report["free_tail"] = int(own_tail.sum())
+        report["tail_tube"] = int(tube.sum())
     return kept, report
 
 
@@ -412,10 +636,12 @@ def move_joints(rig: Rig, blob: bytearray) -> dict[str, tuple]:
     pos = read(gltf, rig.blob, prim.attributes.POSITION)
     joints = read(gltf, rig.blob, prim.attributes.JOINTS_0).astype(np.int64)
     weights = read(gltf, rig.blob, prim.attributes.WEIGHTS_0)
+    tri = read(gltf, rig.blob, prim.indices).reshape(-1, 3).astype(np.int64) if prim.indices is not None else None
     names = [(gltf.nodes[j].name or "").split(".")[0] for j in rig.joints]
     dominant = np.array(names)[joints[np.arange(len(joints)), weights.argmax(axis=1)]]
     world = rig.world()
     at = {n: world[i][:3, 3].copy() for n, i in rig.by_name.items()}
+    hanging_free = free_tail(pos, tri, at)
     z_up = lambda p: np.stack([p[..., 0], -p[..., 2], p[..., 1]], axis=-1)   # leg_levels works in Blender's axes
     levels = leg_levels(z_up(pos), np.isin(dominant, TORSO_BONES), {n: z_up(p) for n, p in at.items()})
     new = {n: p.copy() for n, p in at.items()}
@@ -428,8 +654,12 @@ def move_joints(rig: Rig, blob: bytearray) -> dict[str, tuple]:
         new[elbow][1], new[wrist][1] = levels["elbow"], levels["wrist"]
         new[hip][1] = levels["knee"] + HIP_SHARE * (at[hip][1] - levels["knee"])
         new[shoulder][1] = levels["elbow"] + SHOULDER_SHARE * (at[shoulder][1] - levels["elbow"])
+        # a tail hanging behind the leg is not in its cross-section: with
+        # it the retriever's knee went to the hip's line and its hock 6 cm
+        # behind the leg
+        tail = tail_skin(pos, at, CHAINS[f"{side}B"]) | hanging_free
         for joint in (knee, ankle):
-            centre = leg_centre(pos, at, joint, new[joint][1])
+            centre = leg_centre(pos, at, joint, new[joint][1], exclude=tail)
             if centre is not None:
                 new[joint][0], new[joint][2] = centre
     new.update(neck_positions(pos, dominant, at))
@@ -486,7 +716,8 @@ def apply(glb: Path, out: Path) -> dict:
             normalised_int = w_acc.componentType in (5121, 5123)
             if normalised_int:
                 weights = weights / (255.0 if w_acc.componentType == 5121 else 65535.0)
-            dense, rep = new_weights(rig, pos, joints, weights)
+            tri = read(gltf, rig.blob, prim.indices).reshape(-1, 3).astype(np.int64) if prim.indices is not None else None
+            dense, rep = new_weights(rig, pos, joints, weights, tri)
             k = joints.shape[1]
             order = np.argsort(-dense, axis=1)[:, :k]
             new_w = np.take_along_axis(dense, order, axis=1)
