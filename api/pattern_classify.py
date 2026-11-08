@@ -114,7 +114,9 @@ LEG_FEATURES = {"none": (), "paws": ("white_paws",), "socks": ("white_socks",), 
 # close-up (face_colours.py): asked here, beside the anchors, they came back
 # as whatever the layout implies. These map that call's answers onto
 # features; "tan" and "dark" add nothing the layout does not already say.
-CHEEK_FEATURES = {"white": ("white_cheeks",), "cream": ("cream_cheeks",), "tan": (), "dark": (), "unknown": ()}
+CHEEK_FEATURES = {"white": ("white_cheeks",), "cream": ("cream_cheeks",), "tan": (), "dark": (), "unknown": (),
+                  # never a call's answer: lite's verdict on a grizzled face (palette.cheeks_from_photo)
+                  "gray": ("gray_cheeks",)}
 BROW_FEATURES = {"none": ("no_brows",), "white": ("white_brows",), "cream": ("cream_brows",), "tan": ("tan_brows",),
                  "unknown": ()}
 # "dark" and "tan" are what the layouts already put there (a dark nose bar on

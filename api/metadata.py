@@ -43,9 +43,18 @@ COLOR_NAMES_EN = {
     "갈색": "tan", "밤색": "tan", "황갈색": "tan",
     "노랑": "fawn", "황색": "fawn", "금색": "fawn", "베이지색": "cream",
     "적갈색": "red", "붉은색": "red", "주황": "red",
-    "초콜릿": "chocolate", "진갈색": "chocolate",
+    "초콜릿": "chocolate", "쵸콜릿": "chocolate", "진갈색": "chocolate",
     "회색": "gray", "쥐색": "gray", "은색": "gray",
-    "삼색": "tan", "얼룩": "tan",
+    "삼색": "tan", "얼룩": "tan", "블랙탄": "black",
+}
+
+# One syllable per colour, the shelter shorthand on its own ("검,흰", "흰/노")
+# and run together ("흑백", "갈흰", "흰갈검", "흑갈색"). "검,흰" went unread
+# and the black-and-white puppy's record said white (shelter maltese 8);
+# 6 of 600 records use "검" alone, 20 a run-together pair.
+COLOR_SYLLABLES = {
+    "검": "black", "흑": "black", "흰": "white", "백": "white", "갈": "tan", "탄": "tan",
+    "황": "fawn", "노": "fawn", "회": "gray",
 }
 
 ASSET_ROOT = "/assets/pets"
@@ -93,7 +102,7 @@ def normalize_color(coat_color: str) -> str:
     fail later, further from the record that caused it.
     """
     words = _coat_words(coat_color)
-    known = [w for w in (_single_color(w) for w in words) if w]
+    known = [c for w in words for c in _word_colors(w)]
     if known:
         # A compound entry ("갈색/흰색", "흰색, 검정") names the markings as
         # well as the coat; the base is the first word that is not white -
@@ -124,7 +133,23 @@ def _single_color(word: str) -> str | None:
     for name, colour in COLOR_NAMES_EN.items():
         if name.endswith("색") and word == name[:-1]:
             return colour
+    # ... and "크림색" for "크림": 25 of 600 records, read as the default
+    # fawn (shelter adult jindo 1, a white dog)
+    if word.endswith("색") and word[:-1] in COLOR_NAMES_EN:
+        return COLOR_NAMES_EN[word[:-1]]
     return None
+
+
+def _word_colors(word: str) -> list[str]:
+    """The colours one word names: a colour word, or shorthand syllables
+    run together ("흑백" -> black, white)."""
+    single = _single_color(word)
+    if single:
+        return [single]
+    stem = word[:-1] if word.endswith("색") else word
+    if stem and all(s in COLOR_SYLLABLES for s in stem):
+        return [COLOR_SYLLABLES[s] for s in stem]
+    return []
 
 
 def asset_path(pet_id: str) -> str:

@@ -541,6 +541,17 @@ FACE_COOL_WHITE = (55.0, 12.0)
 # (93) and came out with a tan band across its face. Tan cheeks read
 # chroma 12-17 (shelter puppy 9, chihuahuas 5 and 10).
 FACE_TAN_MIN_CHROMA = 8.0
+# Light fur just over FACE_LIGHT_MIN_SHARE of the face (under
+# FROST_MAX_SHARE) that is grey - under FROST_MAX_L and neutral - is white
+# hairs through a dark face, a senior's grizzle: painted white it was a
+# hard white mask across a black head (shelter chihuahua 7: 18 %, L* 67.5,
+# chroma 7; user 11-07 "이상한데"). It is painted grey at that light fur's
+# lightness (frost_lab). White faces cover more of the face (22-53 %; a
+# white-faced puppy in shade 28 % at L* 70) or measure white (a white-muzzled
+# chihuahua 21 % at L* 93).
+FROST_MAX_SHARE = 0.25
+FROST_MAX_L = 75.0
+FROST_L = (50.0, 75.0)
 
 
 # The crown in the upper face of a head crop (shares of its height and
@@ -646,12 +657,23 @@ def cheeks_from_photo(cheeks: str, share: float | None, lab: list[float] | None)
 
     if share is not None and share < FACE_LIGHT_MIN_SHARE:
         return "dark"
+    if (cheeks in ("white", "cream") and share is not None and share < FROST_MAX_SHARE and lab is not None
+            and float(lab[0]) < FROST_MAX_L and float(np.hypot(lab[1], lab[2])) < FACE_TAN_MIN_CHROMA):
+        return "gray"
     if lab is None or float(np.hypot(lab[1], lab[2])) < FACE_TAN_MIN_CHROMA:
         return cheeks
     def distance(name: str) -> float:
         mid = linear_to_lab(hex_to_linear(FUR_PALETTE[name][1])[None, None, :])[0, 0]
         return float(np.linalg.norm(np.asarray(lab, dtype=np.float32) - mid))
     return "tan" if distance("tan") < min(distance("cream"), distance("white")) else cheeks
+
+
+def frost_lab(lab: list[float] | None) -> list[float] | None:
+    """The gray ramp's mid for grizzled cheeks (cheeks_from_photo "gray"):
+    the light fur's lightness within FROST_L, neutral."""
+    if not lab:
+        return None
+    return [round(float(np.clip(lab[0], *FROST_L)), 1), 0.0, 0.0]
 
 
 def cream_from_face(appearance: dict, palette: dict[str, tuple[str, str, str]]) -> dict[str, tuple[str, str, str]]:
@@ -681,6 +703,29 @@ def cream_from_face(appearance: dict, palette: dict[str, tuple[str, str, str]]) 
     return {**palette, "cream": tuple(moved)}
 
 
+PALE_POINTS_SHARE = 0.5
+
+
+def pale_points(appearance: dict, palette: dict[str, tuple[str, str, str]]) -> tuple[dict, str | None]:
+    """(palette, what changed): the second colour's ramp PALE_POINTS_SHARE of
+    the way to the table's cream when the points were read half tan, half
+    cream (lite.pale_points)."""
+    from .fur import hex_to_linear, to_srgb
+    from .projection import lab_to_linear, linear_to_lab
+
+    second = str(appearance.get("second_color") or "").lower()
+    if not appearance.get("points_pale") or second not in WARM_BASES:
+        return palette, None
+    mixed = []
+    for b, c in zip(palette.get(second) or FUR_PALETTE[second], FUR_PALETTE["cream"]):
+        lb = linear_to_lab(hex_to_linear(b)[None, None, :])[0, 0]
+        lc = linear_to_lab(hex_to_linear(c)[None, None, :])[0, 0]
+        lab = (lb + PALE_POINTS_SHARE * (lc - lb)).astype(np.float32)
+        rgb = to_srgb(lab_to_linear(lab[None, None, :])[0, 0])
+        mixed.append(_rgb_to_hex(tuple(int(round(float(np.clip(x, 0, 1)) * 255)) for x in rgb)))
+    return {**palette, second: tuple(mixed)}, f"{second} {PALE_POINTS_SHARE} toward cream: {mixed}"
+
+
 def relative_cream(appearance: dict, palette: dict[str, tuple[str, str, str]]) -> dict[str, tuple[str, str, str]]:
     """The palette with a cream between the base and the table's cream, when
     the base is warm and some region is cream; unchanged otherwise."""
@@ -688,6 +733,10 @@ def relative_cream(appearance: dict, palette: dict[str, tuple[str, str, str]]) -
     from .projection import lab_to_linear, linear_to_lab
 
     base = str(appearance.get("base_color") or "").lower()
+    # ... or the points' colour, on a black-and-tan whose cream front
+    # measured warm (lite.tan_cream)
+    if base not in WARM_BASES and str(appearance.get("cream_from") or "").lower() in WARM_BASES:
+        base = str(appearance["cream_from"]).lower()
     uses_cream = any(str(e.get("color", "")).lower() == "cream" or str(e.get("gradient_to", "")).lower() == "cream"
                      for e in appearance.get("region_colors") or [])
     if base not in WARM_BASES or not uses_cream:
@@ -806,7 +855,71 @@ def ramps_from_measurement(
     return palette, report
 
 
+# The warm ramps' chroma from the coat's (photo_colours.coat_chroma), hue and
+# lightness left as the cells and the table set them. Rendered, a texture's
+# warm fur measures COAT_RENDER_CHROMA of its own chroma by the same
+# measure (22 shelter and eval dogs: median 0.89, quartiles 0.85-0.90), so
+# the ramp's mid takes the coat's chroma over that, within COAT_CHROMA_SHARE
+# of the table's. Rendered and set beside their photos, 8 of the 22 came
+# closer (a red papillon's dull brown, two muted shih tzu-type fawns, two
+# deep red jindos, a golden), none went further; following the photo's hue
+# as well turned four of them pink (its warm light read as a redder coat),
+# and its lightness the eval e20 khaki (the photo's exposure).
+# Only under a neutral border, and with enough warm fur: COAT_MIN_PIXELS of
+# it and COAT_MIN_SHARE of the animal (a black-and-tan's points are too few
+# and too mixed with the black).
+COAT_RENDER_CHROMA = 0.89
+COAT_CHROMA_SHARE = (0.55, 1.5)
+COAT_MIN_PIXELS = 1500
+COAT_MIN_SHARE = 0.1
+
+
+def chroma_from_coat(appearance: dict, palette: dict[str, tuple[str, str, str]],
+                     coat: dict | None) -> tuple[dict[str, tuple[str, str, str]], dict | None]:
+    """(palette, report): every warm ramp's a*/b* scaled by one factor, the
+    one that puts the most-used warm name's mid at the coat's chroma."""
+    from .fur import hex_to_linear, to_srgb
+    from .projection import lab_to_linear, linear_to_lab
+
+    if (not coat or coat.get("border") != "neutral" or int(coat.get("pixels") or 0) < COAT_MIN_PIXELS
+            or float(coat.get("share") or 0.0) < COAT_MIN_SHARE):
+        return palette, None
+    used: dict[str, int] = {}
+    for entry in [*(appearance.get("region_colors") or []), *(appearance.get("markings") or [])]:
+        # not the ears: a cream dog's brown ears (lite.dark_ears_on_light)
+        # named the coat tan and took the cream body's chroma (shelter
+        # chihuahua 1, its ears a grey taupe)
+        if entry.get("region") == "ears_inner" or entry.get("type") == "ears":
+            continue
+        name = str(entry.get("color", "")).lower()
+        if name in MEASURED_NAMES:
+            used[name] = used.get(name, 0) + 1
+    if not used:
+        return palette, None
+    main = max(used, key=lambda n: (used[n], n))
+
+    def labs(stops: tuple[str, str, str]) -> list[np.ndarray]:
+        return [linear_to_lab(hex_to_linear(stop)[None, None, :])[0, 0] for stop in stops]
+    table = float(np.hypot(*labs(FUR_PALETTE[main])[1][1:]))
+    mid = float(np.hypot(*labs(palette.get(main) or FUR_PALETTE[main])[1][1:]))
+    if table < 1e-3 or mid < 1e-3:
+        return palette, None
+    target = float(np.clip(float(coat["chroma"]) / COAT_RENDER_CHROMA,
+                           COAT_CHROMA_SHARE[0] * table, COAT_CHROMA_SHARE[1] * table))
+    scale = target / mid
+    out = dict(palette)
+    for name in used:
+        moved = []
+        for lab in labs(palette.get(name) or FUR_PALETTE[name]):
+            lab = np.array([lab[0], lab[1] * scale, lab[2] * scale], dtype=np.float32)
+            rgb = to_srgb(lab_to_linear(lab[None, None, :])[0, 0])
+            moved.append(_rgb_to_hex(tuple(int(round(float(np.clip(c, 0, 1)) * 255)) for c in rgb)))
+        out[name] = tuple(moved)
+    return out, {"coat": coat, "main": main, "chroma": [round(mid, 1), round(target, 1)], "scale": round(scale, 2),
+                 "names": sorted(used)}
+
+
 __all__ = [
-    "PhotoStats", "apply_photo_colours", "build_palette", "calibrate_color",
+    "PhotoStats", "apply_photo_colours", "chroma_from_coat", "build_palette", "calibrate_color",
     "chroma_scale", "measure", "palette_for", "photo_colours", "ramps_from_measurement", "relative_chroma",
 ]

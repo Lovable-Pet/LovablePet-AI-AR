@@ -56,6 +56,15 @@ WHITE_LEG_FEATURES = ("white_paws", "white_socks")
 PATCH_PLACE_ANSWERS = ("yes", "no", "unknown")
 PATCH_LARGEST_ANSWERS = ("over_spine", "side", "none", "unknown")
 PATCH_AMOUNT_ANSWERS = ("none", "small", "large", "most", "unknown")
+# The top line of the neck behind a coloured head: the head's colour
+# running on down to the shoulders, or white. Asked as "the back and upper
+# sides of the neck", 2 of 3 white-necked dogs with coloured hanging ears
+# came back head (shelter maltese 6, eval e15). Patches stay off the
+# neck (texture.PATCH_OFF_SOURCES: four of five patched dogs had a white
+# neck), and a parti whose brown head ran down its neck to a white band at
+# the shoulders came out with a white neck under a brown head (shelter
+# maltese 7, user 11-07: "갈색털이 뒷목 거의 덮었는데").
+NAPE_ANSWERS = ("head", "light", "unknown")
 
 BODY_COLOURS_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -66,8 +75,9 @@ BODY_COLOURS_SCHEMA: dict[str, Any] = {
             "description": "The colour of MOST of the front of the chest, from the throat under the chin down "
                            "to between the front legs: dark (black, chocolate or grey), dark_tan_spots (black "
                            "or chocolate, broken only by two small tan spots on the breastbone), tan (any warm "
-                           "brown, red or fawn - also when a small white spot sits on it), cream, white, "
-                           "unknown (not visible).",
+                           "brown, red or fawn - also when a small white spot sits on it), cream, white "
+                           "(only when white covers most of the front - a small white spot or a few white "
+                           "hairs on a dark or tan chest is dark or tan), unknown (not visible).",
         },
         "belly": {
             "type": "string",
@@ -123,14 +133,23 @@ BODY_COLOURS_SCHEMA: dict[str, Any] = {
                            "thighs, in front of the tail? yes, no (also when there are no patches), unknown "
                            "(the hindquarters are not visible).",
         },
+        "nape": {
+            "type": "string",
+            "enum": list(NAPE_ANSWERS),
+            "description": "The top line of the neck, from the back of the skull to the shoulders - not the "
+                           "ears (long ears hanging over the neck do not count): head (the head's colour carries "
+                           "on along the top of the neck to the shoulders or most of the way - also for a dog "
+                           "coloured all over), light (white or near-white there - the colour stops at the skull "
+                           "and the ears), unknown (not visible).",
+        },
         "note": {"type": "string", "description": "One short phrase on what you saw, or empty."},
     },
     "required": ["chest", "belly", "paws", "back_tipping", "chest_lightness", "patch_amount", "patch_largest",
-                 "patch_rump", "note"],
+                 "patch_rump", "nape", "note"],
     "additionalProperties": False,
 }
 
-BODY_COLOURS_SYSTEM = """You look at a photograph of a dog and name three fur colours.
+BODY_COLOURS_SYSTEM = """You look at a photograph of a dog and name the colours of its body fur.
 
 Answer only from the fur you can see in this picture. Do not reason from
 the breed or from what dogs with this kind of coat usually have.
@@ -138,8 +157,15 @@ the breed or from what dogs with this kind of coat usually have.
 chest: the front of the chest, from the throat under the chin down to
 between the front legs. Name the colour of MOST of that area. A black or
 chocolate chest with two small tan spots on the breastbone is
-dark_tan_spots. A small white spot on a tan chest is still tan. Shading
-and shine on black fur are still dark.
+dark_tan_spots. A small white spot or a few white hairs on a tan chest is
+still tan, on a black chest still dark - white only when white covers most
+of the front. Shading and shine on black fur are still dark.
+
+nape: the top line of the neck, between the back of the skull and the
+shoulders. Look there, not at the ears: coloured ears hanging down over a
+white neck do not make it coloured. head when the head's colour carries on
+along it to the shoulders or most of the way; light when the neck behind
+the skull is white or near-white.
 
 back_tipping: look at the top of the back and neck and compare it with the
 lower flank. clear when the top is plainly greyer or blacker, the hair
@@ -211,8 +237,10 @@ async def read_body_colours(transport: Transport, photo_blocks: list[dict[str, A
                    if r.get("chest") == "cream" and r.get("chest_lightness") in CREAM_SHARE)
     lightness = said.most_common(1)[0][0] if said else None
     tipping, tipping_votes = vote("back_tipping", TIPPING_ANSWERS)
+    nape, nape_votes = vote("nape", NAPE_ANSWERS)
     return chest, belly, paws, {"chest": chest_votes, "belly": belly_votes, "paws": paw_votes,
                                 "back_tipping": tipping, "back_tipping_votes": tipping_votes,
+                                "nape": nape, "nape_votes": nape_votes,
                                 "chest_lightness": dict(said), "cream_share": CREAM_SHARE.get(lightness),
                                 **vote_patches(readings),
                                 "samples": len(readings),
@@ -327,6 +355,15 @@ def apply_body_colours(region_colors: list[dict[str, Any]], markings: list[dict[
         put("underside", CHEST_ROLES[chest], f"belly follows the {chest} chest")
     if paws in PAW_ROLES:
         put("paws", PAW_ROLES[paws], f"paws {paws}")
+    # tan or dark feet under the layout's light legs on a warm coat: the legs
+    # are the coat's colour - an urajiro's cream legs where the photo shows
+    # ginger forelegs and the feet read tan 2 of 2 (shelter chihuahua 9, user
+    # 11-07). The layout's light paws stay, the toes under the coloured leg
+    # (simple.default_gradients)
+    legs = entries.get("legs_lower")
+    if (paws in ("tan", "dark") and legs is not None and str(legs.get("source", "")).startswith("pattern_default")
+            and color_family(str(legs.get("color", ""))) == "light" and color_family(base) == "point"):
+        put("legs_lower", "base", f"legs follow the {paws} feet")
     return changed
 
 

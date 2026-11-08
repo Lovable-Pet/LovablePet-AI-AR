@@ -88,6 +88,8 @@ FACE_REGIONS = frozenset(_FACE_REGIONS)
 
 # How much of a region a "partial" coverage paints.
 PARTIAL_KEEP = 0.55
+# compose_body: below this summed claim a texel is left to the base coat
+COVER_FLOOR = 0.1
 
 # How much of its region a marking covers, by reported size (no landmark).
 MARKING_AREA = {"small": 0.15, "medium": 0.35, "large": 0.60}
@@ -332,6 +334,11 @@ BRINDLE_MOTTLE_SIGMA_M = 0.0025
 BRINDLE_MOTTLE_OPACITY = 0.35
 BRINDLE_MOTTLE_STREAK = 0.7
 BRINDLE_MOTTLE_COLOUR = "tan"
+# A steel-grey "blue and tan" saddle (lite.steel_saddle) is grizzled: the
+# base's tan hairs through the grey, the dark brindle's mottle at this
+# opacity. Flat grey read as a grey blanket over a tan dog (shelter
+# maltese 10, its back grey and tan hair in the photo).
+GRIZZLE_OPACITY = 0.45
 MERLE_COVER = 0.35
 # ... and fur painted lighter than this (CIE L*, faded over the range) is left
 # without them: the white markings (cream mid L 88, white 93; fawn 68, tan 56)
@@ -1090,11 +1097,24 @@ def compose_body(
     inferred = [e for e in entries if e not in observed]
 
     claimed = np.zeros_like(gray)
+    cover = np.zeros_like(gray)
     for entry in entries:
         mask = masks.get(entry.get("region"))
         if mask is not None:
             claimed = np.maximum(claimed, mask)
+            cover = cover + mask
     unclaimed = 1.0 - claimed
+    # A texel the regions claim only in part (their masks summing under 1)
+    # had the base coat under the rest: at every island's edge, where the
+    # masks fade into the empty gutter, and on the small shards of fur
+    # whose masks are faint all over. On a white dog with a black head that
+    # was a grey rim round every black island and white shards at the ear
+    # roots, read across each seam as white streaks in the black ears
+    # (shelter chihuahua 10: the ear island's edge texels luma 84 against
+    # 25 inside, skull mask 0.86 there). Such texels take the regions' own
+    # colours, the masks scaled up to sum to one; where they claim under
+    # COVER_FLOOR the texel is the base's (nothing painted it).
+    lift = np.where(cover > COVER_FLOOR, 1.0 / np.clip(cover, COVER_FLOOR, 1.0), 1.0).astype(np.float32)
 
     composed = paint_region(
         gray, base_color,
@@ -1136,6 +1156,7 @@ def compose_body(
         mask = masks.get(entry.get("region"))
         if mask is None:
             continue
+        mask = np.clip(mask * lift, 0.0, 1.0)
         order += 1
         region, color_name = entry.get("region"), entry.get("color", "")
 
@@ -1417,6 +1438,21 @@ def compose_body(
             # blanket from the withers to the rump)
             blob = _select(mask, field, PATCH_AREA.get(size, PATCH_AREA["medium"]), domain=trunk)
             if trunk is not None:
+                # no lone round spot beside the patches: its area goes back
+                # to them (PATCH_MIN_PART)
+                for _ in range(PATCH_SPOT_PASSES):
+                    spots = _patch_spots(blob, landmarks.position, surface)
+                    if spots is None:
+                        break
+                    # lowered round it as well, smoothly on the surface: cut
+                    # out alone, its shoulders came back as a grey ring round
+                    # a white hole on the next cut
+                    drop = smooth_on_surface(spots.astype(np.float32), landmarks.position, surface, PATCH_SIGMA_M,
+                                             stride=max(SURFACE_STRIDE,
+                                                        round(SURFACE_STRIDE * PATCH_SIGMA_M / 0.035)))
+                    field = field - PATCH_SPOT_DROP * np.clip(np.maximum(drop * 4.0, spots), 0.0, 1.0)
+                    blob = _select(mask, field, PATCH_AREA.get(size, PATCH_AREA["medium"]), domain=trunk)
+                    placed.append(f"patches: dropped a spot of {int(spots.sum())} texels")
                 # no pale half-painted spots: where the field rose near the
                 # cut but not past it, a faint grey or tan smudge (e13's
                 # shoulder, e15's back). Only the edge band of a patch with a
@@ -1426,6 +1462,37 @@ def compose_body(
                                          PATCH_CORE_REACH_M, stride=PATCH_CORE_STRIDE)
                 blob = blob * np.clip(core / PATCH_CORE_NEAR, 0.0, 1.0)
             placed.append(f"patches:{region}")
+        if blob is None and marking_type == "ears":
+            # the backs of the ears (lite.dark_ears_on_light): the template's
+            # ears_outer source mask inside the skull, softened on the
+            # surface so the ear root is not a cut line
+            path = masks.dir.parent / "masks_source" / "ears_outer.png"
+            if not path.exists():
+                continue
+            ear = (np.asarray(Image.open(path).convert("L").resize((mask.shape[1], mask.shape[0]), Image.NEAREST))
+                   > 127).astype(np.float32)
+            if (landmarks is not None and landmarks.position is not None
+                    and landmarks.position.shape[:2] == mask.shape[:2]):
+                surface = landmarks.valid if landmarks.valid is not None else mask > -1
+                ear = smooth_on_surface(ear, landmarks.position, surface, EARS_SMOOTH_M,
+                                        stride=max(SURFACE_STRIDE, round(SURFACE_STRIDE * EARS_SMOOTH_M / 0.035)))
+                ear = np.clip((ear - 0.5) * 2.5 + 0.5, 0.0, 1.0)
+            blob = ear * (mask > 0.5)
+            if float((blob > 0.5).sum()) < 30:
+                continue
+            placed.append("ears:skull")
+        if blob is None and marking_type == "nape" and landmarks is not None:
+            weight = _nape_weight(masks, landmarks, mask.shape)
+            if weight is not None and float((weight > 0.5).sum()) >= 30:
+                # smoothed over the surface so a UV seam does not cut it, and
+                # broken a little by the noise like any coat edge
+                surface = landmarks.valid if landmarks.valid is not None else mask > -1
+                weight = smooth_on_surface(weight, landmarks.position, surface, NAPE_SMOOTH_M,
+                                           stride=max(SURFACE_STRIDE, round(SURFACE_STRIDE * NAPE_SMOOTH_M / 0.035)))
+                blob = np.clip((weight - 0.5) * 2.5 + 0.5 + (noise - 0.5) * 0.4, 0.0, 1.0) * (mask > 0.5)
+                placed.append("nape:back")
+            else:
+                continue
         if blob is None and marking_type == "blaze" and landmarks is not None:
             # down the top of the muzzle as well: a blaze runs from the nose
             # up between the eyes, and on the skull alone it was a white bar
@@ -1605,6 +1672,43 @@ PATCH_PLACE_BIAS = 0.5
 PATCH_SIDE_FADE_M = 0.03
 
 
+# A part of the patches standing alone on the surface (its texels joined in
+# PATCH_SPOT_CELL_M cells, neighbouring cells one part, so a seam does not
+# split a patch) with under PATCH_MIN_PART of all their texels is a spot:
+# the smoothed field's lesser peaks came out as round polka dots beside the
+# real patches - a black disc on a white flank beside the rump patch (shelter
+# chihuahua 10, 13 % of the patches; user 11-07 "이상한데"). Its field is
+# lowered by PATCH_SPOT_DROP and the area chosen again, so the patches keep
+# their size; up to PATCH_SPOT_PASSES times.
+PATCH_MIN_PART = 0.2
+PATCH_SPOT_CELL_M = 0.015
+PATCH_SPOT_DROP = 10.0
+PATCH_SPOT_PASSES = 3
+
+
+def _patch_spots(blob: np.ndarray, position: np.ndarray, valid: np.ndarray) -> np.ndarray | None:
+    """The texels of the patches' small lone parts, or None when there are none."""
+    on = (blob > 0.5) & valid
+    if on.sum() < 100:
+        return None
+    points = position[on]
+    cells = np.floor((points - points.min(axis=0)) / PATCH_SPOT_CELL_M).astype(np.int64)
+    grid = np.zeros(tuple(cells.max(axis=0) + 1), dtype=bool)
+    grid[tuple(cells.T)] = True
+    labels, count = ndimage.label(ndimage.binary_dilation(grid))
+    if count < 2:
+        return None
+    part = labels[tuple(cells.T)]
+    sizes = np.bincount(part, minlength=count + 1)
+    small = sizes[part] < PATCH_MIN_PART * len(part)
+    if not small.any():
+        return None
+    spots = np.zeros(blob.shape, dtype=bool)
+    rows, cols = np.nonzero(on)
+    spots[rows[small], cols[small]] = True
+    return spots
+
+
 def _patch_off_trunk(masks: "MaskLibrary", landmarks: Any, shape: tuple[int, ...]) -> np.ndarray:
     """1 on the neck and the tail (PATCH_OFF_SOURCES and behind the hind
     feet), 0 on the trunk."""
@@ -1618,6 +1722,82 @@ def _patch_off_trunk(masks: "MaskLibrary", landmarks: Any, shape: tuple[int, ...
     if hind:
         off[landmarks.position[..., 1] > float(np.mean(hind)) + PATCH_TAIL_BEHIND_M] = 1.0
     return off
+
+
+# The nape (body_colours.NAPE_ANSWERS head): the head's colour down the back
+# and upper sides of the neck, from behind the skull to the withers.
+# Measured round the neck's own axis (the collar ring's ends): a
+# texel's direction from the axis against the axis's upward perpendicular -
+# 1 on the crest, 0 at the middle of the side, -1 under the throat - full
+# from NAPE_FROM_COS + NAPE_FADE_COS, none below NAPE_FROM_COS, and fading
+# out over the last NAPE_END_FADE of the way to the withers, within
+# NAPE_RADIUS_M of the axis. Sliced by height along the body instead, the
+# near-upright neck's crest came out white between two brown side stripes.
+# A brown head running down the neck to a white band at the shoulders
+# (shelter maltese 7).
+NAPE_FROM_COS = -0.35
+NAPE_FADE_COS = 0.3
+NAPE_END_FADE = 0.3
+# 0.14 left a white ring round the back of the skull at the ear roots: the
+# collar's head end slants, and the crown's back stands 14-16 cm off the
+# axis's end (shelter maltese 7); the end fade keeps it off the trunk
+NAPE_RADIUS_M = 0.2
+NAPE_SMOOTH_M = 0.015
+# the ears' backs (marking "ears"): their edge at the ear root softened over
+# about this much of the surface
+EARS_SMOOTH_M = 0.008
+# the share of the collar's length at each end averaged for the axis' ends
+NAPE_RING_SHARE = 0.15
+
+
+def _nape_weight(masks: "MaskLibrary", landmarks: Any, shape: tuple[int, ...]) -> np.ndarray | None:
+    """0..1 per texel on the back and upper sides of the neck, or None when
+    the template lacks its geometry or a collar mask."""
+    if landmarks.position is None:
+        return None
+    position = landmarks.position
+    if position.shape[:2] != tuple(shape[:2]):
+        return None
+
+    def source(name: str) -> np.ndarray:
+        path = masks.dir.parent / "masks_source" / f"{name}.png"
+        if not path.exists():
+            return np.zeros(shape[:2], dtype=bool)
+        return np.asarray(Image.open(path).convert("L").resize((shape[1], shape[0]), Image.NEAREST)) > 127
+
+    def region(name: str) -> np.ndarray:
+        mask = masks.get(name)
+        return mask > 0.5 if mask is not None else np.zeros(shape[:2], dtype=bool)
+
+    valid = landmarks.valid if landmarks.valid is not None else np.ones(shape[:2], dtype=bool)
+    neck = (source("collar") | region("back")) & valid & ~source("throat") & ~region("chest")
+    if not neck.any():
+        return None
+    # the neck's own centre line: from the middle of the collar ring's head
+    # end to the middle of its body end (the ear bases and the withers are
+    # both on the crest - an axis through them lay along the crest itself)
+    collar = source("collar") & valid
+    if collar.sum() < 100:
+        return None
+    y = position[..., 1]
+    near, far = np.percentile(y[collar], [5, 95])
+    reach = NAPE_RING_SHARE * (far - near)
+    head = position[collar & (y < near + reach)].mean(axis=0)
+    withers = position[collar & (y > far - reach)].mean(axis=0)
+    head[0] = withers[0] = 0.0
+    axis = withers - head
+    length2 = float(axis @ axis)
+    t = np.clip(((position - head) @ axis) / length2, 0.0, 1.0)
+    radial = position - (head + t[..., None] * axis)
+    up = np.array([0.0, -axis[2], axis[1]], dtype=np.float32)
+    up = up if up[2] > 0 else -up
+    up /= float(np.linalg.norm(up))
+    distance = np.linalg.norm(radial, axis=-1)
+    cos = (radial @ up) / np.maximum(distance, 1e-6)
+    weight = (neck * (distance < NAPE_RADIUS_M)
+              * np.clip((cos - NAPE_FROM_COS) / NAPE_FADE_COS, 0.0, 1.0)
+              * np.clip((1.0 - t) / NAPE_END_FADE, 0.0, 1.0))
+    return weight.astype(np.float32)
 
 
 def _patch_place_weight(landmarks: Any, inside: np.ndarray, places: list[str],
@@ -1829,6 +2009,22 @@ def apply_overlay(composed: np.ndarray, gray: np.ndarray, appearance: dict[str, 
             return composed, None
         weight = weight * float(appearance.get("sable_strength") or 1.0)
         return _blend(composed, paint_region(gray, second, None, palette), weight), overlay
+    if overlay == "grizzle":
+        # a steel-grey saddle's tan hairs (lite.steel_saddle): the dark
+        # brindle's mottle, in the base colour, on the grey regions only
+        if masks is None or landmarks is None or landmarks.position is None:
+            return composed, None
+        grey = np.zeros(gray.shape, dtype=np.float32)
+        for entry in appearance.get("region_colors") or []:
+            mask = masks.get(entry.get("region")) if str(entry.get("color", "")).lower() == "gray" else None
+            if mask is not None:
+                grey = np.maximum(grey, mask)
+        base = str(appearance.get("base_color") or "tan").lower()
+        if not grey.any() or base not in FUR_COLORS:
+            return composed, None
+        weight = (_brindle_mottle(gray.shape, direction, valid, seed, landmarks)
+                  * (GRIZZLE_OPACITY / BRINDLE_MOTTLE_OPACITY) * grey)
+        return _blend(composed, paint_region(gray, base, None, palette), weight), overlay
     if overlay not in ("brindle", "merle"):
         return composed, None
     second = appearance.get("second_color") or ("black" if overlay == "brindle" else "chocolate")
