@@ -300,4 +300,50 @@ def measure_cells(image: Image.Image, readings: list[dict[str, Any]],
     return out
 
 
-__all__ = ["REGION_CELL_SCHEMA", "border_kind", "border_kind_of", "measure_cells", "measure_region_colours"]
+# The coat's chroma from every warm fur pixel of the cut-out, white-balanced
+# by the border as the cells are: fur at least COAT_MIN_CHROMA, of hue
+# COAT_HUE, neither black nor white, its chroma at the COAT_PERCENTILE-th
+# percentile - above the shade's greyed hair and a cream bib's or white
+# face's pale edge, below the glare. A few cells read a golden puppy's coat
+# khaki (11-01) and a red papillon's brown dull (shelter maltese 7, chroma
+# 12 on the model, 21 in its photo); the whole coat's pixels, rendered and
+# compared on 22 dogs, put each coat's chroma where its photo has it
+# (palette.chroma_from_coat).
+COAT_MIN_CHROMA = 10.0
+COAT_HUE = (30.0, 100.0)
+COAT_L = (8.0, 95.0)
+COAT_PERCENTILE = 65
+
+
+def coat_chroma(image: Image.Image, animal_mask: np.ndarray | None) -> dict[str, Any] | None:
+    """{chroma, pixels, share, border} of the photo's warm fur, or None
+    without an animal mask or warm fur."""
+    from scipy import ndimage
+
+    from .palette import _background
+    from .projection import linear_to_lab
+
+    if animal_mask is None or animal_mask.shape != (image.size[1], image.size[0]):
+        return None
+    shown = _shown(image)
+    rgb = np.asarray(shown, dtype=np.float32) / 255.0
+    background = _background(rgb)
+    kind = border_kind(background)
+    illuminant = border_illuminant(background)
+    animal = np.asarray(Image.fromarray(animal_mask.astype(np.uint8) * 255).resize(shown.size, Image.NEAREST)) > 127
+    animal = ndimage.binary_erosion(animal, iterations=ANIMAL_ERODE_PX + 1)
+    if animal.sum() < 500:
+        return None
+    lab = linear_to_lab(to_linear(np.clip(rgb[animal] / np.maximum(illuminant, 1e-3), 0.0, 1.0)))
+    chroma = np.hypot(lab[:, 1], lab[:, 2])
+    hue = np.degrees(np.arctan2(lab[:, 2], lab[:, 1]))
+    warm = ((chroma >= COAT_MIN_CHROMA) & (hue >= COAT_HUE[0]) & (hue <= COAT_HUE[1])
+            & (lab[:, 0] > COAT_L[0]) & (lab[:, 0] < COAT_L[1]))
+    if not warm.any():
+        return None
+    return {"chroma": round(float(np.percentile(chroma[warm], COAT_PERCENTILE)), 1), "pixels": int(warm.sum()),
+            "share": round(float(warm.mean()), 3), "border": kind}
+
+
+__all__ = ["REGION_CELL_SCHEMA", "border_kind", "border_kind_of", "coat_chroma", "measure_cells",
+           "measure_region_colours"]

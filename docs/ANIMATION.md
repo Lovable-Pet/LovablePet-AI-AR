@@ -199,9 +199,28 @@ new THREE.GLTFLoader().load(pet.glbUrl, (gltf) => {
 });
 ```
 
-model-viewer를 쓰면 같은 흐름이 더 짧다(`output/anim3d.html`).
-`mv.animationName = 'sit_down'; mv.play({repetitions: 1})`, 끝나면 `'finished'` 이벤트가 온다.
-클립을 바꿀 때 크로스페이드는 `animation-crossfade-duration` 속성으로 정한다(기본 300ms).
+model-viewer로도 같은 흐름을 만들 수 있다(`output/anim3d.html`의 `start`·`once`·`perform`). 다만 두 가지를 꼭 지켜야 한다.
+
+- **`play({repetitions})`는 이름을 바꾼 뒤 `await mv.updateComplete` 다음에 부른다.** model-viewer는 새 `animationName`을
+  다음 업데이트(지금 코드가 끝난 뒤)에 무한 반복으로 튼다. 그래서 `mv.animationName = 'sit_down'; mv.play({repetitions: 1})`처럼
+  붙여 쓰면 횟수가 덮어써져 `'finished'`가 영영 오지 않는다. 첫 명령 뒤 버튼이 전부 먹통이 되던 원인이 이것이다.
+- **한 번 재생한 클립은 마지막 프레임에 멈춘 채 남는다.** 다음에 다시 틀면 바로 끝나 버린다. 그래서 전환이 끝나 루프로 넘어갈 때
+  `mv.currentTime = 0`(모든 클립을 처음으로)을 해 둔다. 이 리셋은 이름을 바꾸기 **전에** 해야 한다(크로스페이드가 이 시계로 돈다).
+  넘어갈 때 크로스페이드는 0으로 한다. 전환의 마지막 프레임이 루프의 첫 프레임과 같아서 이음새가 없고, 리셋된 전환 클립이 페이드아웃되며
+  첫 자세로 번쩍이지도 않는다. `bark`·`play_dead`는 끝 자세가 루프와 조금 달라서 300ms로 넘어간다(둘 다 시작=끝이라 번쩍이지 않음).
+
+```js
+async function start(mv, clip, {times = 0, fade = 300, reset = false} = {}) {
+  mv.animationCrossfadeDuration = fade;
+  if (reset) mv.currentTime = 0;                        // 이름을 바꾸기 전에
+  mv.animationName = clip;
+  await mv.updateComplete;                              // 새 이름을 (무한 반복으로) 튼 다음에
+  mv.play(times ? {repetitions: times} : undefined);    // 횟수
+}
+// 앉아: 루프에서 전환을 한 번 (지금 루프 자세에서 300ms 크로스페이드) → 끝나면 앉기 루프로 바로
+await new Promise((done) => { mv.addEventListener('finished', done, {once: true}); start(mv, 'sit_down', {times: 1}); });
+await start(mv, 'sitting', {reset: true, fade: 0});
+```
 
 ## 5. 음성 명령 (Web Speech API)
 

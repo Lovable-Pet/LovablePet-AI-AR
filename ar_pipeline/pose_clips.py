@@ -212,12 +212,21 @@ SETTLE_FRONT_MAX_DEG = 25.0
 # and its hips sat up on its folded hind legs, the rump 12 cm off the floor
 # (the left knee under the belly, folded as far as a knee goes, the paws
 # under the hips): rolled this much further onto the hip it lies on, as a
-# dog lies at ease (hips 34 deg round from the chest, the back sharing it),
-# the upper hind leg turned in after it so its paw stays down - rump 7 cm
-# (15 deg: 9 cm; the lower leg swung out instead went into the floor and
-# lifted it to 13-14)
-DOWN_HIP_ROLL_DEG = 25.0
-DOWN_UPPER_HIND_IN_DEG = 15.0
+# dog lies at ease, the upper hind leg turned in after it so its paw stays
+# down. It was 25 deg and 15 (rump 7 cm): the hips lay 39 deg round from the
+# squared chest, the upper thigh stood up off them and its paw turned pads
+# out, and before and after the roll the hips read as wrung off the back
+# (user, 11-06: "엎드려구르기 ... 골반이 왼쪽으로 틀어져있는것같은데"). Now
+# the capture's own 15 deg, the hip joint 2 cm higher than the sphinx's
+# (0.7 at 25)
+DOWN_HIP_ROLL_DEG = 0.0
+DOWN_UPPER_HIND_IN_DEG = 0.0
+# the sphinx (crouch) is squared up from the down as it lay rolled 25 deg,
+# its upper hind leg in 15: the lying clip and the changes of pose to and
+# from it were built on that sphinx and looked over; squared from the down
+# as it now lies, its tail came out 44 deg and its right hip 12 off them,
+# and the roll's first frame off the lying clip's
+SPHINX_DOWN_DEG = (25.0, 15.0)
 # ROLLING OVER from the down, as a dog (and the shiba's clip) does it: over
 # onto the side the down already lies on, curled into a ball - the back
 # rounded, the rump tucked under, the chin in toward the chest and the head
@@ -258,8 +267,16 @@ ROLL_SRC_S = (0.33, 1.42)
 # the hock 100 - the paw under the thigh: folded less (the knees 90-120 deg,
 # the hocks 55-65), the hind legs unfolded as the dog went over and stuck up
 # off it stiff (user, 11-06: "구르기 뒷발좀 자연스럽게 … 뒤틀리지않았나").
-TUCK_LEGS = {"LB": ((80.0, 0.35), (-50.0, 0.15), (50.0, 0.05), (75.0, 0.0)),
-             "RB": ((72.0, 0.3), (-55.0, 0.15), (45.0, 0.05), (70.0, 0.0)),
+# The hind paws hang curled from the hock, the toes 30-35 deg back from the
+# hock's line (58-63 from standing, where they are 28 forward of it): carried
+# forward of it as standing has them, their soles faced the dog's front and
+# then the floor's, and from the front, as it came over onto its other side
+# and back onto its belly, the near hind paw rose with its sole turned out
+# (user, 11-06: "엎드려 구르기할때 왼쪽 발바닥 보이게 왜 드는거야자꾸?" -
+# from the front-left, soles shown lifted 0.62 s on its side and 0.12 coming
+# back, now 0.42 and 0.04)
+TUCK_LEGS = {"LB": ((80.0, 0.35), (-50.0, 0.15), (50.0, 0.05), (15.0, 0.0)),
+             "RB": ((72.0, 0.3), (-55.0, 0.15), (45.0, 0.05), (15.0, 0.0)),
              "LF": ((-20.0, 0.15), (75.0, 0.1), (-30.0, 0.0), (-60.0, 0.0)),
              "RF": ((-10.0, 0.12), (85.0, 0.1), (-15.0, 0.0), (-50.0, 0.0))}
 # rolling over, the folded legs hang loose: each swung about the body's
@@ -963,6 +980,32 @@ def even_back(sk: Skeleton, pose: Pose) -> None:
     shift(sk, pose, at - sk.fk(pose)[chest][:3, 3])
 
 
+def square_hips(sk: Skeleton, pose: Pose, share: float = 1.0, untwist: float = 0.0) -> None:
+    """The hips turned back in line behind the chest: the rump's swing aside
+    (about the chest's up) undone `share` of the way, and its roll about the
+    body's length against the chest `untwist` of the way, the back sharing
+    the turn out (even_back). A turn about the up keeps every point's height
+    as it was."""
+    if share < 1e-6 and untwist < 1e-6:
+        return
+    w = sk.fk(pose)
+    pelvis, chest = sk.j["pelvis_jnt"], sk.j["chest_jnt"]
+    b_hips, b_chest = body_frame(sk, w, pelvis), body_frame(sk, w, chest)
+
+    def about(a: np.ndarray, b: np.ndarray, axis: np.ndarray) -> float:
+        """degrees from a to b about axis, both laid off it"""
+        a, b = a - axis * (a @ axis), b - axis * (b @ axis)
+        return float(np.degrees(np.arctan2(np.cross(a, b) @ axis, a @ b)))
+
+    up = b_chest @ UP
+    b_hips = rotm(up, -share * about(b_chest @ FWD, b_hips @ FWD, up)) @ b_hips
+    if untwist > 1e-6:
+        ahead = b_hips @ FWD
+        b_hips = rotm(ahead, -untwist * about(b_chest @ LEFT, b_hips @ LEFT, ahead)) @ b_hips
+    set_world(sk, pose, w, pelvis, b_hips @ rot_of(sk.rest[pelvis]))
+    even_back(sk, pose)
+
+
 def hinge(a: np.ndarray, b: np.ndarray, ref: np.ndarray, last: np.ndarray | None = None) -> np.ndarray:
     """The axis a joint bends about from bone direction `a` to `b`, on the
     side of `ref` - its axis as the bone above carries it (bent the other
@@ -1269,15 +1312,16 @@ def limit_hinges(sk: Skeleton, pose: Pose, leg: str) -> None:
             turn(sk, pose, chain[j + 1], n, float(np.clip(fix, -HINGE_FIX_MAX_DEG, HINGE_FIX_MAX_DEG)))
 
 
-def key_down(sk: Skeleton, poses: dict) -> Pose:
+def key_down(sk: Skeleton, poses: dict, hip_roll_deg: float = DOWN_HIP_ROLL_DEG,
+             upper_in_deg: float = DOWN_UPPER_HIND_IN_DEG, fold_hind_legs: bool = True) -> Pose:
     pose = captured(sk, poses, "down")
     side = roll_side(sk, pose)
     pelvis = sk.j["pelvis_jnt"]
     # further onto the hip it lies on, the upper hind leg in after it (DOWN_HIP_ROLL_DEG)
-    turn(sk, pose, pelvis, body_frame(sk, sk.fk(pose), pelvis) @ FWD, -side * DOWN_HIP_ROLL_DEG)
+    turn(sk, pose, pelvis, body_frame(sk, sk.fk(pose), pelvis) @ FWD, -side * hip_roll_deg)
     even_back(sk, pose)
     upper = sk.leg("RB" if side > 0 else "LB")[0]
-    turn(sk, pose, upper, body_frame(sk, sk.fk(pose), pelvis) @ FWD, side * DOWN_UPPER_HIND_IN_DEG)
+    turn(sk, pose, upper, body_frame(sk, sk.fk(pose), pelvis) @ FWD, side * upper_in_deg)
     for leg in LEGS:
         untwist_leg(sk, pose, leg)
     # the hind hocks and paws bending as hinges (the captured left hind foot
@@ -1294,6 +1338,24 @@ def key_down(sk: Skeleton, poses: dict) -> Pose:
     # 몸, 고개가 비틀려있는데")
     pose = square(sk, pose, sk.subtree(sk.j["chest_jnt"]))
     even_back(sk, pose)
+    if fold_hind_legs:
+        # the hind legs folded under it as the sphinx folds them (fold_hind:
+        # the knee by the flank, the hock on the floor beside the hip, the
+        # metatarsus and paw forward along it), only the hips rolled. The
+        # captured ones lay out to the side it does not lie on: the one it
+        # lies on had its hock opened to 118 deg and up 7 cm (the sphinx's:
+        # 166, 5 cm), the shin and metatarsus standing in a Z off the paw,
+        # the leg turned 42 deg about its length against the hips; the other
+        # slid 10 cm out from under the rump and 5 cm up. Going from the
+        # sphinx into it, just before the roll, the dog put a hind foot out
+        # to its side and lifted a heel as if to spring (user, 11-06:
+        # "맨처음에 걍 엎드려있다가 왼쪽 뒷다리 들고 도는데 왼쪽 뒷다리가
+        # 기괴하다니까?", "구르기 시작하기 직전에 발을 왼쪽으로 잠깐 뺀다니까
+        # 이거 근데 기괴하게 생겼다고")
+        ground(sk, pose, support(sk))
+        for leg in ("LB", "RB"):
+            on_floor(sk, pose, leg, lambda p, dy, leg=leg: fold_hind(sk, p, leg, 0.0, dy=dy,
+                                                                     knee_up_deg=CROUCH_KNEE_UP_DEG))
     settle_front(sk, pose)
     face_front(sk, pose)
     # the paws on the floor flat, pads down (laid near level, the forepaws'
@@ -1369,7 +1431,8 @@ def solve_keys(sk: Skeleton) -> dict[str, Pose]:
     # a dog rolls from lying on one hip, over onto that side)
     curl = key_curl(sk, down)
     keys = {"stand": key_stand(sk), "sit": sit, "down": down, "side": key_side(sk, poses),
-            "curl": curl, "tuck": key_tuck(sk, curl), "shake": key_shake(sk, sit), "sphinx": crouch(sk, down)}
+            "curl": curl, "tuck": key_tuck(sk, curl), "shake": key_shake(sk, sit),
+            "sphinx": crouch(sk, key_down(sk, poses, *SPHINX_DOWN_DEG, fold_hind_legs=False))}
     keys["sit"].pitch = pitch                                   # for the report
     return keys
 
@@ -1538,8 +1601,8 @@ CLIPS = {
     "sitting": [Hold("sit", 0.0, 12.0), Hold("sit", 12.0, 24.0, src_t0=0.0, mirror=True)],
     "shake": [Hold("sit", 0.0, 6.5)],
     # from lying square (the lying clip's sphinx): the hips go over onto
-    # their side and the hind legs out to the other (a dog rolls from lying
-    # on one hip; 0.6 s), the legs fold, it rolls over (the shiba's roll),
+    # their side, the hind legs kept folded under it (a dog rolls from lying
+    # on one hip; 0.6 s; see key_down), the legs fold, it rolls over (the shiba's roll),
     # the legs unfold, and back square - held in the roll's down before and
     # after (lie_flop and lie_square to and from the lying clip), the dog lay
     # crooked for 6 s with a hind paw turned over out to the side (user,
@@ -2311,8 +2374,10 @@ def build_captured(sk: Skeleton, poses: dict, captured_clips: dict, name: str) -
     chest, chest_rest_y = sk.j["chest_jnt"], sk.rest[sk.j["chest_jnt"]][1, 3]
     hindmost = sk.torso | sk.mask([j for leg in ("LB", "RB") for j in sk.subtree(sk.leg(leg)[1])])
 
-    def base(k: int, bones: dict) -> Pose:
-        """The captured dog's pose at frame k on the template, on the floor."""
+    def base(k: int, bones: dict, upright: float | None = None) -> Pose:
+        """The captured dog's pose at frame k on the template, on the floor;
+        its hips squared `upright` of the way (pose.upright; by default as
+        far as the frame's own lean asks)."""
         pose = sk.rest_pose.copy()
         for i in order:
             set_world(sk, pose, sk.fk(pose), i, turns_by_frame[names[i]][k] @ rot_of(sk.rest[i]))
@@ -2320,6 +2385,18 @@ def build_captured(sk: Skeleton, poses: dict, captured_clips: dict, name: str) -
         # (bent up to 70 and 55 deg at two joints of the back, the leg bones
         # turned up to 107 deg about their length)
         even_back(sk, pose)
+        # the hips in line behind the chest, not swung aside or wrung, until
+        # the dog goes over onto its side (CAPTURED_LEVEL_DEG, as the body is
+        # levelled, and smoothed over time as that is): the captured dog stood
+        # and lay down with its rump swung up to 18 deg to its left and the
+        # hips wrung up to 12 against the chest (user, 11-06: "죽은척 초반에
+        # 뒷다리 그냥 골반이 왼쪽으로 틀어져있는것같은데"); going over, the
+        # hips go first, as they did
+        if upright is None:
+            lo, hi = CAPTURED_LEVEL_DEG
+            upright = float(np.clip((hi - abs(body_roll(sk, sk.fk(pose)))) / (hi - lo), 0.0, 1.0))
+        square_hips(sk, pose, upright, upright)
+        pose.upright = upright
         for leg in LEGS:
             bones[leg] = align_leg(sk, pose, leg, bones.get(leg))
             # (and the hock / wrist and paw bending as hinges: lying on its
@@ -2363,6 +2440,7 @@ def build_captured(sk: Skeleton, poses: dict, captured_clips: dict, name: str) -
     # floor: they hung 8-15 cm up (user, 11-06: "죽은척할때도 다리가 살짝
     # 부자연스럽게 비틀리는데")
     level, lean, bones0 = np.zeros(len(hips)), np.zeros(len(hips)), {}
+    squared = np.zeros(len(hips))                        # how far the hips are squared (base)
     # and how firmly each paw is put on its own side of the body: less as the
     # body goes over onto its side, not at all lying on it; a hind paw also
     # less as the chest comes down (lying on one hip a dog has both hind legs
@@ -2373,6 +2451,7 @@ def build_captured(sk: Skeleton, poses: dict, captured_clips: dict, name: str) -
     lo, hi = CAPTURED_LEVEL_DEG
     for k in range(len(hips)):
         pose = base(k, bones0)
+        squared[k] = pose.upright
         roll = body_roll(sk, sk.fk(pose))
         level[k] = -roll * float(np.clip((hi - abs(roll)) / (hi - lo), 0.0, 1.0))
         pose = levelled(pose, level[k])
@@ -2414,6 +2493,7 @@ def build_captured(sk: Skeleton, poses: dict, captured_clips: dict, name: str) -
             lean[k] = min(need, CAPTURED_LEAN_MAX_DEG)
     from scipy.ndimage import gaussian_filter1d
     level = gaussian_filter1d(level, CAPTURED_SMOOTH_FRAMES, mode="wrap")
+    squared = gaussian_filter1d(squared, CAPTURED_SMOOTH_FRAMES, mode="wrap")
     lean = gaussian_filter1d(lean, CAPTURED_SMOOTH_FRAMES, mode="wrap")
     fore = gaussian_filter1d(fore, 2 * CAPTURED_SMOOTH_FRAMES, mode="wrap")
     hind = gaussian_filter1d(hind, 2 * CAPTURED_SMOOTH_FRAMES, mode="wrap")
@@ -2442,7 +2522,7 @@ def build_captured(sk: Skeleton, poses: dict, captured_clips: dict, name: str) -
     spots: list[dict] = [{} for _ in range(len(hips))]           # where each held paw is held, frame by frame
     head = sk.j["head_jnt"]
     for k in range(len(hips)):
-        pose = levelled(base(k, bones), level[k])
+        pose = levelled(base(k, bones, float(squared[k])), level[k])
         looking = rot_of(sk.fk(pose)[head])
         pose = pitched(sk, pose, lean[k])
         if lean[k] > 0.5:

@@ -340,13 +340,23 @@ def choose_pieces(labels: np.ndarray, sizes: np.ndarray, anchors: list[tuple[flo
 # a person's leg beside the dog is one large piece, not a chain.
 BAR_GAP = 0.03
 BAR_STRIPS = 3
+# With the gate's hint, the second piece must be more than a speck: every
+# photo the gate called "through bars" (7 of ~110 runs) had the dog in front
+# of a cage, crate or fence, cut whole with dust-sized pieces beside it (at
+# most 95 px, 0.03 % of the dog). Chained to it, they bridged the cage's
+# wires into the "animal" (shelter adult jindo 1: a third of the cut was
+# cage) and the colour measurement was skipped (its white coat came out
+# fawn; shelter maltese 4, 9). Bars drawn across a dog cut it into strips of
+# 12-38 % of the largest.
+BAR_PIECE_SHARE = 0.02
 
 
 def bridge_bars(solid: np.ndarray, labels: np.ndarray, sizes: np.ndarray, chosen: int,
                 hint: bool = False) -> np.ndarray | None:
     """The animal's mask with the bars' gaps filled in, or None when the
     pieces do not look cut by bars. With `hint` (the gate saw bars) two
-    chained pieces are enough."""
+    chained pieces are enough, the second at least BAR_PIECE_SHARE of the
+    chosen one."""
     from scipy import ndimage
 
     k = max(3, int(round(BAR_GAP * max(solid.shape)))) | 1   # odd: max then min is a closing
@@ -356,7 +366,8 @@ def bridge_bars(solid: np.ndarray, labels: np.ndarray, sizes: np.ndarray, chosen
     region = groups == int(groups[labels == chosen][0])
     members = [int(m) for m in np.unique(labels[region]) if m > 0]
     large = [m for m in members if sizes[m - 1] > FRAGMENT_SHARE * sizes[chosen - 1]]
-    if len(large) >= BAR_STRIPS or (hint and len(members) > 1):
+    pieces = [m for m in members if sizes[m - 1] >= BAR_PIECE_SHARE * sizes[chosen - 1]]
+    if len(large) >= BAR_STRIPS or (hint and len(pieces) > 1):
         return region
     return None
 

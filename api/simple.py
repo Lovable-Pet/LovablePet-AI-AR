@@ -65,6 +65,7 @@ FEATURES: dict[str, tuple[str, dict[str, str]]] = {
     "cream_bridge": ("a cream blaze along the top of the muzzle", {"muzzle_bridge": "cream"}),
     "cream_cheeks": ("cream cheeks and jaw", {"cheeks": "cream"}),
     "white_cheeks": ("white cheeks and jaw", {"cheeks": "white"}),
+    "gray_cheeks": ("grizzled grey cheeks and jaw", {"cheeks": "gray"}),
     # the inside of the ears, from the face call (face_colours.py); "point"
     # so a red-pointed dog gets red ears, not tan
     "pink_ears": ("pink bare skin inside the ears", {"ears_inner": "pink"}),
@@ -207,6 +208,10 @@ def apply_features(pattern: str, base: str, second: str | None, features: list[s
 # body colour
 LEG_TOP_REACH = (82.0, 100.0)
 LEG_TOP_CAP = 0.75
+# ... and a points-coloured leg on a dark coat, over a longer share: the
+# black comes further down the leg than a white sock's edge
+POINT_LEG_TOP_REACH = (65.0, 100.0)
+POINT_LEG_TOP_CAP = 0.9
 
 
 # a dark muzzle's reach onto the cheeks: percentiles of the cheeks' distance
@@ -265,6 +270,17 @@ def default_gradients(appearance: dict[str, Any]) -> tuple[dict[str, Any], list[
     if color_family(legs.get("color", "")) == "light" and not front_light:
         # the leg's own colour above the sock: the points on a pointed coat, else the base
         fade("legs_lower", legs["color"], points or base, "paw")
+    # points-coloured legs on a dark coat meet the body over the top of the
+    # leg too: cut on the mask's line at the elbow and the hock they were
+    # tan boots under a black body (shelter chihuahua 8, user 11-07: "8번
+    # 다리부분"; the photo's black runs down the outside of the foreleg)
+    legs = entries.get("legs_lower", {})
+    if (color_family(str(legs.get("color", ""))) == "point" and base in FUR_COLORS and color_family(base) == "dark"
+            and str(legs.get("gradient_to") or "none") == "none"):
+        entries["legs_lower"] = {**legs, "gradient_to": base, "gradient_anchor": "paw",
+                                 "gradient_reach": list(POINT_LEG_TOP_REACH), "gradient_cap": POINT_LEG_TOP_CAP,
+                                 "note": f"{legs.get('note', '')} / meets the {base} body at the top".strip(" /")}
+        added.append(f"legs_lower:{legs['color']}->{base}@paw top")
     # the inside of the legs: on a dog whose chest and paws are light the
     # inner and front faces of the legs are that light colour too (the
     # shiba's urajiro; the black-and-tan's tan sits on the outer face of
@@ -277,8 +293,14 @@ def default_gradients(appearance: dict[str, Any]) -> tuple[dict[str, Any], list[
     # the front of the foreleg is the coat - painted cream as well, the
     # forelegs of three of the shelter retriever-types came out cream
     # stockings from elbow to toes where their photos show golden or tan legs.
+    # On a patterned coat only when every sample of the body call saw light
+    # feet: a black-and-tan chihuahua's paws read cream 2 / tan 1 and its tan
+    # forelegs came out white down the front (shelter chihuahua 5, user 11-07
+    # "전체적으로 다시봐봐"; appearance["paws_split"], set by lite)
+    split = bool(appearance.get("paws_split")) and str(appearance.get("pattern", "")).lower() != "solid"
     if (color_family(legs.get("color", "")) != "light" and color_family(chest.get("color", "")) == "light"
-            and color_family(paws.get("color", "")) == "light" and str(legs.get("inner_color") or "") == ""):
+            and color_family(paws.get("color", "")) == "light" and str(legs.get("inner_color") or "") == ""
+            and not split):
         entries["legs_lower"] = {**entries["legs_lower"], "inner_color": chest["color"],
                                  "note": f"{legs.get('note', '')} / inside {chest['color']} like the chest".strip(" /")}
         if str(appearance.get("pattern", "")).lower() == "solid":
@@ -347,7 +369,10 @@ def default_gradients(appearance: dict[str, Any]) -> tuple[dict[str, Any], list[
             # black box across a fawn face
             entries["cheeks"]["gradient_reach"] = list(MASK_CHEEK_REACH)
     ears = entries.get("ears_inner", {})
-    if color_family(ears.get("color", "")) == "point":
+    # not in a light dog's dark ears (lite.dark_ears_on_light): faded to
+    # cream from the base, the brown cup came out cream (shelter chihuahua 1)
+    if (color_family(ears.get("color", "")) == "point"
+            and not str(ears.get("source", "")).startswith("feature:dark_ears")):
         fade("ears_inner", ears["color"], "cream", "ear_base")
     return {**appearance, "region_colors": [entries[r] for r in REGIONS if r in entries]}, added
 
