@@ -315,26 +315,49 @@ COAT_L = (8.0, 95.0)
 COAT_PERCENTILE = 65
 
 
-def coat_chroma(image: Image.Image, animal_mask: np.ndarray | None) -> dict[str, Any] | None:
-    """{chroma, pixels, share, border} of the photo's warm fur, or None
-    without an animal mask or warm fur."""
-    from scipy import ndimage
-
+def _photo_parts(image: Image.Image, animal_mask: np.ndarray | None,
+                 balance: bool = True) -> tuple[np.ndarray, str, np.ndarray] | None:
+    """(the shown photo's RGB, white-balanced by the border unless not
+    `balance`; the border's kind; the animal mask at that size), or None
+    without a mask of the photo's size."""
     from .palette import _background
-    from .projection import linear_to_lab
 
     if animal_mask is None or animal_mask.shape != (image.size[1], image.size[0]):
         return None
     shown = _shown(image)
     rgb = np.asarray(shown, dtype=np.float32) / 255.0
     background = _background(rgb)
-    kind = border_kind(background)
-    illuminant = border_illuminant(background)
+    illuminant = border_illuminant(background) if balance else np.ones(3, dtype=np.float32)
     animal = np.asarray(Image.fromarray(animal_mask.astype(np.uint8) * 255).resize(shown.size, Image.NEAREST)) > 127
+    return np.clip(rgb / np.maximum(illuminant, 1e-3), 0.0, 1.0), border_kind(background), animal
+
+
+def _animal_lab(image: Image.Image, animal_mask: np.ndarray | None,
+                balance: bool = True) -> tuple[np.ndarray, str] | None:
+    """(LAB of every animal pixel, white-balanced by the border unless not
+    `balance`; the border's kind), or None without an animal mask or with
+    too little animal."""
+    from scipy import ndimage
+
+    from .projection import linear_to_lab
+
+    parts = _photo_parts(image, animal_mask, balance)
+    if parts is None:
+        return None
+    rgb, kind, animal = parts
     animal = ndimage.binary_erosion(animal, iterations=ANIMAL_ERODE_PX + 1)
     if animal.sum() < 500:
         return None
-    lab = linear_to_lab(to_linear(np.clip(rgb[animal] / np.maximum(illuminant, 1e-3), 0.0, 1.0)))
+    return linear_to_lab(to_linear(rgb[animal])), kind
+
+
+def coat_chroma(image: Image.Image, animal_mask: np.ndarray | None) -> dict[str, Any] | None:
+    """{chroma, pixels, share, border} of the photo's warm fur, or None
+    without an animal mask or warm fur."""
+    read = _animal_lab(image, animal_mask)
+    if read is None:
+        return None
+    lab, kind = read
     chroma = np.hypot(lab[:, 1], lab[:, 2])
     hue = np.degrees(np.arctan2(lab[:, 2], lab[:, 1]))
     warm = ((chroma >= COAT_MIN_CHROMA) & (hue >= COAT_HUE[0]) & (hue <= COAT_HUE[1])
@@ -345,5 +368,117 @@ def coat_chroma(image: Image.Image, animal_mask: np.ndarray | None) -> dict[str,
             "share": round(float(warm.mean()), 3), "border": kind}
 
 
-__all__ = ["REGION_CELL_SCHEMA", "border_kind", "border_kind_of", "coat_chroma", "measure_cells",
-           "measure_region_colours"]
+# A light coat's own colour from the whole animal, for a dog read cream
+# (palette.cream_from_coat). A cell is too small for it: on a tan dog's
+# cream bib it lands on the tan beside it or the shadow under the chin, and
+# that is why cream keeps the table (palette.MEASURED_NAMES). The whole
+# animal has the same shadows, so only its lit half counts - LIGHT_COAT_BAND
+# percentiles of lightness, above the shade and the dark eyes and nose,
+# below the glare - and only fur that is grey or warm (chroma under
+# LIGHT_COAT_GREY_CHROMA, or hue within LIGHT_COAT_HUE): a collar, a blue
+# shirt or a pink tongue is neither. Pale yellow runs to hue 100-110 after
+# the white balance (shelter maltese 3), past COAT_HUE's 100.
+# The lightness is all the lit fur's. The colour is the warm part's alone
+# when it is at least LIGHT_COAT_WARM_SHARE of it: a cream chihuahua's white
+# chest and socks are a third of its lit fur and halved the chroma.
+# The lightness is the camera's as much as the coat's: auto exposure puts
+# what fills the frame near mid grey, and the seven white dogs on the models
+# page read L 55-90 (a white toy poodle 55). So the scene's own light end -
+# the LIGHT_COAT_SCENE_PERCENTILE of everything around the animal - comes
+# with it, and palette.cream_from_coat goes by the fur's distance below it.
+LIGHT_COAT_BAND = (50, 97)
+LIGHT_COAT_GREY_CHROMA = 8.0
+LIGHT_COAT_HUE = (30.0, 115.0)
+LIGHT_COAT_WARM_SHARE = 0.3
+LIGHT_COAT_SCENE_PERCENTILE = 95
+LIGHT_COAT_MIN_SCENE = 2000
+
+
+def light_coat(image: Image.Image, animal_mask: np.ndarray | None) -> dict[str, Any] | None:
+    """{lab, warm_share, pixels, border, scene_l} of the photo's lit fur,
+    or None without an animal mask; scene_l is None when the animal leaves
+    too little of the frame."""
+    from scipy import ndimage
+
+    from .projection import linear_to_lab
+
+    parts = _photo_parts(image, animal_mask)
+    if parts is None:
+        return None
+    rgb, kind, animal = parts
+    inside = ndimage.binary_erosion(animal, iterations=ANIMAL_ERODE_PX + 1)
+    around = ~ndimage.binary_dilation(animal, iterations=ANIMAL_ERODE_PX + 1)
+    if inside.sum() < 500:
+        return None
+    lab = linear_to_lab(to_linear(rgb[inside]))
+    scene_l = None
+    if around.sum() >= LIGHT_COAT_MIN_SCENE:
+        scene = linear_to_lab(to_linear(rgb[around]))
+        scene_l = round(float(np.percentile(scene[:, 0], LIGHT_COAT_SCENE_PERCENTILE)), 1)
+    chroma = np.hypot(lab[:, 1], lab[:, 2])
+    hue = np.degrees(np.arctan2(lab[:, 2], lab[:, 1]))
+    warm = (hue >= LIGHT_COAT_HUE[0]) & (hue <= LIGHT_COAT_HUE[1]) & (chroma < 60)
+    fur = lab[(chroma < LIGHT_COAT_GREY_CHROMA) | warm]
+    if len(fur) < 500:
+        return None
+    low, high = np.percentile(fur[:, 0], LIGHT_COAT_BAND)
+    lit = fur[(fur[:, 0] >= low) & (fur[:, 0] <= high)]
+    lit_warm = lit[np.hypot(lit[:, 1], lit[:, 2]) >= LIGHT_COAT_GREY_CHROMA]
+    share = len(lit_warm) / max(len(lit), 1)
+    colour = np.median(lit_warm if share >= LIGHT_COAT_WARM_SHARE else lit, axis=0)
+    out = [float(np.median(lit[:, 0])), float(colour[1]), float(colour[2])]
+    return {"lab": [round(x, 1) for x in out], "warm_share": round(share, 2), "pixels": int(len(lit)), "border": kind,
+            "scene_l": scene_l}
+
+
+# Sunlight on the fur. A photo cannot tell a yellow dog in white light from
+# a white dog in yellow light, but a coat's own colour stays in the shade
+# while low evening sun colours only what it reaches: shelter jindo puppy 4,
+# recorded 흰색, read chroma 11 in its mid-lit fur and 32 in the sun (the
+# person's arms orange, the floor in shade blue), while a cream chihuahua's
+# reads 15 and 13, a cream maltese's 11 and 10. So the lit fur's
+# colourfulness (chroma over lightness, which shade alone keeps) is set
+# against the mid-lit fur's, on the photo as taken - no white balance, which
+# would scale both. SUN_RATIO and over, with the lit fur at SUN_MIN_CHROMA
+# or more (a white dog's chroma 1 -> 4 is noise, not sun), and the photo's
+# hue and chroma are the light's.
+# Only for a light coat, its mid-lit fur at SUN_MIN_MID_L or more: the two
+# bands must be the same fur. On the shelter sample's 398 cut-outs the test
+# without it flagged six, five of them two things side by side - a
+# black-and-tan's black (mid L 34-43) against its tan, yellow leather gloves
+# and a bare arm beside black dogs (L 31-34), a red coat against its white
+# chest (L 47). With it, puppy 4 alone (L 66); of the 244 light coats, the
+# sixteen nearest the line are indoor or overcast. One sunlit photo in 400
+# is all there is to tune on, so the line is the safe side of it.
+# A grey card does not save such a photo: the floor in the shade is blue
+# while the dog is in the sun, and balancing by it turns the dog yellower.
+SUN_BANDS = ((40, 65), (65, 97))
+SUN_MIN_CHROMA = 10.0
+SUN_RATIO = 1.5
+SUN_MIN_MID_L = 55.0
+
+
+def sun_cast_of(lab: np.ndarray) -> dict[str, Any]:
+    """{ratio, mid_l, mid_chroma, lit_chroma, sunlit} of an animal's LAB
+    pixels (unbalanced)."""
+    lightness = lab[:, 0]
+    medians = []
+    for low, high in SUN_BANDS:
+        a, b = np.percentile(lightness, (low, high))
+        medians.append(np.median(lab[(lightness >= a) & (lightness <= b)], axis=0))
+    (mid_l, *mid_ab), (lit_l, *lit_ab) = medians
+    mid_c, lit_c = float(np.hypot(*mid_ab)), float(np.hypot(*lit_ab))
+    ratio = (lit_c / max(float(lit_l), 1.0)) / max(mid_c / max(float(mid_l), 1.0), 0.02)
+    return {"ratio": round(ratio, 2), "mid_l": round(float(mid_l), 1), "mid_chroma": round(mid_c, 1),
+            "lit_chroma": round(lit_c, 1),
+            "sunlit": bool(lit_c >= SUN_MIN_CHROMA and ratio >= SUN_RATIO and float(mid_l) >= SUN_MIN_MID_L)}
+
+
+def sun_cast(image: Image.Image, animal_mask: np.ndarray | None) -> dict[str, Any] | None:
+    """sun_cast_of the photo's animal, or None without an animal mask."""
+    read = _animal_lab(image, animal_mask, balance=False)
+    return sun_cast_of(read[0]) if read is not None else None
+
+
+__all__ = ["REGION_CELL_SCHEMA", "border_kind", "border_kind_of", "coat_chroma", "light_coat", "measure_cells",
+           "measure_region_colours", "sun_cast", "sun_cast_of"]

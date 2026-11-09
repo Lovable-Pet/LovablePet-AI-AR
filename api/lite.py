@@ -2237,19 +2237,46 @@ async def run_lite(
                                ((log["steps"].get("face") or {}).get("votes") or {}).get("crown"))
     if one_coat:
         log["steps"]["one_coat_colour"] = one_coat
+    # a light coat in low sun (photo_colours.sun_cast): the photo's hue and
+    # chroma are the light's, so the ramps take lightness only
+    sunlit = False
+    if photo_animal is not None:
+        from .photo_colours import sun_cast
+        try:
+            sun = sun_cast(Image.open(original_photo).convert("RGB"), photo_animal)
+        except Exception as exc:  # noqa: BLE001 - read as not sunlit
+            sun = None
+            log["steps"]["sun_error"] = f"{type(exc).__name__}: {exc}"
+        if sun:
+            log["steps"]["sun"] = sun
+            sunlit = bool(sun["sunlit"])
+            if sunlit:
+                print(f"[lite] sunlit: lit fur chroma {sun['lit_chroma']} against {sun['mid_chroma']} in the shade; "
+                      "the coat's hue and chroma stay the table's")
     if measured:
-        palette, palette_report = ramps_from_measurement(appearance, measured)
+        palette, palette_report = ramps_from_measurement(appearance, measured, sunlit=sunlit)
     # ... and their chroma from the whole coat's pixels (palette.chroma_from_coat)
     if photo_animal is not None:
         from .palette import chroma_from_coat
         from .photo_colours import coat_chroma
         try:
-            coat = coat_chroma(Image.open(original_photo).convert("RGB"), photo_animal)
+            coat = None if sunlit else coat_chroma(Image.open(original_photo).convert("RGB"), photo_animal)
         except Exception as exc:  # noqa: BLE001 - the cells' ramps stand
             coat = None
             log["steps"]["coat_chroma_error"] = f"{type(exc).__name__}: {exc}"
         palette, coat_report = chroma_from_coat(appearance, palette or {}, coat)
-        log["steps"]["coat_chroma"] = coat_report or {"skipped": coat}
+        log["steps"]["coat_chroma"] = coat_report or {"skipped": "sunlit" if sunlit else coat}
+        # ... and a cream dog's cream from its lit fur (palette.cream_from_coat)
+        if str(appearance.get("base_color", "")).lower() == "cream":
+            from .palette import cream_from_coat
+            from .photo_colours import light_coat
+            try:
+                light = light_coat(Image.open(original_photo).convert("RGB"), photo_animal)
+            except Exception as exc:  # noqa: BLE001 - the table's cream stands
+                light = None
+                log["steps"]["cream_coat_error"] = f"{type(exc).__name__}: {exc}"
+            palette, cream_report = cream_from_coat(appearance, palette or {}, light, sunlit=sunlit)
+            log["steps"]["cream_coat"] = cream_report or {"skipped": light}
     chocolate = chocolate_crown(appearance.get("region_colors") or [], measured, appearance.get("markings"))
     if chocolate:
         log["steps"].setdefault("face", {})["crown_chocolate"] = chocolate

@@ -790,10 +790,12 @@ def _warm_chroma_shift(mid: np.ndarray, target: np.ndarray, strength: float, max
 def ramps_from_measurement(
     appearance: dict, measured: dict, strength: float = MEASURED_STRENGTH,
     max_shift_l: float = MEASURED_MAX_SHIFT_L, max_shift_ab: float = MEASURED_MAX_SHIFT_AB,
+    sunlit: bool = False,
 ) -> tuple[dict[str, tuple[str, str, str]], dict]:
     """(palette, report): the hued ramps the appearance names, each shifted
     in LAB toward the measured colour of the regions that carry it. Only
-    fully-covered regions count, and only names with a measurement."""
+    fully-covered regions count, and only names with a measurement. A
+    sunlit photo (photo_colours.sun_cast) gives lightness only."""
     from .fur import hex_to_linear, to_srgb
     from .projection import lab_to_linear, linear_to_lab
 
@@ -822,11 +824,12 @@ def ramps_from_measurement(
     # unless the border is neutral.
     kinds = {str(r.get("border", "neutral" if r.get("neutral_border", True) else "natural"))
              for r in (measured or {}).values() if isinstance(r, dict)}
-    tinted = bool(kinds - {"neutral"})
+    tinted = bool(kinds - {"neutral"}) or sunlit
     palette: dict[str, tuple[str, str, str]] = {}
     report: dict = {"skipped": skipped} if skipped else {}
     if tinted:
-        report["hue_kept"] = ("saturated backdrop" if "backdrop" in kinds else "border not neutral") + ": lightness only"
+        report["hue_kept"] = ("sunlit" if sunlit else "saturated backdrop" if "backdrop" in kinds
+                              else "border not neutral") + ": lightness only"
     for name, labs in by_name.items():
         stops = FUR_PALETTE.get(name)
         if not stops:
@@ -919,7 +922,98 @@ def chroma_from_coat(appearance: dict, palette: dict[str, tuple[str, str, str]],
                  "names": sorted(used)}
 
 
+# A dog read cream all over takes its cream from the photo's lit fur
+# (photo_colours.light_coat). The table's cream is L 88, chroma 12 - an
+# ivory that model-viewer shows as white - and one name covered every light
+# coat from near-white to beige: on 11-09 a fawn-beige chihuahua (lit fur
+# L 70, chroma 14) and two dull cream maltese (L 66-77) came out white, while
+# the cream dogs that came out right measure L 83-84, chroma 11.
+# Lightness goes by how far the lit fur sits below the scene's light end
+# (photo_colours.light_coat scene_l), not by its own L: auto exposure puts a
+# frame-filling white dog near mid grey, and the seven solid white dogs on
+# the models page read L 55-90 on their own but at most 12 below the scene's
+# light end. A cream dog more than CREAM_COAT_WHITE_GAP below it is darkened
+# by the rest, up to CREAM_COAT_MAX_DARKEN, never lightened: the beige
+# chihuahua sits 25 below its scene and the cream maltese 24, against the
+# white toy poodle's 12 in a dim photo (its own L 55 under the chihuahua's
+# 70); the dull maltese's 13 leaves it the table's lightness. No
+# scene left around the dog, no darkening. A blown-out window behind a dog
+# would darken it too far; the cap holds that.
+# Chroma moves CREAM_COAT_STRENGTH of the way, the photo's over
+# COAT_RENDER_CHROMA, never below the table's (a cream turned grey reads as
+# dirt) and at most CREAM_COAT_MAX_CHROMA (the table fawn's): a white dog's
+# fur reads chroma up to 15 too, so the reading's name, not the photo,
+# tells white from cream. The hue follows only a clearly coloured photo,
+# CREAM_COAT_HUE_CHROMA times the table's chroma, within CREAM_COAT_HUE:
+# the beige chihuahua's and maltese's hue 75 at chroma 14 rendered pink.
+# Under a border that is no grey card, lightness only, as for the cells
+# (ramps_from_measurement): shelter jindo puppy 4 is recorded 흰색, and its
+# lit fur's chroma 34 was the evening sun - its shaded fur reads chroma 11,
+# the person's arms orange, the floor in shade blue. A true cream keeps its
+# chroma in the shade (the chihuahua 13-15, the maltese 10-11).
+CREAM_COAT_STRENGTH = MEASURED_STRENGTH
+CREAM_COAT_WHITE_GAP = 13.0
+CREAM_COAT_MAX_DARKEN = 18.0
+CREAM_COAT_MAX_CHROMA = 30.0
+CREAM_COAT_HUE = (60.0, 95.0)
+CREAM_COAT_HUE_CHROMA = 1.5
+
+
+def _main_coat_name(appearance: dict) -> str | None:
+    """The colour name most body regions carry (ears and markings aside)."""
+    used: dict[str, int] = {}
+    for entry in appearance.get("region_colors") or []:
+        if entry.get("region") == "ears_inner" or str(entry.get("coverage", "full")) != "full":
+            continue
+        name = str(entry.get("color", "")).strip().lower()
+        used[name] = used.get(name, 0) + 1
+    return max(used, key=lambda n: (used[n], n)) if used else None
+
+
+def cream_from_coat(appearance: dict, palette: dict[str, tuple[str, str, str]],
+                    coat: dict | None, sunlit: bool = False) -> tuple[dict[str, tuple[str, str, str]], dict | None]:
+    """(palette, report): the cream ramp moved toward the photo's lit fur
+    when cream is the dog's base and most-used colour; unchanged otherwise.
+    Lightness only under a border that is no grey card or in the sun."""
+    from .fur import hex_to_linear, to_srgb
+    from .projection import lab_to_linear, linear_to_lab
+
+    if (not coat or not coat.get("lab") or str(appearance.get("base_color", "")).lower() != "cream"
+            or _main_coat_name(appearance) != "cream"):
+        return palette, None
+    stops = palette.get("cream") or FUR_PALETTE["cream"]
+    labs = [linear_to_lab(hex_to_linear(stop)[None, None, :])[0, 0] for stop in stops]
+    mid = labs[1]
+    photo = np.asarray(coat["lab"], dtype=np.float32)
+    scene_l = coat.get("scene_l")
+    below = 0.0 if scene_l is None else float(scene_l) - float(photo[0]) - CREAM_COAT_WHITE_GAP
+    shift_l = -float(np.clip(below, 0.0, CREAM_COAT_MAX_DARKEN))
+    table_chroma = float(np.hypot(mid[1], mid[2]))
+    photo_chroma = float(np.hypot(photo[1], photo[2])) / COAT_RENDER_CHROMA
+    chroma = float(np.clip(table_chroma + CREAM_COAT_STRENGTH * (photo_chroma - table_chroma),
+                           table_chroma, CREAM_COAT_MAX_CHROMA))
+    table_hue = float(np.degrees(np.arctan2(mid[2], mid[1])))
+    hue = table_hue
+    tinted = sunlit or str(coat.get("border", "neutral")) != "neutral"
+    if tinted:
+        chroma = table_chroma
+    elif photo_chroma >= CREAM_COAT_HUE_CHROMA * table_chroma:
+        hue = float(np.clip(np.degrees(np.arctan2(photo[2], photo[1])), *CREAM_COAT_HUE))
+    turn = np.radians(hue - table_hue)
+    scale = chroma / max(table_chroma, 1e-3)
+    moved = []
+    for lab in labs:
+        a, b = float(lab[1]) * scale, float(lab[2]) * scale
+        a, b = a * np.cos(turn) - b * np.sin(turn), a * np.sin(turn) + b * np.cos(turn)
+        rgb = to_srgb(lab_to_linear(np.array([lab[0] + shift_l, a, b], dtype=np.float32)[None, None, :])[0, 0])
+        moved.append(_rgb_to_hex(tuple(int(round(float(np.clip(c, 0, 1)) * 255)) for c in rgb)))
+    return {**palette, "cream": tuple(moved)}, {
+        "photo": coat, "table_mid": [round(float(x), 1) for x in mid],
+        "mid": [round(float(mid[0]) + shift_l, 1), round(chroma, 1), round(hue, 1)], "ramp": moved,
+        **({"hue_kept": ("sunlit" if sunlit else "border not neutral") + ": lightness only"} if tinted else {})}
+
+
 __all__ = [
     "PhotoStats", "apply_photo_colours", "chroma_from_coat", "build_palette", "calibrate_color",
-    "chroma_scale", "measure", "palette_for", "photo_colours", "ramps_from_measurement", "relative_chroma",
+    "chroma_scale", "cream_from_coat", "measure", "palette_for", "photo_colours", "ramps_from_measurement", "relative_chroma",
 ]
