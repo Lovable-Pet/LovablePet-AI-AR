@@ -57,6 +57,12 @@ EYE_RING_ANSWERS = ("light", "dark", "unknown")
 # the next both cream (11-01). "same" with tan brows makes the cheeks tan
 # (lite.py).
 CHEEK_BROW_ANSWERS = ("same", "paler", "none", "unknown")
+# How far a dark muzzle's fur spreads over a lighter face, in order. The
+# muzzle answer says only that the top of the muzzle is dark; the texture
+# drew every such mask as a fade gone by the eyes, and a retriever's black
+# mask up round its eyes came out a grey nose tip (shelter retriever 8;
+# simple.MASK_REACH). Voted as the median of the samples that answered.
+MASK_ANSWERS = ("none", "nose", "muzzle", "eyes", "unknown")
 # ... and dark wins on this share of the samples, not on a majority. Seven
 # black-headed dogs, five samples each (10-31): the one with cream above the
 # eyes (e08) drew no dark vote in ten; the black shiba, black above the eyes
@@ -126,14 +132,24 @@ FACE_COLOURS_SCHEMA: dict[str, Any] = {
                            "plainly paler than the brow spots - beige, cream or white), none (there are no brow "
                            "spots), unknown (not visible).",
         },
+        "mask": {
+            "type": "string",
+            "enum": list(MASK_ANSWERS),
+            "description": "How far DARK fur (black, dark brown or grey) spreads from the nose over a lighter "
+                           "face: none (no dark fur on the muzzle), nose (dark fur only round the nose at the "
+                           "end of the muzzle), muzzle (the whole muzzle, top and sides, dark up to just below "
+                           "the eyes), eyes (the dark goes on up between and round the eyes), unknown (the "
+                           "head is dark all over, or not visible).",
+        },
         "note": {"type": "string", "description": "One short phrase on what you saw, or empty."},
     },
-    "required": ["cheeks", "brows", "muzzle", "ears", "blaze", "crown", "eye_ring", "cheeks_vs_brows", "note"],
+    "required": ["cheeks", "brows", "muzzle", "ears", "blaze", "crown", "eye_ring", "cheeks_vs_brows", "mask",
+                 "note"],
     "additionalProperties": False,
 }
 
-FACE_COLOURS_SYSTEM = """You look at a close-up photograph of a dog's head and name seven fur colours
-and make one comparison.
+FACE_COLOURS_SYSTEM = """You look at a close-up photograph of a dog's head, name seven fur colours,
+make one comparison, and say how far a dark muzzle reaches.
 
 Answer only from the fur you can see in this picture. Do not reason from
 the breed or from what dogs with this kind of coat usually have.
@@ -191,6 +207,14 @@ even if both are much lighter than a black crown. paler: the cheeks are
 plainly paler than the brow spots - beige, cream or white over most of the
 cheek. none when there are no brow spots.
 
+mask: on a face lighter than its muzzle, how far the dark FUR spreads from
+the nose. The nose leather, the lips and the thin black rims of the eyelids
+are skin and do not count. none: no dark fur on the muzzle. nose: dark fur
+only round the nose, at the end of the muzzle. muzzle: the whole muzzle,
+its top and its sides, is dark up to just below the eyes. eyes: the dark
+fur goes on up between the eyes and round them. On a head that is dark all
+over, answer unknown.
+
 white is a plain white; cream is off-white with a warm tint; tan is any
 clearly warm brown, red or fawn; dark is black, chocolate or grey."""
 
@@ -235,12 +259,18 @@ async def read_face_colours(transport: Transport, crop_block: dict[str, Any],
     cheek_brow, cheek_brow_votes = vote("cheeks_vs_brows", CHEEK_BROW_ANSWERS)
     if readings and eye_ring_votes.get("dark", 0) >= EYE_RING_DARK_SHARE * len(readings):
         eye_ring = "dark"
+    # the mask's reach is an order, so the middle answer of those that gave
+    # one, when at least half the samples did: 2 muzzle / 3 eyes is eyes,
+    # 1 nose / 2 muzzle / 2 eyes is muzzle
+    reach = sorted(MASK_ANSWERS.index(r["mask"]) for r in readings if r.get("mask") in MASK_ANSWERS[:-1])
+    mask = MASK_ANSWERS[reach[(len(reach) - 1) // 2]] if reach and len(reach) * 2 >= len(readings) else "unknown"
+    mask_votes = dict(Counter(r.get("mask") for r in readings if r.get("mask") in MASK_ANSWERS[:-1]))
     votes = {"crown_answer": crown, "crown": crown_votes, "eye_ring_answer": eye_ring, "eye_ring": eye_ring_votes,
              "cheeks_vs_brows_answer": cheek_brow, "cheeks_vs_brows": cheek_brow_votes, "cheeks": cheek_votes, "brows": brow_votes, "muzzle": muzzle_votes, "ears": ear_votes,
-             "blaze": blaze_votes, "samples": len(readings),
+             "blaze": blaze_votes, "mask_answer": mask, "mask": mask_votes, "samples": len(readings),
              "notes": [str(r.get("note", "")) for r in readings if r.get("note")]}
     return cheeks, brows, muzzle, ears, blaze, votes
 
 
 __all__ = ["read_face_colours", "FACE_COLOURS_SCHEMA", "CHEEK_ANSWERS", "BROW_ANSWERS", "MUZZLE_ANSWERS",
-           "EAR_ANSWERS", "BLAZE_ANSWERS", "EYE_RING_ANSWERS", "CHEEK_BROW_ANSWERS"]
+           "EAR_ANSWERS", "BLAZE_ANSWERS", "EYE_RING_ANSWERS", "CHEEK_BROW_ANSWERS", "MASK_ANSWERS"]
