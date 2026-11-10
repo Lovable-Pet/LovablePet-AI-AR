@@ -1775,8 +1775,7 @@ async def run_lite(
                         transport, crop_block(crop), samples=max(samples, FACE_SAMPLES))
                     face_log.update({"asked": True, "cheeks": cheeks, "brows": brows, "muzzle": muzzle, "ears": ears,
                                      "blaze": blaze, "crown": votes.get("crown_answer"),
-                                     "eye_ring": votes.get("eye_ring_answer"), "mask": votes.get("mask_answer"),
-                                     "votes": votes})
+                                     "eye_ring": votes.get("eye_ring_answer"), "votes": votes})
                     # cheeks the colour of tan brow spots are the tan points,
                     # whatever the cheek question said: beside a black crown
                     # it read a puppy's tan cheeks cream and painted a white
@@ -2137,10 +2136,6 @@ async def run_lite(
             # light or dark round the eyes (face_colours.EYE_RING_ANSWERS);
             # on dark texture.compose_body leaves out the cream spectacles
             "eye_ring": face_log.get("eye_ring") if face_log.get("eye_ring") in ("light", "dark") else None,
-            # how far a dark muzzle runs up the face (face_colours MASK_ANSWERS,
-            # simple.MASK_REACH): only for a muzzle that passed as dark above
-            "mask_reach": (face_log.get("mask") if face_log.get("muzzle") == "dark"
-                           and face_log.get("mask") in ("muzzle", "eyes") else None),
             # the light face fur's LAB on a dark-crowned, cream-cheeked dog
             "face_light_lab": face_log.get("face_light_lab"),
             # the grey of a smoky crown's own fur (palette.gray_from_face)

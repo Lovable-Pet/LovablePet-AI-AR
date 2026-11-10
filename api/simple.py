@@ -217,22 +217,6 @@ POINT_LEG_TOP_CAP = 0.9
 # a dark muzzle's reach onto the cheeks: percentiles of the cheeks' distance
 # from the nose (texture gradient_reach)
 MASK_CHEEK_REACH = (5.0, 60.0)
-# ... and a mask that reaches further, as the head close-up reads it
-# (appearance["mask_reach"]): "nose" or no answer keeps the fades above -
-# dark at the nose, gone by the eyes. "muzzle" darkens the whole muzzle below
-# the eyes; "eyes" carries it up to the eyes, between and under them, the
-# black mask of shelter retriever 8 (photo L* 20-30 to above the eyes, cream
-# cheeks beside it) that the short fade drew as a grey nose tip (11-09
-# review: "검은 얼굴 마스크 없음"). Percentiles of each region's distance
-# from the nose: dark up to the first, faded into the head colour by the
-# second. Not the band round each eye (texture _eye_ring) in the mask's
-# colour: it reaches over the eye to the brow and drew dark goggles across
-# the forehead of the retriever and a fawn puppy, whose photos are tan above
-# the eyes; the cheeks' longer fade brings the dark up under and beside them.
-MASK_REACH = {
-    "muzzle": {"muzzle_bridge": (40.0, 95.0), "cheeks": (20.0, 70.0)},
-    "eyes": {"muzzle_bridge": (75.0, 100.0), "cheeks": (45.0, 90.0)},
-}
 
 # white toes under a coloured leg: percentiles of the paws region's distance
 # from the paw over which the white gives way to the leg's colour
@@ -384,14 +368,6 @@ def default_gradients(appearance: dict[str, Any]) -> tuple[dict[str, Any], list[
             # the muzzle's sides only: over the cheeks' whole span it was a
             # black box across a fawn face
             entries["cheeks"]["gradient_reach"] = list(MASK_CHEEK_REACH)
-    # a mask the close-up saw reach further (MASK_REACH)
-    mask_reach = str(appearance.get("mask_reach") or "")
-    if mask_reach in MASK_REACH and color_family(str(muzzle.get("color", ""))) == "dark":
-        for region, span in MASK_REACH[mask_reach].items():
-            entry = entries.get(region)
-            if entry and entry.get("gradient_anchor") == "nose" and entry.get("color") == muzzle["color"]:
-                entry["gradient_reach"] = list(span)
-                added.append(f"{region}:mask to the {mask_reach}")
     ears = entries.get("ears_inner", {})
     # not in a light dog's dark ears (lite.dark_ears_on_light): faded to
     # cream from the base, the brown cup came out cream (shelter chihuahua 1)
