@@ -861,9 +861,16 @@ def ramps_from_measurement(
 # The warm ramps' chroma from the coat's (photo_colours.coat_chroma), hue and
 # lightness left as the cells and the table set them. Rendered, a texture's
 # warm fur measures COAT_RENDER_CHROMA of its own chroma by the same
-# measure (22 shelter and eval dogs: median 0.89, quartiles 0.85-0.90), so
-# the ramp's mid takes the coat's chroma over that, within COAT_CHROMA_SHARE
-# of the table's. Rendered and set beside their photos, 8 of the 22 came
+# measure, so the ramp's mid takes the coat's chroma over that, within
+# COAT_CHROMA_SHARE of the table's. The ratio belongs to the viewer: 0.89
+# under model-viewer's default tone mapping, ACES (22 shelter and eval dogs,
+# quartiles 0.85-0.90; 0.88 again on 33 models-page dogs), 1.06 under
+# tone-mapping "neutral" (the same 33, quartiles 1.04-1.15), the review
+# viewer since 2026-11-11. ACES pressed light gold fur to a pale yellow-white
+# (shelter retrievers 1 and 2 read pale sand from a right texture), and the
+# 0.89 made for it left the photo-chroma dogs about a fifth too saturated
+# under neutral (deep tans, apricot and chocolate poodles, red maltese).
+# Rendered under ACES and set beside their photos, 8 of the 22 came
 # closer (a red papillon's dull brown, two muted shih tzu-type fawns, two
 # deep red jindos, a golden), none went further; following the photo's hue
 # as well turned four of them pink (its warm light read as a redder coat),
@@ -871,7 +878,7 @@ def ramps_from_measurement(
 # Only under a neutral border, and with enough warm fur: COAT_MIN_PIXELS of
 # it and COAT_MIN_SHARE of the animal (a black-and-tan's points are too few
 # and too mixed with the black).
-COAT_RENDER_CHROMA = 0.89
+COAT_RENDER_CHROMA = 1.06
 COAT_CHROMA_SHARE = (0.55, 1.5)
 COAT_MIN_PIXELS = 1500
 COAT_MIN_SHARE = 0.1
