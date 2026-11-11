@@ -125,7 +125,12 @@ def match_from(differences: list[str]) -> str:
     return "close" if n == 0 else "poor" if n >= POOR_FROM else "rough"
 
 # answers -> morph-target weights (shape_keys.py target names)
-EAR_TARGETS = {"tipped": {"ear_fold": 1.0}, "drop": {"ear_drop": 1.0}}
+# A hanging ear is drawn as the folded tip, on the jindo as on its puppy
+# (shape.STAND_INS): the ear need not match the photo, and the jindo's ear laid
+# all the way down the head is a heavier change than the model carries well
+# (user, 2026-11-11, on the shelter dogs built with ear_drop). The target stays
+# in the template; nothing asks for it.
+EAR_TARGETS = {"tipped": {"ear_fold": 1.0}, "drop": {"ear_fold": 1.0}}
 BUILD_TARGETS = {"slim": {"body_slim": 1.0}, "stocky": {"body_slim": -0.8}}
 MUZZLE_TARGETS = {"short": {"muzzle_long": -1.0}, "long": {"muzzle_long": 0.6}}
 
