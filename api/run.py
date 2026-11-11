@@ -403,6 +403,8 @@ def main() -> None:
     parser.add_argument("--fit-stop", action="store_true",
                         help="lite: stop before the measurement and the image edit when the template does not "
                              "suit the dog (fit.py verdict 부적합); the verdict is in <out>/fit.json either way")
+    parser.add_argument("--no-template-ok", action="store_true",
+                        help="lite: build a dog no template covers anyway (the looks' \"none\"; stopped otherwise)")
     parser.add_argument("--no-real-size", action="store_true",
                         help="lite: keep the template's own size instead of scaling to the record's weight")
     args = parser.parse_args()
@@ -431,6 +433,7 @@ def main() -> None:
                                  prepare=not args.no_prepare, strict_photo=not args.accept_photo,
                                  reuse_appearance=args.reuse, measure=not args.no_measure,
                                  read_shape=args.read_shape, fit_stop=args.fit_stop,
+                                 no_template_stop=not args.no_template_ok,
                                  real_size=not args.no_real_size))
             return
         asyncio.run(run(record, args.photo, args.out, transport=transport, image_transport=image_transport,
@@ -443,7 +446,8 @@ def main() -> None:
                                                        "gate": exc.readings})
         raise SystemExit(f"[run] photo rejected: {exc}  (--accept-photo to run anyway)")
     except FitRejected as exc:
-        raise SystemExit(f"[run] template does not suit this dog: {exc}  (drop --fit-stop to build anyway)")
+        raise SystemExit(f"[run] template does not suit this dog: {exc}  "
+                         "(--no-template-ok for a dog no template covers, else drop --fit-stop, to build anyway)")
 
 
 if __name__ == "__main__":

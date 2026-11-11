@@ -141,7 +141,9 @@ def _fit_view(fit: dict[str, Any] | None) -> dict[str, Any] | None:
             # grey models; "looks": DINOv2 alone), the parts that differ, and the DINOv2 look
             # ("none": no template covers it)
             "template": fit.get("template"), "picked_by": pick.get("by"), "match": pick.get("match"),
-            "differences": pick.get("differences") or [], "looks": pick.get("looks")}
+            "differences": pick.get("differences") or [], "looks": pick.get("looks"),
+            # no template covers this dog: a job on it ends "unsuitable" whatever fit_stop says
+            "no_template": bool(pick.get("no_template"))}
 
 
 def _size_view(size: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -337,9 +339,10 @@ async def delete_job(job_id: str) -> None:
 @app.post("/v1/fit", dependencies=[Depends(_check_key)])
 async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> dict[str, Any]:
     """Seconds, about $0.02. The photo gate first (prepare_photo.py, about
-    $0.006): a photo it refuses (a hand over the coat, two animals, text on
-    the dog, ...) is answered at once as 부적합 with the gate's reasons and
-    fit.photo_rejected, and nothing more is spent. The gate's readings are
+    $0.005): a photo it refuses (not a dog) is answered at once as 부적합
+    with the gate's reasons and fit.photo_rejected, and nothing more is
+    spent; a hand, a second animal, text, clothing or an object over the
+    coat goes on as a caveat. The gate's readings are
     kept, so a job on the same photo does not call it again. Then the
     body-shape call on the photo with the grey model sheet (the outline and
     the closest model), the DINOv2 looks (local), the verdict and the real
@@ -351,7 +354,7 @@ async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> d
     from .extract import photo_blocks
     from .fit import assess_fit
     from .pipeline import default_transport
-    from .prepare_photo import gate_photo, seen_from_above
+    from .prepare_photo import gate_caveats, gate_photo, seen_from_above
     from .size import scale_for
     from .template_pick import combine, pick_template, template_file
     from .watermark import remove_watermarks
@@ -389,7 +392,7 @@ async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> d
         shutil.rmtree(tmp, ignore_errors=True)
     pick = combine(looks, answers, meta.weight_kg, votes=votes)
     fit = assess_fit(meta.species, meta.weight_kg, meta.age_text, answers, None, votes=votes, photo_quality=quality,
-                     pick=pick, from_above=seen_from_above(readings))
+                     pick=pick, from_above=seen_from_above(readings), photo_caveats=gate_caveats(readings))
     from .assets import template_paths
     from .metadata import process_metadata
     resolved = process_metadata(meta.pet_id, meta.species, meta.weight_kg, meta.coat_color)
@@ -410,7 +413,7 @@ def _rejected_fit(pet_id: str, reasons: list[str]) -> dict[str, Any]:
     return {"pet_id": pet_id,
             "fit": {"level": "poor", "label": "부적합", "score": 0, "reasons": [REJECT_RULES[r] for r in reasons],
                     "notes": [], "template": None, "picked_by": None, "match": None, "differences": [],
-                    "looks": None, "photo_rejected": reasons},
+                    "looks": None, "no_template": False, "photo_rejected": reasons},
             "size": None, "shape": None, "photo": None}
 
 

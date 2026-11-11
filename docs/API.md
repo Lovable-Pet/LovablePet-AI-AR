@@ -60,10 +60,13 @@ toypoodle, chihuahua, retriever; git에 없음, 따로 전달). 생김새 분류
 
 multipart: `record`, `photo` (jpeg/png/webp, 15MB 이하). 5~20초, 약 $0.02.
 
-**사진 판정이 먼저**다(생성 작업의 사진 판정과 같은 것, 약 $0.006). 사람 손이 털을 가림, 여러 마리, 몸 위의 글자, 옷 등으로
-거부되면 템플릿 판정 없이 바로 `fit.level: "poor"`(부적합)로 답하고 비용은 거기서 끝난다. `fit.reasons`는 작업의
-`photo_rejected` 사유와 같은 한국어 문장, `fit.photo_rejected`는 사유 코드(`person_covers`, `several_animals`,
-`text_on_animal`, `clothing`, `object_covers`, `not_a_dog`; 통과하면 `[]`), `size`·`shape`·`photo`는 `null`이다.
+**사진 판정이 먼저**다(생성 작업의 사진 판정과 같은 것, 약 $0.005). 사진의 주 피사체가 개가 아니면
+거부되고, 템플릿 판정 없이 바로 `fit.level: "poor"`(부적합)로 답하며 비용은 거기서 끝난다. `fit.reasons`는 작업의
+`photo_rejected` 사유와 같은 한국어 문장, `fit.photo_rejected`는 사유 코드(`not_a_dog`; 통과하면 `[]`),
+`size`·`shape`·`photo`는 `null`이다.
+사람 손·팔이 털을 가림, 다른 동물이 같이 찍힘, 몸 위의 글자(2026-11-11부터), 옷, 물체가 털을 크게 가림(11-12부터)은
+거부하지 않는다(보호소 공고엔 그 사진뿐이다). 그대로 만들고, 판정에 주의 사유(`fit.reasons`의 한 줄, 한 가지에 −20점)로
+들어간다.
 판정 결과는 서버가 24시간 기억해서, **같은 사진으로 `/v1/jobs`를 부르면 사진 판정을 다시 하지 않는다**(서버 재시작 전까지).
 한국동물구조관리협회 로고(1600×1200 사진 아래 가운데)는 판정 전에 지운다 — 생성 작업도 같다.
 
@@ -95,10 +98,16 @@ multipart: `record`, `photo` (jpeg/png/webp, 15MB 이하). 5~20초, 약 $0.02.
   모델과 그 모델과 **뚜렷이 다른 부위**(귀·털 길이·털 결·주둥이·머리·다리·몸통·꼬리, 진도의 귀·꼬리·체격·주둥이 모프로 바꿀 수 있는 것과
   색·크기는 빼고)를 묻는다(`fit.picked_by: "vision"`). 다른 부위가 없으면 `match: "close"`, 1곳이면 `"rough"`(주의),
   2곳 이상이면 `"poor"`(부적합). `fit.differences`가 그 부위다.
-- DINOv2 생김새 분류(`api/template_pick.py`, 로컬)가 `fit.looks`다. `"none"`(포메형·단두형)이면 부적합. 호출이 실패하면 이 분류가 모델을
+- DINOv2 생김새 분류(`api/template_pick.py`, 로컬)가 `fit.looks`다. `"none"`(포메형·단두형)이면 부적합이고 `fit.no_template: true`:
+  **이 개는 만들지 않는다**(2026-11-12부터, `/v1/jobs`가 `unsuitable`로 끝남 — 억지로 맞춘 몸은 다른 개로 보인다). `/v1/fit`에서
+  `no_template`이 `true`면 작업을 만들지 않으면 된다. 호출이 실패하면 이 분류가 모델을
   고른다(`picked_by: "looks"`).
 - 진도 강아지 모델이라도 체중이 7.0 kg(보호소 진도형 2026년생의 95번째 백분위)을 넘으면 진도 성견으로 만든다 — 강아지 메시는 2개월 몸이라
   무거운 개에 쓰면 체고가 16% 작게 나온다. `notes`에 그 사유가 붙는다.
+- 호출이 고른 모델을 그대로 쓰지 않는 세 경우(2026-11-11, `api/template_pick.combine`): 호출은 진도라는데 생김새 분류가 진도 강아지로 확실하고
+  (`sure`) 체중이 5 kg(진도형 성견의 5번째 백분위) 미만이면 **진도 강아지**, 치와와라는데 체중이 치와와 범위(6.9 kg)를 넘으면 생김새 분류의 모델
+  (체중이 맞을 때) 아니면 진도, 3표가 과반 없이 갈리면 생김새 분류의 모델. 이때는 `picked_by: "looks"`(또는 `"default"`)이고
+  `differences`는 비어 있다.
 - 단족(다리 짧음, 3표 모두)은 부적합 — 체중으로 낸 크기가 25~35% 틀어진다. 기록 체중이 그 생김새 보호소 개 대부분(5~95%) 밖이면 주의.
 - 사람이 직접 고른 30마리(평가셋 20 + 보호소 사진 10, `tools/template_judge.py`)와 비교: 사람이 만들 만하다고 본 22마리 중 20마리에서 같은
   모델(DINOv2만으로는 13), 사람이 억지라고 본 8마리 중 7마리 부적합, 사람이 만들 만하다고 본 22마리 중 2마리 부적합.
@@ -124,10 +133,10 @@ multipart:
 | `record` | O | | 위 기록 JSON |
 | `photo` | O | | 전신이 보이는 사진 한 장 |
 | `callback_url` | | | 끝나면 작업 JSON을 POST할 주소 |
-| `fit_stop` | | `false` | `true`면 부적합일 때 비싼 단계 전에 멈추고 `unsuitable`로 끝낸다 |
+| `fit_stop` | | `false` | `true`면 부적합일 때 비싼 단계 전에 멈추고 `unsuitable`로 끝낸다. 맞는 템플릿이 없는 개(`fit.no_template`)는 이 값과 상관없이 멈춘다 |
 | `refine` | | `true` | `false`면 이미지 모델 다듬기 없이 (싸고 빠르지만 경계가 딱딱함) |
 | `render` | | Blender 있으면 `true` | 미리보기 PNG 3장 |
-| `scripted` | | | 오프라인 대본 이름(`black_shiba`). `PIPELINE_ALLOW_SCRIPTED=1`일 때만 |
+| `scripted` | | | 오프라인 대본 이름(`black_shiba`; `not_a_dog`은 `photo_rejected`로 끝남). `PIPELINE_ALLOW_SCRIPTED=1`일 때만 |
 
 응답 `202 Accepted`, `Location: /v1/jobs/{job_id}`:
 
@@ -142,8 +151,8 @@ multipart:
 | `queued` | | 앞 작업을 기다리는 중 | |
 | `running` | | 만드는 중 | `started_at` |
 | `done` | O | 완성 | 아래 전부 |
-| `photo_rejected` | O | 사진이 못 쓰는 사진 (개가 아님, 여러 마리, 사람이 털을 크게 가림, 옷 등). 손이 배 밑·옆을 조금 받치는 정도는 거부하지 않고 손을 무시하고 읽는다 | `reasons` (한국어), `error` |
-| `unsuitable` | O | `fit_stop=true`이고 부적합 | `fit` |
+| `photo_rejected` | O | 사진의 주 피사체가 개가 아님. 사람 손·다른 동물·몸 위 글자·옷·물체 가림은 거부하지 않고 무시하고 읽는다(`fit`에 주의 사유) | `reasons` (한국어), `error` |
+| `unsuitable` | O | 맞는 템플릿이 없는 개(`fit.no_template: true`, 포메형·단두형 등) — 항상. 또는 `fit_stop=true`이고 부적합 | `fit` |
 | `failed` | O | 서버 오류, 또는 서버 재시작으로 중단 | `error` |
 
 `done` 예:

@@ -1845,6 +1845,7 @@ async def run_lite(
     shape_call: bool = True,
     read_shape: bool = False,
     fit_stop: bool = False,
+    no_template_stop: bool = True,
     real_size: bool = True,
     pick_template: bool = True,
     gate_readings: list[dict[str, Any]] | None = None,
@@ -2426,14 +2427,23 @@ async def run_lite(
                      (appearance.get("shape") or {}).get("answers"), appearance.get("pattern"),
                      votes=(log["steps"].get("shape") or {}).get("votes"), photo_quality=photo_quality,
                      pick=pick, photo_bars=photo_bars,
-                     from_above=seen_from_above((log["steps"].get("prepare") or {}).get("gate") or []))
+                     from_above=seen_from_above((log["steps"].get("prepare") or {}).get("gate") or []),
+                     photo_caveats=(log["steps"].get("prepare") or {}).get("caveats"))
     log["steps"]["fit"] = fit
     _json(out_dir / "fit.json", fit)
     print(f"[lite] fit: {describe_fit(fit)}")
-    if fit_stop and fit["level"] == "poor":
+    # A dog no template covers (the looks' "none": pom-type, flat faces) is
+    # not built at all, fit_stop or not (user, 2026-11-12): a forced model
+    # shows another dog, and nobody is to be shown it. On 64 hard photos the
+    # five so marked were the five with no model of their kind; of the 30 dogs
+    # the user judged on 10-18 it stops 4 of the 8 called forced and 1 of the
+    # 22 called buildable. The other poor verdicts go on unless fit_stop: half
+    # of those 22 on the hard photos came out right.
+    no_template = no_template_stop and bool((pick or {}).get("no_template"))
+    if no_template or (fit_stop and fit["level"] == "poor"):
         log["timings_s"]["total"] = round(_now() - started, 2)
         log["usage"] = ledger.summary()
-        log["final"] = {"stopped": "fit", "fit": fit["label"]}
+        log["final"] = {"stopped": "no_template" if no_template else "fit", "fit": fit["label"]}
         _json(out_dir / "pipeline_log.json", log)
         raise FitRejected(fit)
 
