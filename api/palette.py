@@ -617,13 +617,14 @@ GRAY_WARM_GAIN = 1.5
 
 
 def gray_target(dark_l: float | None, tint_a: float | None, tint_b: float | None,
-                lift: float = GRAY_FACE_LIFT) -> list[float] | None:
+                lift: float = GRAY_FACE_LIFT, l_range: tuple[float, float] = GRAY_FACE_L) -> list[float] | None:
     """The gray ramp's mid LAB for a measured dark fur (GRAY_FACE_*,
     GRAY_WARM_*). `lift` 0 for a dark brindle: its lighter hairs are drawn
-    over the base and lift it already."""
+    over the base and lift it already. `l_range`: the lightness it may take
+    (a whole coat's lit fur is lighter than a dark crown's)."""
     if dark_l is None:
         return None
-    low, high = GRAY_FACE_L
+    low, high = l_range
     axis = np.array([np.cos(np.radians(GRAY_WARM_HUE)), np.sin(np.radians(GRAY_WARM_HUE))])
     warmth = max(0.0, float(np.dot([tint_a or 0.0, tint_b or 0.0], axis))) * GRAY_WARM_GAIN
     a, b = np.clip(warmth * axis, -GRAY_FACE_MAX_AB, GRAY_FACE_MAX_AB)

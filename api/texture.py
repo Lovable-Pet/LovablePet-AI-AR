@@ -331,9 +331,23 @@ BRINDLE_OPACITY = 0.65
 # streaked across the hair for BRINDLE_MOTTLE_STREAK of it, at most
 # BRINDLE_MOTTLE_OPACITY strong, in BRINDLE_MOTTLE_COLOUR.
 BRINDLE_MOTTLE_SIGMA_M = 0.0025
-BRINDLE_MOTTLE_OPACITY = 0.35
+BRINDLE_MOTTLE_OPACITY = 0.28
 BRINDLE_MOTTLE_STREAK = 0.7
 BRINDLE_MOTTLE_COLOUR = "tan"
+# ... and every texel gets at least this share of it. From nothing to the full
+# opacity the clouds stood out of a black coat as blotches - a leopard again on
+# the adult (shelter adult jindo 7), and on a dog whose chest alone was black a
+# brown-patched chest under a grey body (hard photo 178, user 2026-11-11: "과연
+# 실제로 가능한 강아지인가"). With a floor the brown is mostly IN the coat's
+# tone, a dark brown-black, and the clouds only vary it.
+BRINDLE_MOTTLE_FLOOR = 0.5
+# A coat already painted in the grey-brown of its own fur (lite's
+# gray_for_black, palette.gray_from_face) has its brown in that grey: the
+# mottle is this much of itself there, which leaves the coat the tan it had
+# before the floor (0.11 of the tone; shelter puppy 8, judged right, keeps
+# its dark grey). On black the mottle IS the coat's brown and stays whole:
+# a dark chocolate at 0.28 (0.35 read a mid brown).
+BRINDLE_MOTTLE_ON_GREY = 0.62
 # A steel-grey "blue and tan" saddle (lite.steel_saddle) is grizzled: the
 # base's tan hairs through the grey, the dark brindle's mottle at this
 # opacity. Flat grey read as a grey blanket over a tan dog (shelter
@@ -2040,7 +2054,10 @@ def apply_overlay(composed: np.ndarray, gray: np.ndarray, appearance: dict[str, 
     shape = gray.shape
     if (overlay == "brindle" and color_family(base) == "dark" and landmarks is not None
             and landmarks.position is not None):
-        weight = _brindle_mottle(shape, direction, valid, seed, landmarks)
+        weight = _brindle_mottle(shape, direction, valid, seed, landmarks, floor=BRINDLE_MOTTLE_FLOOR)
+        if appearance.get("gray_lab") is not None or any(
+                str(entry.get("color", "")).lower() == "gray" for entry in appearance.get("region_colors") or []):
+            weight = weight * BRINDLE_MOTTLE_ON_GREY
         second = BRINDLE_MOTTLE_COLOUR
     elif overlay == "brindle" and direction is not None:
         # stripes run across the hair: smear noise along the perpendicular
@@ -2065,9 +2082,10 @@ def apply_overlay(composed: np.ndarray, gray: np.ndarray, appearance: dict[str, 
 
 
 def _brindle_mottle(shape: tuple[int, int], direction: np.ndarray | None, valid: np.ndarray, seed: int,
-                    landmarks) -> np.ndarray:
+                    landmarks, floor: float = 0.0) -> np.ndarray:
     """The dark brindle's lighter hairs as a 0..1 weight (BRINDLE_MOTTLE_*):
-    soft clouds on the surface, streaked across the hair."""
+    soft clouds on the surface, streaked across the hair, over `floor` of
+    the opacity everywhere."""
     rng = np.random.default_rng(seed + 7)
     surface = landmarks.valid if landmarks.valid is not None else valid
     smooth = smooth_on_surface(rng.random(shape).astype(np.float32), landmarks.position, surface,
@@ -2079,6 +2097,7 @@ def _brindle_mottle(shape: tuple[int, int], direction: np.ndarray | None, valid:
         across = np.stack([-direction[..., 1], direction[..., 0]], axis=-1)
         hair = np.clip(0.5 + anisotropic_noise(shape, across, seed + 9, streak=12, grain=1.0) * 0.35, 0.0, 1.0)
         weight = weight * ((1.0 - BRINDLE_MOTTLE_STREAK) + BRINDLE_MOTTLE_STREAK * hair)
+    weight = floor + (1.0 - floor) * weight
     return (weight * BRINDLE_MOTTLE_OPACITY * valid).astype(np.float32)
 
 

@@ -353,16 +353,22 @@ def default_gradients(appearance: dict[str, Any]) -> tuple[dict[str, Any], list[
     # goes up between the eyes is its own marking (texture._blaze_strip).
     muzzle = entries.get("muzzle_bridge", {})
     skull = str(entries.get("skull", {}).get("color", base))
+    # grey counts as a dark colour, but a black mask on a grey head is a mask
+    # all the same: without the fade it was not drawn at all, and a grey
+    # puppy with a black face came out grey-faced (hard photo 320, once its
+    # coat was grey and not tan)
+    black_on_grey = str(muzzle.get("color", "")) == "black" and skull == "gray"
     if (muzzle.get("color") and muzzle["color"] != skull and skull in FUR_COLORS
-            and color_family(muzzle["color"]) != color_family(skull)):
+            and (color_family(muzzle["color"]) != color_family(skull) or black_on_grey)):
         fade("muzzle_bridge", muzzle["color"], skull, "nose")
     # ... and on the sides of the muzzle too: a masked fawn puppy's whole
     # muzzle is dark, and the dark bridge alone drew a black bar down the
     # middle of a fawn face (shelter puppy 6). Not on a dark head (a
     # black-and-tan's muzzle sides are its tan cheeks).
     cheek_colour = str(cheeks.get("color", ""))
-    if (color_family(str(muzzle.get("color", ""))) == "dark" and color_family(skull) != "dark"
-            and cheek_colour in FUR_COLORS and color_family(cheek_colour) != "dark"):
+    if (color_family(str(muzzle.get("color", ""))) == "dark" and cheek_colour in FUR_COLORS
+            and ((color_family(skull) != "dark" and color_family(cheek_colour) != "dark")
+                 or (black_on_grey and cheek_colour == "gray"))):
         fade("cheeks", muzzle["color"], cheek_colour, "nose")
         if "cheeks" in entries and entries["cheeks"].get("gradient_anchor") == "nose":
             # the muzzle's sides only: over the cheeks' whole span it was a
