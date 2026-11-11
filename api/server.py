@@ -387,7 +387,7 @@ async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> d
         raise HTTPException(502, f"vision call failed: {type(exc).__name__}: {exc}") from exc
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
-    pick = combine(looks, answers, meta.weight_kg)
+    pick = combine(looks, answers, meta.weight_kg, votes=votes)
     fit = assess_fit(meta.species, meta.weight_kg, meta.age_text, answers, None, votes=votes, photo_quality=quality,
                      pick=pick, from_above=seen_from_above(readings))
     from .assets import template_paths

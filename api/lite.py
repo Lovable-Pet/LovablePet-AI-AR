@@ -1924,14 +1924,16 @@ async def run_lite(
                                                     samples=samples, models=True)
             except Exception as exc:  # noqa: BLE001 - the looks alone pick
                 log["steps"]["shape"] = {"error": f"{type(exc).__name__}: {exc}"}
-        pick = combine(looks, early_shape[0] if early_shape else None, meta.weight_kg)
+        pick = combine(looks, early_shape[0] if early_shape else None, meta.weight_kg,
+                       votes=early_shape[1] if early_shape else None)
         base_template = template_file(pick["template"], resolved.size_class)
         log["steps"]["template_pick"] = {**pick, "looks_pick": looks}
         log["timings_s"]["template_pick"] = round(_now() - t, 2)
         print(f"[lite] template: {pick['template']} by {pick['by']}"
               + (f", {pick['match']} {pick['differences']}" if pick["match"] else "")
               + (", looks: none (no template)" if pick["no_template"] else "")
-              + (", heavy puppy -> adult" if pick["heavy_puppy"] else "") + f" -> {base_template}")
+              + (", heavy puppy -> adult" if pick["heavy_puppy"] else "")
+              + (f", moved: {pick['moved']}" if pick.get("moved") else "") + f" -> {base_template}")
     template_glb, masks_dir = template_paths(base_template)
     template_dir = masks_dir.parent
     log["steps"]["record"] = {"pet_id": resolved.pet_id, "base_color": resolved.base_color,
