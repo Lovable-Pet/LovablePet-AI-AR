@@ -28,7 +28,6 @@ proportion that lands on it.
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 import numpy as np
@@ -38,6 +37,7 @@ from .agents import Transport
 from .face_photo import GRID_COLS, GRID_ROWS, _COLS, _image_block, draw_grid
 from .fur import to_linear
 from .regions import REGION_DESCRIPTIONS, REGIONS
+from .sampling import sample
 
 QUERY_SIDE = 1024
 SAMPLES = 2
@@ -238,15 +238,10 @@ async def measure_region_colours(photo_path, transport: Transport, samples: int 
     image = Image.open(photo_path).convert("RGB")
     shown = _shown(image)
 
-    async def one() -> dict[str, Any]:
-        return await transport.complete(
-            system=REGION_CELL_SYSTEM,
-            blocks=[_image_block(draw_grid(shown)), {"type": "text", "text": (
-                f"The grid is {GRID_COLS} columns ({_COLS[0]}-{_COLS[-1]}) by {GRID_ROWS} rows. "
-                "Give one fur cell per visible region.")}],
-            schema=REGION_CELL_SCHEMA)
-
-    payloads = await asyncio.gather(*(one() for _ in range(samples)), return_exceptions=True)
+    blocks = [_image_block(draw_grid(shown)), {"type": "text", "text": (
+        f"The grid is {GRID_COLS} columns ({_COLS[0]}-{_COLS[-1]}) by {GRID_ROWS} rows. "
+        "Give one fur cell per visible region.")}]
+    payloads = await sample(transport, system=REGION_CELL_SYSTEM, blocks=blocks, schema=REGION_CELL_SCHEMA, n=samples)
     return measure_cells(image, [p for p in payloads if isinstance(p, dict)], animal_mask)
 
 

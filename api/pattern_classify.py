@@ -33,7 +33,6 @@ disagree, three rules settle the cases that are not really disagreements:
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import io
 import json
@@ -54,6 +53,7 @@ from .patterns import (
     overlay_for,
 )
 from .regions import REGIONS
+from .sampling import sample
 
 ANCHOR_PATTERNS = ("tan_point", "urajiro", "irish", "saddle", "solid")
 SAMPLES = 3
@@ -434,9 +434,6 @@ async def classify_pattern(
 
     system, schema = _classify_system(), _classify_schema()
 
-    async def one() -> dict[str, Any]:
-        return await transport.complete(system=system, blocks=blocks, schema=schema)
-
     all_samples: list[dict[str, Any]] = []
     resolution = ""
     pattern: str | None = None
@@ -449,7 +446,7 @@ async def classify_pattern(
         for _attempt in range(3):
             if pending <= 0:
                 break
-            payloads = await asyncio.gather(*(one() for _ in range(pending)), return_exceptions=True)
+            payloads = await sample(transport, system=system, blocks=blocks, schema=schema, n=pending)
             pending = 0
             for payload in payloads:
                 if isinstance(payload, AgentRefusal):

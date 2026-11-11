@@ -37,6 +37,7 @@ import numpy as np
 from PIL import Image
 
 from .agents import Transport
+from .sampling import sample
 
 PAD_SHARE = 0.10
 # The crop the model sees is resized so its longer side is this many pixels;
@@ -171,13 +172,10 @@ async def crop_face(photo_path: str | Path, transport: Transport, samples: int =
 
     from .face_photo import GRID_COLS, GRID_ROWS, _COLS, draw_grid
 
-    import asyncio
-
     blocks = [_image_block(draw_grid(shown)), {"type": "text", "text": (
         f"The image is {shown.size[0]} pixels wide and {shown.size[1]} pixels tall, under a grid of "
         f"{GRID_COLS} columns ({_COLS[0]}-{_COLS[-1]}) by {GRID_ROWS} rows. Give the head's corner cells.")}]
-    payloads = await asyncio.gather(*(transport.complete(system=FACE_BOX_SYSTEM, blocks=blocks, schema=FACE_BOX_SCHEMA)
-                                      for _ in range(max(samples, 1))), return_exceptions=True)
+    payloads = await sample(transport, system=FACE_BOX_SYSTEM, blocks=blocks, schema=FACE_BOX_SCHEMA, n=max(samples, 1))
     payloads = [p for p in payloads if isinstance(p, dict)]
     if not payloads:
         raise RuntimeError("the head box call failed")

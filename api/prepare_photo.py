@@ -63,6 +63,7 @@ import numpy as np
 from PIL import Image, ImageFilter
 
 from .agents import Transport
+from .sampling import sample
 
 # The whole photograph is shown to the gate at most this wide.
 GATE_SIDE = 768
@@ -267,11 +268,11 @@ async def gate_photo(transport: Transport, image: Image.Image, species: str = "d
     shown = draw_grid(_shrink(image, GATE_SIDE))
     blocks = [_image_block(shown), {"type": "text", "text": "Fill in the form for this photograph."}]
     readings: list[dict[str, Any]] = []
-    for _ in range(samples):
-        try:
-            readings.append(await transport.complete(system=GATE_SYSTEM, blocks=blocks, schema=GATE_SCHEMA))
-        except Exception as exc:  # noqa: BLE001 - one failed sample must not refuse a photo
-            print(f"[prepare] gate sample failed ({type(exc).__name__}: {exc})")
+    for payload in await sample(transport, system=GATE_SYSTEM, blocks=blocks, schema=GATE_SCHEMA, n=samples):
+        if isinstance(payload, dict):
+            readings.append(payload)
+        else:  # one failed sample must not refuse a photo
+            print(f"[prepare] gate sample failed ({type(payload).__name__}: {payload})")
     reasons, notes = judge_gate(readings, species)
     return reasons, notes, readings
 
