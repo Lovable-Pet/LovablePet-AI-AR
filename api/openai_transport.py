@@ -126,6 +126,12 @@ class OpenAITransport:
     ) -> None:
         self._client = client or openai.AsyncOpenAI()
         self._model = model or os.environ.get("OPENAI_MODEL", DEFAULT_MODEL)
+        # OPENAI_REASONING_EFFORT (none, low, ...): a reasoning model thinks
+        # before it answers and bills the thinking as output - on the
+        # face-colours call gpt-6-luna wrote 3,263 tokens for five answers
+        # of 65 each, 326 with "none". Unset, the model's own default; never
+        # sent to gpt-4o, which rejects the parameter.
+        self._effort = os.environ.get("OPENAI_REASONING_EFFORT") or None
 
     async def complete(
         self, *, system: str, blocks: list[dict[str, Any]], schema: dict[str, Any]
@@ -168,6 +174,7 @@ class OpenAITransport:
                 },
             },
             **({"n": n} if n > 1 else {}),
+            **({"reasoning_effort": self._effort} if self._effort else {}),
         )
 
         usage = getattr(response, "usage", None)

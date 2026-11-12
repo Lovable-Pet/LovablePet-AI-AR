@@ -59,6 +59,11 @@ _sem = asyncio.Semaphore(int(os.environ.get("PIPELINE_CONCURRENCY", "1")))
 # The photo gate's readings from /v1/fit, by the photo's SHA-256: a job on the same photo judges these
 # instead of calling the gate again. Kept in memory (one worker), so a restart costs one more gate call.
 _gates: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+# ... and the body-shape call's answers and votes from /v1/fit, kept the same way: the job asked the
+# same question again (three calls, about $0.014) and could pick another model than the one the fit
+# check had just told the client. Asked on the uploaded photo and not on the job's cut-out; on 21 hard
+# photos the pick was right 16 times either way (tools/cost/shape_on_original.py, 2026-11-12).
+_shapes: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 GATE_KEEP_S = 24 * 3600
 GATE_KEEP_MAX = 1000
 
@@ -92,20 +97,36 @@ def _photo_digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _keep_gate(digest: str, readings: list[dict[str, Any]]) -> None:
+def _keep(store: dict[str, tuple[float, list[dict[str, Any]]]], digest: str, value: list[dict[str, Any]]) -> None:
     import time
     now = time.monotonic()
-    for key in [k for k, (at, _) in _gates.items() if now - at > GATE_KEEP_S]:
-        del _gates[key]
-    while len(_gates) >= GATE_KEEP_MAX:
-        del _gates[min(_gates, key=lambda k: _gates[k][0])]
-    _gates[digest] = (now, readings)
+    for key in [k for k, (at, _) in store.items() if now - at > GATE_KEEP_S]:
+        del store[key]
+    while len(store) >= GATE_KEEP_MAX:
+        del store[min(store, key=lambda k: store[k][0])]
+    store[digest] = (now, value)
+
+
+def _kept(store: dict[str, tuple[float, list[dict[str, Any]]]], digest: str) -> list[dict[str, Any]] | None:
+    import time
+    kept = store.get(digest)
+    return kept[1] if kept and time.monotonic() - kept[0] <= GATE_KEEP_S else None
+
+
+def _keep_gate(digest: str, readings: list[dict[str, Any]]) -> None:
+    _keep(_gates, digest, readings)
 
 
 def _kept_gate(digest: str) -> list[dict[str, Any]] | None:
-    import time
-    kept = _gates.get(digest)
-    return kept[1] if kept and time.monotonic() - kept[0] <= GATE_KEEP_S else None
+    return _kept(_gates, digest)
+
+
+def _keep_shape(digest: str, answers: dict[str, Any], votes: dict[str, Any]) -> None:
+    _keep(_shapes, digest, [answers, votes])
+
+
+def _kept_shape(digest: str) -> list[dict[str, Any]] | None:
+    return _kept(_shapes, digest)
 
 
 def _parse_record(record: str) -> PetMetadata:
@@ -175,7 +196,7 @@ def _run_job_sync(job: dict[str, Any]) -> dict[str, Any]:
         result = asyncio.run(run_lite(job["_record"], [job["_photo"]], run_dir, transport=transport,
                                       image_transport=image_transport,
                                       refine=opts["refine"], render=opts["render"], fit_stop=opts["fit_stop"],
-                                      gate_readings=job.get("_gate")))
+                                      gate_readings=job.get("_gate"), shape_readings=job.get("_shape")))
     except PhotoRejected as exc:
         return {"status": "photo_rejected", "error": str(exc), "reasons": list(exc.reasons)}
     except FitRejected as exc:
@@ -298,9 +319,14 @@ async def create_job(record: str = Form(..., description="shelter record JSON (K
     }
     # /v1/fit gated this photo already: the job judges those readings instead of calling again
     # (not for scripted runs, which answer the gate from their script)
-    kept = None if scripted else _kept_gate(_photo_digest(photo_path))
+    digest = None if scripted else _photo_digest(photo_path)
+    kept = _kept_gate(digest) if digest else None
     if kept:
         job["_gate"] = kept
+    # ... and its body-shape answers: the job picks the model the fit check named, without asking again
+    shape = _kept_shape(digest) if digest else None
+    if shape:
+        job["_shape"] = shape
     _jobs[job_id] = job
     _save(job)
     asyncio.create_task(_worker(job))
@@ -346,8 +372,9 @@ async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> d
     kept, so a job on the same photo does not call it again. Then the
     body-shape call on the photo with the grey model sheet (the outline and
     the closest model), the DINOv2 looks (local), the verdict and the real
-    size. No coat, no pattern (the pattern only adds a caveat for
-    brindle/merle/other layouts, read in the full job)."""
+    size; its answers are kept too, so the job builds the model named here
+    and does not ask again. No coat, no pattern (the pattern only adds a
+    caveat for brindle/merle/other layouts, read in the full job)."""
     from PIL import Image, ImageOps
 
     from .body_shape import read_body_shape
@@ -370,9 +397,10 @@ async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> d
         with Image.open(path) as opened:
             image = ImageOps.exif_transpose(opened).convert("RGB")
         image, watermarks = remove_watermarks(image)
+        digest = _photo_digest(path)     # of the upload: the job's copy of the photo has the same bytes
         rejected, _, readings = await gate_photo(transport, image)
         if readings:
-            _keep_gate(_photo_digest(path), readings)
+            _keep_gate(digest, readings)
         if rejected:
             return _rejected_fit(meta.pet_id, rejected)
         if watermarks:
@@ -386,6 +414,7 @@ async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> d
             looks = None
         # the outline and the closest grey model in one call (body_shape.py)
         answers, votes = await read_body_shape(transport, photo_blocks([path]), models=True)
+        _keep_shape(digest, answers, votes)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, f"vision call failed: {type(exc).__name__}: {exc}") from exc
     finally:

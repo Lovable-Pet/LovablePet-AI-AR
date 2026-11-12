@@ -1925,6 +1925,7 @@ async def run_lite(
     real_size: bool = True,
     pick_template: bool = True,
     gate_readings: list[dict[str, Any]] | None = None,
+    shape_readings: list[dict[str, Any]] | tuple[dict[str, Any], dict[str, Any]] | None = None,
 ) -> PipelineResult:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1993,7 +1994,13 @@ async def run_lite(
             looks = pick_by_looks(original_photo, meta.weight_kg)
         except Exception as exc:  # noqa: BLE001 - no weights or no backbone: the vision call alone
             log["steps"]["template_looks_error"] = f"{type(exc).__name__}: {exc}"
-        if shape_call and (not reuse_appearance or read_shape):
+        if shape_readings:
+            # shape_readings: /v1/fit asked the shape question on this photo
+            # already (api/server.py) - its (answers, votes), no second call,
+            # and the model the fit check named is the one built
+            early_shape = (dict(shape_readings[0]), dict(shape_readings[1]))
+            log["steps"]["shape_from_fit"] = True
+        elif shape_call and (not reuse_appearance or read_shape):
             from .body_shape import read_body_shape
             from .extract import photo_blocks
             try:
