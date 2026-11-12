@@ -21,13 +21,18 @@ tail) and then to a coat region by anatomy:
   trunk   chest       the breast: forward-facing, between and above the forelegs
           underside   the belly: facing down, below the trunk's midline
           back        everything else on the trunk (top and flanks)
-  legs    legs_upper  above the elbow / knee
+  legs    legs_upper  above the elbow / knee, outside
+          underside   above the elbow / knee, facing the midline (inner thigh, armpit)
+          chest       above the elbow, facing forward (the front of the shoulder)
           legs_lower  elbow-to-wrist / knee-to-ankle
           paws        below the wrist / ankle
 
-The head regions (eyebrows, muzzle_bridge, cheeks, skull, ears) and the
-tail regions were tagged by hand around real anatomy and are kept. The old
-masks are moved to masks_bones/ so the change can be undone.
+The elbow, knee, wrist and ankle heights are measured on the mesh (see
+WRIST_SHARE), not taken from the rig. The head regions (eyebrows,
+muzzle_bridge, cheeks, skull, ears) and the tail regions were tagged by hand
+around real anatomy and are kept, except that a drop ear's inside and
+outside are split again by facing (split_drop_ears). The old masks are moved
+to masks_bones/ so the change can be undone.
 
 Works at the sixteen SOURCE regions in masks_source/ (the kept ones are read
 from there, the body ones written there) and then writes masks/ as the
@@ -85,6 +90,33 @@ BETWEEN_LEGS = 0.75
 # the spurs off before the feather
 EDGE_CLEAN_PX = 4
 FEATHER_PX = 2
+# Where the leg sections start, measured on the mesh. auto_rig places the
+# elbow/knee and wrist/ankle joints at fixed shares of the model's height, so
+# every generated template had its elbow at 0.373 and its wrist at 0.18: on
+# the maltese and the poodle that is 7-13 cm above the floor of the chest,
+# and the paws ran halfway up the leg. A dog's elbow sits level with the
+# bottom of the breastbone and the stifle about there too; the wrist is
+# about a third of that height off the ground and the hock about half.
+WRIST_SHARE = 0.35
+HOCK_SHARE = 0.5
+# the floor of the chest: the lowest trunk texels near the midline, from just
+# behind the forelegs to this share of the way back to the hips
+CHEST_FLOOR_REACH = 0.35
+# An upper-leg texel facing the midline at least this much (normal·inward)
+# is the inside of the thigh or the armpit: underside, as the region says,
+# not the outside of the leg with the back. A tan-point's inner thigh came
+# out black.
+UPPER_LEG_INNER = 0.3
+# the floor of the breastbone between the forelegs faces forward and down;
+# within this far behind the chest joint it is chest, not belly (the puppy)
+BRISKET_BEHIND = 0.06
+# the belly band's top along the body, measured in bins this long (m)
+BELLY_BAND_BIN = 0.03
+# ... and the hindquarters begin where it rises this much over its level
+# between the legs (m)
+BELLY_BAND_RISE = 0.03
+# ... and its stifle is the front of the hind leg within this of the knee (m)
+STIFLE_BAND = 0.05
 
 
 def segment_distance(points: np.ndarray, a: np.ndarray, b: np.ndarray) -> np.ndarray:
@@ -129,12 +161,39 @@ def smooth_normals(normal: np.ndarray, valid: np.ndarray, sigma: float) -> np.nd
     return out
 
 
+def leg_levels(points: np.ndarray, trunk: np.ndarray, joints: dict[str, np.ndarray]) -> dict[str, float]:
+    """Heights of the elbow/stifle and wrist/hock from the mesh (see WRIST_SHARE)."""
+    shoulder_y, hip_y = float(joints["L_shoulder_jnt"][1]), float(joints["L_hip_jnt"][1])
+    half = abs(float(joints["L_shoulder_jnt"][0]))
+    near = (trunk & (np.abs(points[:, 0]) < 0.3 * half)
+            & (points[:, 1] > shoulder_y + 0.05) & (points[:, 1] < shoulder_y + CHEST_FLOOR_REACH * (hip_y - shoulder_y)))
+    floor = float(np.percentile(points[near, 2], 2)) if near.sum() > 50 else float(joints["L_elbow_jnt"][2])
+    return {"elbow": floor, "knee": floor, "wrist": WRIST_SHARE * floor, "ankle": HOCK_SHARE * floor}
+
+
+def split_drop_ears(kept: dict[str, np.ndarray], position: np.ndarray, normal: np.ndarray, valid: np.ndarray,
+                    joints: dict[str, np.ndarray]) -> None:
+    """Inside against outside on an ear whose tip hangs below its base, by
+    the way the surface faces: the inside of a drop or folded ear faces the
+    head. seed_regions splits by which face sits nearer the midline, and on
+    the puppy's folded ears that put the whole visible outside in ears_inner."""
+    for side, sign in (("L", 1.0), ("R", -1.0)):
+        base, tip = joints.get(f"{side}_ear_base_jnt"), joints.get(f"{side}_ear_tip_jnt")
+        if base is None or tip is None or tip[2] >= base[2]:
+            continue
+        ear = ((kept["ears_outer"] > 0.5) | (kept["ears_inner"] > 0.5)) & valid & (np.sign(position[..., 0]) == sign)
+        inner = ear & (-sign * normal[..., 0] > 0.0)
+        kept["ears_inner"] = np.where(ear, inner.astype(np.float32), kept["ears_inner"])
+        kept["ears_outer"] = np.where(ear, (ear & ~inner).astype(np.float32), kept["ears_outer"])
+        print(f"[masks] {side} ear hangs: {int(inner.sum())} of {int(ear.sum())} texels face the head (inside)")
+
+
 def load_mask(masks_dir: Path, name: str, size) -> np.ndarray:
     return np.asarray(Image.open(masks_dir / f"{name}.png").convert("L").resize(size), dtype=np.float32) / 255.0
 
 
 def save_mask(path: Path, mask: np.ndarray) -> None:
-    Image.fromarray((np.clip(mask, 0, 1) * 255).astype(np.uint8), mode="L").save(path)
+    Image.fromarray((np.clip(mask, 0, 1) * 255 + 0.5).astype(np.uint8), mode="L").save(path)
 
 
 def main() -> None:
@@ -169,6 +228,7 @@ def main() -> None:
     joints = TemplateMesh.load(args.glb, size).joints
 
     kept = {name: load_mask(source_dir, name, size) for name in KEEP}
+    split_drop_ears(kept, position, normal, valid, joints)
     features = load_mask(masks_dir, "_features", size)
     taken = np.zeros(valid.shape, dtype=bool)
     for name in KEEP:
@@ -185,13 +245,16 @@ def main() -> None:
     chain_names = list(CHAINS)
     distances = np.stack([chain_distance(points, joints, CHAINS[c][0]) / CHAINS[c][1] for c in chain_names], axis=1)
     chain = np.argmin(distances, axis=1)
-    # the sternum and the groin belong to the trunk, whichever chain is nearer
     trunk_index = chain_names.index("trunk")
+    levels = leg_levels(points, chain == trunk_index, joints)
+    print("[masks] leg levels from the mesh (rig joints): " + ", ".join(
+        f"{k} {v:.3f} ({float(joints[f'L_{k}_jnt'][2]):.3f})" for k, v in levels.items()))
+    # the sternum and the groin belong to the trunk, whichever chain is nearer
     front_between = ((np.abs(points[:, 0]) < BETWEEN_LEGS * abs(joints["L_shoulder_jnt"][0]))
-                     & (points[:, 2] > joints["L_elbow_jnt"][2])
+                     & (points[:, 2] > levels["elbow"])
                      & (points[:, 1] > joints["L_shoulder_jnt"][1] - 0.06) & (points[:, 1] < joints["spine_1_jnt"][1]))
     hind_between = ((np.abs(points[:, 0]) < BETWEEN_LEGS * abs(joints["L_hip_jnt"][0]))
-                    & (points[:, 2] > joints["L_knee_jnt"][2])
+                    & (points[:, 2] > levels["knee"])
                     & (points[:, 1] > joints["spine_1_jnt"][1]) & (points[:, 1] < joints["tail_1_jnt"][1]))
     is_leg = np.array([chain_names[c].startswith("leg_") for c in chain])
     chain = np.where(is_leg & (front_between | hind_between), trunk_index, chain)
@@ -214,20 +277,79 @@ def main() -> None:
             # tail base faces down too: it stays with the back (the tail's
             # colour), not the belly
             belly = sel & ~chest & (down > BELLY_DOWN) & (y < joints["tail_1_jnt"][1] - BELLY_BEHIND_TAIL)
-            label[chest] = "chest"
-            label[belly] = "underside"
+            # ... and on a short neck (the puppy) the chain reaches up under
+            # the jaw: facing down in front of the chest joint is the throat,
+            # which the belly cut as a band across it
+            # ... and a trunk texel facing the midline is the inside of a
+            # thigh or the armpit that the between-legs rule handed to the
+            # trunk: underside, as on the leg itself (it came out back, a
+            # dark patch seen between the puppy's legs)
+            inward_t = -np.sign(points[:, 0]) * normals[:, 0]
+            belly = belly | (sel & ~chest & (inward_t > UPPER_LEG_INNER))
+            throat = belly & (y < joints["chest_jnt"][1] + BRISKET_BEHIND)
+            label[chest | throat] = np.where(throat[chest | throat], "throat", "chest")
+            label[belly & ~throat] = "underside"
             label[sel & ~chest & ~belly] = "back"
         elif name.startswith("leg_"):
-            side = "L" if name[4] == "L" else "R"
             front = name.endswith("F")
-            upper_z = joints[f"{side}_elbow_jnt"][2] if front else joints[f"{side}_knee_jnt"][2]
-            lower_z = joints[f"{side}_wrist_jnt"][2] if front else joints[f"{side}_ankle_jnt"][2]
-            label[sel & (z > upper_z)] = "legs_upper"
+            upper_z = levels["elbow"] if front else levels["knee"]
+            lower_z = levels["wrist"] if front else levels["ankle"]
+            inward = -np.sign(points[:, 0]) * normals[:, 0]
+            upper = sel & (z > upper_z)
+            # the front of the shoulder and upper arm is the chest's ("out to
+            # the front of both shoulders"): with the elbow at the floor of
+            # the chest it had become back, a dark patch on the front of each
+            # foreleg of a saddle or tan-point
+            # ... and so is its inner face where it still turns forward,
+            # beside the breastbone (an underside spot in the puppy's bib)
+            shoulder = (upper & front & (y < joints["chest_jnt"][1] + 0.02)
+                        & ((forward > CHEST_FORWARD) | ((forward > 0.2) & (inward > UPPER_LEG_INNER))))
+            label[upper & ~shoulder & (inward <= UPPER_LEG_INNER)] = "legs_upper"
+            label[upper & ~shoulder & (inward > UPPER_LEG_INNER)] = "underside"
+            label[shoulder] = "chest"
             label[sel & (z <= upper_z) & (z > lower_z)] = "legs_lower"
             label[sel & (z <= lower_z)] = "paws"
         elif name == "tail":
             # the tail masks are kept; tail texels the kept masks missed join tail_top
             label[sel] = "tail_top"
+
+    # the outside of an upper leg, or the flank, lower than the belly band
+    # beside it goes with the belly: the band is underside on the trunk, and
+    # a patch below its top stood alone as a dark patch between a light
+    # chest, belly and lower leg (the puppy's elbows and the flank in front
+    # of its stifles, user). Only in front of the hindquarters: there the
+    # down-facing trunk - the underside of the rump, the backs of the thighs
+    # - lifts the band's top from the belly line (0.37 m on the jindo) to the
+    # hips (0.51 m), and the whole outer thigh under it, which is the trunk's
+    # (the outer thigh's nearest bone is the spine), went tan on a tan-point
+    # jindo (user: "진돗개는 뭐 바꾼거임"). The hindquarters start where the
+    # top first rises BELLY_BAND_RISE over its level between the legs, or at
+    # the front of the stifle if that is further forward. In front of it, the
+    # fold of skin from the belly to the stifle stays underside: on the poodle,
+    # whose band sits high (0.39 m), that is a tall strip ahead of the thigh.
+    belly = (label == "underside") & (chain == trunk_index) & (down > BELLY_DOWN)
+    upper_out = ((label == "legs_upper") | (label == "back")) & (chain != chain_names.index("tail"))
+    if belly.any() and upper_out.any():
+        bins = np.arange(y[belly].min(), y[belly].max() + BELLY_BAND_BIN, BELLY_BAND_BIN)
+        tops = [np.percentile(z[belly & (np.abs(y - b) < BELLY_BAND_BIN)], 90)
+                if (belly & (np.abs(y - b) < BELLY_BAND_BIN)).sum() > 20 else np.nan for b in bins]
+        tops = np.asarray(tops)
+        known = ~np.isnan(tops)
+        between = known & (bins > joints["L_shoulder_jnt"][1]) & (bins < joints["L_hip_jnt"][1])
+        if between.any():
+            level = float(np.median(tops[between]))
+            middle = (joints["L_shoulder_jnt"][1] + joints["L_hip_jnt"][1]) / 2.0
+            rises = bins[known & (bins > middle) & (tops > level + BELLY_BAND_RISE)]
+            hind = float(rises.min()) - BELLY_BAND_BIN / 2.0 if rises.size else float(bins[known].max())
+            hind_legs = np.isin(chain, [i for i, n in enumerate(chain_names) if n.startswith("leg_") and n.endswith("B")])
+            stifle = hind_legs & (label == "legs_lower") & (z > levels["knee"] - STIFLE_BAND)
+            if stifle.sum() > 20:
+                hind = min(hind, float(np.percentile(y[stifle], 2)))
+            top = np.interp(y, bins[known], tops[known])
+            low = upper_out & (z < top) & (y >= bins[known].min()) & (y < hind)
+            label[low] = "underside"
+            print(f"[masks] upper-leg and flank texels under the belly band given to the underside: {int(low.sum())} "
+                  f"(band {level:.3f} m, stops at y {hind:+.3f})")
 
     masks = {name: kept[name].copy() for name in KEEP}
     for name in BODY:
@@ -276,7 +398,7 @@ def main() -> None:
             print(f"[masks] previous source masks backed up to {backup}")
     source_out.mkdir(parents=True, exist_ok=True)
     out_dir.mkdir(parents=True, exist_ok=True)
-    for name in BODY:
+    for name in BODY + ("ears_outer", "ears_inner"):
         save_mask(source_out / f"{name}.png", masks[name])
     merged = {region: np.max(np.stack([masks[s] for s in SOURCES[region]]), axis=0) for region in REGIONS}
     for region in REGIONS:

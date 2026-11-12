@@ -1,18 +1,19 @@
 # Lovable Pet – 파이프라인 서버
 
 보호소 기록(종·체중·털색)과 사진을 받아, 리깅·애니메이션이 살아 있는 템플릿 GLB에 그 개의 코트를 입혀 돌려준다.
-Spring 서버가 HTTP로 부른다 — 계약은 [docs/API.md](docs/API.md).
+Spring 서버가 HTTP로 부른다 — 계약은 [docs/API.md](docs/API.md), 애니메이션 재생은 [docs/ANIMATION.md](docs/ANIMATION.md).
 
 ## 폴더
 
 ```
-api/              파이프라인 (기본 lite: api/lite.py), HTTP 서버 api/server.py, CLI python -m api.run
+api/              파이프라인 (기본 lite: api/lite.py), HTTP 서버 api/server.py, CLI python -m api.run,
+                  아이폰 AR용 GLB → USDZ api/usdz.py
 api/data/         생김새 분류기 template_pick.npz
-ar_pipeline/      템플릿 제작 Blender 스크립트 (드라이버 new_template.py)
+ar_pipeline/      템플릿 제작·수정 스크립트 (드라이버 new_template.py)
 Dockerfile        서버 이미지 (CPU torch, api/, tests/scripts.py)
 deploy/           EC2용 docker-compose.yml
-lambda/rembg/     배경 제거(BRIA RMBG 2.0) Lambda 이미지 (handler.py, Dockerfile, 메모리를 줄인 모델 slim_model.py; 계산은 api/bria.py)
-docs/             API.md (Spring 연동 계약; Spring 쪽 클라이언트 코드는 Spring 서버 저장소에 있다)
+lambda/rembg/     배경 제거(BRIA RMBG 2.0) Lambda 이미지
+docs/             API.md (Spring 연동 계약), ANIMATION.md (클립과 재생)
 tests/scripts.py  오프라인 대본 (PIPELINE_ALLOW_SCRIPTED=1, 호출·비용 없음)
 ```
 
@@ -32,6 +33,8 @@ python -m api.run --record <기록.json> --photo <사진> --out output/runs/<이
 ```
 
 Blender(`BLENDER_EXE`)가 있으면 미리보기 PNG도 렌더하고, 없으면 GLB만 만든다.
+아이폰 AR(Quick Look)용 USDZ는 서버가 GLB 옆에 같이 만든다(`model.usdz`). 따로 만들려면
+`python -m api.usdz <GLB> [--clip <클립> | --all] [-o <출력>]`.
 
 ## 도커로 실행
 
@@ -49,7 +52,7 @@ main에 머지되면 이미지를 GHCR(`ghcr.io/lovable-pet/lovablepet-ai-ar`)�
 서버 준비 (한 번):
 
 1. EC2: Ubuntu 24.04, t3.large(8 GB), 디스크 30 GB, Elastic IP. 보안그룹 22(SSH), Spring 포트. 8000은 열지 않는다.
-   8 GB는 배경 제거를 Lambda로 보낼 때(`REMBG_URL`, 아래 "배경 제거 Lambda") 기준이다. 서버가 직접 돌리면 그 한 번에 약 8 GB가 더 든다.
+   8 GB는 배경 제거를 Lambda로 보낼 때(`REMBG_URL`) 기준이다. 서버가 직접 돌리면 그 한 번에 약 8 GB가 더 든다.
 2. 서버에서:
    ```
    sudo apt-get update && sudo apt-get install -y docker.io docker-compose-v2 gh
@@ -58,42 +61,24 @@ main에 머지되면 이미지를 GHCR(`ghcr.io/lovable-pet/lovablepet-ai-ar`)�
    ```
 3. 저장소 Actions secrets: `SSH_HOST`(Elastic IP), `SSH_USER`(ubuntu), `SSH_KEY`(서버 `authorized_keys`에 넣은 키의 개인키).
 
-서버 폴더 `~/lovablepet-ai/`: `docker-compose.yml`(배포가 복사), `.env`, `output/`(템플릿 + 작업 파일), `cache/`(DINOv2·rembg 가중치).
+서버 폴더 `~/lovablepet-ai/`: `docker-compose.yml`(배포가 복사), `.env`, `output/`(템플릿 + 작업 파일), `cache/`(모델 가중치).
 Spring 컨테이너는 외부 네트워크 `lovablepet`에 붙어 `http://pipeline:8000`으로 부른다.
 재배포하면 진행 중이던 작업은 failed가 되므로 작업이 없을 때 main에 머지한다.
 
-로그: `docker logs -f pipeline`
+- 로그: `docker logs -f pipeline`
+- `.env`를 고친 뒤엔 `docker compose up -d` (`restart`는 `.env`를 다시 읽지 않는다)
+- 배포가 실행 중인 이미지에 `:latest` 태그를 붙여 두어 손으로 띄워도 같은 이미지를 쓴다. 그 태그가 없으면 compose가 GHCR에서 받으려다 `unauthorized`로 멈춘다
 
 ## 배경 제거 Lambda
 
-배경 제거(BRIA RMBG 2.0, rembg 기본 모델)는 1024×1024 한 번에 CPU 메모리 약 8 GB를 쓴다. 작업 하나 동안 서버 최고치 10.5 GB 중 이 단계가
-대부분이었고, 나머지 단계는 3 GB대다. `REMBG_URL`이 있으면 이 계산만 Lambda(`lambda/rembg/`)가 하고 서버는 사진을 1024×1024로 줄여 보내
-마스크를 받는다. rembg의 계산을 둘로 나눈 것이다(`api/bria.py`).
-
-Lambda 이미지는 같은 모델을 메모리를 덜 쓰게 고쳐 넣는다(`lambda/rembg/slim_model.py`, 이미지 빌드 때 변환). 8 GB는 모델이 아니라 ONNX 변환
-방식 탓이었다. opset 14 파일이라 변형 합성곱(DeformConv) 20개가 각각 GatherND 4개짜리 노드 60개로 풀려 있었다. 이것을 ONNX 기본 DeformConv로
-바꾸고, 큰 DeformConv는 입력 채널을 나눠 더하고, 1024×1024 마지막 단계(768 MB 확대 + 960 MB 이어 붙이기)는 1×1 Conv를 확대보다 먼저 한다.
-모두 같은 계산을 순서만 바꾼 것이다. 여기에 glibc가 큰 블록을 바로 돌려주게 하는 설정(Dockerfile의 `MALLOC_*`)을 더했다.
-
-2026-10-30 확인:
-- 마스크: 평가셋·픽스처 29장에서 원래 모델과 최대 1/255 차이, 0.5 기준 IoU 1.000000.
-- Lambda 이미지를 Docker로 함수와 같은 제한(메모리 3008 MB, CPU 2개)에 두고 5회 연속: 최고 1,886 MiB, 한 장 약 29초(첫 호출 35초).
-  같은 조건에서 원래 모델은 메모리 부족으로 죽는다.
-- 실제 Lambda(3000 MB): 한 장 54초(모델 읽기 포함), 다음 호출 43초. Max Memory Used 2,871 MB는 모델 파일의 페이지 캐시(약 1 GB)를
-  Lambda가 사용 메모리로 세서다. Docker에서 캐시를 비우고 재면 2,870 MiB로 같다. 그래서 handler가 모델을 읽은 뒤 캐시를 버린다
-  (`posix_fadvise`, 같은 조건에서 2,138 MiB). 새 이미지 뒤 첫 호출 하나는 180초 제한에 걸렸다 — 제한 시간 5분.
-
-2026-10-27 확인 (서버, 원래 모델로 잰 값):
-- 서버: 대본 작업 두 개 연속 최고 3.1 GB(이전 10.5 GB), 작업 67~73초(이전 126초). 키가 틀리면 Lambda가 401.
-- 얼굴 자르기는 배경 제거를 다시 돌리지 않고 사진 준비의 컷 상자를 쓴다(작업당 모델 1회). 29장 중 28장이 다시 돌렸을 때와 0~8 px 차이,
-  `images (1)`은 바닥 목줄이 상자에 들어가 72 px 넓다.
-
+배경 제거는 한 번에 CPU 메모리 약 8 GB를 쓴다. `REMBG_URL`이 있으면 이 계산만 Lambda(`lambda/rembg/`, 메모리를 줄인 모델)가 하고
+서버는 사진을 1024×1024로 줄여 보내 마스크를 받는다(`api/bria.py`).
 `.github/workflows/rembg-lambda.yml`: `lambda/rembg/`나 `api/bria.py`가 main에 바뀌면(또는 수동 실행) 이미지를 ECR에 올리고 함수를 새 이미지로 바꾼다.
 
 AWS 준비 (한 번, 서울 리전 ap-northeast-2):
 
 1. ECR: 프라이빗 리포지토리 `lovablepet-rembg`.
-2. IAM 사용자(GitHub Actions용)에 아래 정책을 붙이고 액세스 키를 만들어 저장소 secrets `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`에 넣는다.
+2. IAM 사용자(GitHub Actions용)에 아래 정책을 붙이고 액세스 키를 저장소 secrets `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`에 넣는다.
    ```json
    {
      "Version": "2012-10-17",
@@ -110,13 +95,9 @@ AWS 준비 (한 번, 서울 리전 ap-northeast-2):
    }
    ```
 3. Actions에서 "rembg Lambda"를 수동 실행한다. 함수가 아직 없으니 이미지만 ECR에 올라간다(태그 = 커밋 SHA).
-4. Lambda → 함수 생성 → 컨테이너 이미지, 이름 `lovablepet-rembg`, 위 이미지, x86_64. 구성:
-   메모리 3008 MB(새 계정 상한, 이것으로 충분), 제한 시간 5분(`api/bria.py` `TIMEOUT_S`와 같게), 환경 변수 `REMBG_KEY`(`openssl rand -hex 32`), 함수 URL(인증 유형 NONE),
-   예약된 동시성 3(URL이 공개라 남용 상한).
+4. Lambda → 함수 생성 → 컨테이너 이미지, 이름 `lovablepet-rembg`, 위 이미지, x86_64.
+   메모리 3008 MB, 제한 시간 5분, 환경 변수 `REMBG_KEY`(`openssl rand -hex 32`), 함수 URL(인증 유형 NONE), 예약된 동시성 3.
 5. 서버 `.env`에 `REMBG_URL=<함수 URL>`, `REMBG_KEY=<같은 값>`을 넣고 `docker compose up -d`.
-
-이후 main에 머지할 때 이 파일들이 바뀌어 있으면 함수가 자동으로 새 이미지로 바뀐다.
-비용: 한 번에 약 2.9 GB × 30~60초 = 90~180 GB-초, Lambda 무료 한도(월 40만 GB-초) 안에서 월 2,200~4,400회.
 
 ## 환경변수 (`.env`)
 
@@ -128,10 +109,53 @@ AWS 준비 (한 번, 서울 리전 ap-northeast-2):
 | `PIPELINE_PUBLIC_URL` | 응답 파일 URL 앞에 붙일 주소 |
 | `BLENDER_EXE` | 미리보기 렌더용 Blender |
 | `PIPELINE_ALLOW_SCRIPTED=1` | 오프라인 대본 실행 허용 (연동 테스트용) |
-| `REMBG_URL` | 배경 제거 Lambda의 함수 URL. 없으면 서버가 rembg의 원래 모델로 직접 돌린다(한 번에 약 8 GB) |
+| `REMBG_URL` | 배경 제거 Lambda의 함수 URL. 없으면 서버가 직접 돌린다(한 번에 약 8 GB) |
 | `REMBG_KEY` | Lambda와 같은 비밀 값 (`X-Rembg-Key` 헤더) |
 
 ## 템플릿 자산 갱신
+
+부위 마스크를 다시 자를 때는 이 순서로 돌리고 앵커를 다시 렌더한다:
+
+```
+python ar_pipeline/refine_masks.py --template <slug>_small --glb output/skeleton_<slug>_small.glb \
+    --geometry output/templates/<slug>_small/geometry --label-smooth 14 --edge-clean 8
+python ar_pipeline/refine_face_masks.py --template <slug>_small --glb output/skeleton_<slug>_small.glb \
+    --geometry output/templates/<slug>_small/geometry
+python -m ar_pipeline.open_face_masks --slug <slug>
+python -m ar_pipeline.smooth_masks --slug <slug>
+python -m ar_pipeline.tidy_regions --slug <slug>
+python ar_pipeline/render_anchors.py --template <slug>_small
+```
+
+필요할 때 돌리는 수정 (자세한 이유·방법은 각 스크립트 맨 위 설명):
+
+- UV가 다른 곳 텍셀을 읽는 삼각형: `python -m ar_pipeline.fix_uv_overlaps --slug <slug>` (이미 만든 개는 `--glb <GLB>`)
+- 브라우저에서 흑백 경계에 번개무늬: `python -m ar_pipeline.mip_islands --glb <만든 개 GLB> --slug <slug>`
+- 눈·코 보호 영역만 다시: `python ar_pipeline/build_landmarks.py <glb> <템플릿 폴더> <geometry> --protect-only`
+- 흰 털 위 어두운 털 조각: `python -m ar_pipeline.fix_normals --slug <slug>`
+- 홍채 없는 회색 눈: `python -m ar_pipeline.paint_eyes --slug <slug> --install` (홍채는 있고 반사광만 없으면 `--lights-only`)
+- 검은 원판·털뿐인 발바닥: `python -m ar_pipeline.paint_pads --slug <slug> [--ref jindo] --install`
+- 흰 털에 박힌 검은 줄·점: `python -m ar_pipeline.fill_gutters --slug <slug> --install`
+- 스무딩으로 녹은 가슴 되돌리기: `python -m ar_pipeline.restore_geometry --slug <slug> --from <이전 GLB>` 뒤 `fix_normals`
+- 늘어진 귀에 뺨 색: `python -m ar_pipeline.ear_flaps --slug <slug> --install`
+- 수염을 따로 재질로 (맨 마지막): `python -m ar_pipeline.split_whiskers --slug <slug>`
+- 눈 둘레 마스크만: `python -m ar_pipeline.open_face_masks --slug <slug> --eye-ring-only`
+
+애니메이션 (순서: `rig_fix` → `mouth` → `pose_clips`; 클립은 docs/ANIMATION.md):
+
+```
+python -m ar_pipeline.rig_fix --slug <slug> --install
+python -m ar_pipeline.mouth --slug <slug> --install          # 짖기용 입 (진도)
+python -m ar_pipeline.mouth --slug <slug> --remake --install # 이미 있는 입을 걷어내고 다시 (소형견 템플릿: mouth.MUZZLES)
+python -m ar_pipeline.pose_clips --slug <slug> --install      # 기본 클립
+python -m ar_pipeline.pose_clips --slug <slug> --clip bark --install
+python -m ar_pipeline.pose_clips --slug <slug> --clip lying --clip sit_down --clip stand_up --clip lie_down --clip get_up --install
+python -m ar_pipeline.mouth_clips --slug <slug> --install     # 이미 있는 클립에 헥헥거리는 입만 얹기 (몸 동작은 그대로)
+```
+
+죽은 척·자세 전환의 모션캡처(`ar_pipeline/data/dog_clips.npz`, AI4Animation SIGGRAPH 2018)는 **CC BY-NC 4.0: 출처 표시, 상업적 이용 불가**.
+
+배포용 묶음:
 
 ```
 tar -czf dist/tpl_<slug>.tar.gz output/skeleton_<slug>_small.glb output/templates/<slug>_small

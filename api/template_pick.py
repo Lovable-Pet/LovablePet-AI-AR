@@ -120,8 +120,22 @@ def decide(probs: dict[str, float], weight_kg: float | None = None) -> dict[str,
             "model": BACKBONE}
 
 
+def _weighs_like(template: str, weight_kg: float | None) -> bool:
+    """The record weight is not above what dogs of this look weigh
+    (weight_range's 95th percentile); True without a weight or a range."""
+    span = weight_range(template) if looks_weights_ok() else None
+    return weight_kg is None or span is None or weight_kg <= span[1]
+
+
+def _weighs_within(template: str, weight_kg: float | None) -> bool:
+    """The record weight is inside what dogs of this look weigh
+    (weight_range, 5th to 95th percentile); True without a weight or a range."""
+    span = weight_range(template) if looks_weights_ok() else None
+    return weight_kg is None or span is None or span[0] <= weight_kg <= span[1]
+
+
 def combine(looks: dict[str, Any] | None, shape: dict[str, Any] | None,
-            weight_kg: float | None = None) -> dict[str, Any]:
+            weight_kg: float | None = None, votes: dict[str, Any] | None = None) -> dict[str, Any]:
     """The template to build and what the verdict needs, from the two
     readings of the photograph:
       looks  this module's pick (DINOv2): its "none" - pom-type and flat
@@ -130,25 +144,75 @@ def combine(looks: dict[str, Any] | None, shape: dict[str, Any] | None,
              closest model and the differences from it, which pick the
              model a person would (20 of 22 against 13 of 22 for the looks,
              tools/template_judge.py, 2026-10-18)
+      votes  that call's per-sample tally (its closest_model counts)
     The vision call's model when it named one, else the looks' (its nearest
     real template for "none"); a jindo puppy above puppy_max_kg is built as
-    the adult either way."""
+    the adult either way.
+
+    Three places where the vision call's model is not kept, each seen on the
+    64 hard shelter photos of 2026-11-11 (tools/hard_photos/pick_replay.py
+    replays the pick on them and on the 30 dogs the user judged on 10-18):
+      a puppy   the call names the adult jindo for jindo-type puppies (7 dogs
+                of 1.7-4.4 kg, 3/3 votes for four of them): when the looks
+                are sure of a jindo puppy and the dog weighs less than adult
+                jindos do (weight_range's 5th percentile, 5 kg), the puppy is
+                built. The user looked at five side by side (11-11) and took
+                the puppy for four; the fifth, a 3 kg dog with an adult's
+                grizzled face in close-up, stays the adult - the looks gave
+                it 0.76, under their own sure cut, the others 0.95-0.99
+      too heavy a chihuahua heavier than chihuahuas are (8-10.6 kg, 3 dogs,
+                all 3/3 votes) takes the looks' model if the weight fits
+                that, else the jindo
+      no majority  when no model has more than half of the samples, the
+                looks' model is taken if it is a real one the weight fits
+                (a 28 kg labrador read jindo / jindo puppy / maltese, the
+                looks retriever 1.00). A 2-1 split follows the looks only
+                when they are sure and the weight is inside that look's
+                range, and never off the puppy for a dog of puppy weight:
+                three more hard photos right (two maltese types read
+                chihuahua and jindo, a 20 kg drop-eared dog read jindo) and
+                none of the user's 22 picks changed. Without those limits it
+                broke two of the 22
+    `moved` says which of them applied."""
     looks = looks or {}
     shape = shape or {}
     vision = shape.get("closest_model")
     by_vision = vision in TEMPLATES
+    looks_real = bool(looks) and looks["template"] != NO_TEMPLATE
     if by_vision:
         template = vision
     elif looks:
         template = looks["nearest"] if looks["template"] == NO_TEMPLATE else looks["template"]
     else:
         template = "jindo"
+    by, moved = "vision" if by_vision else "looks" if looks else "default", None
+    tally = {k: int(n) for k, n in ((votes or {}).get("closest_model") or {}).items()}
+    if (by_vision and tally and 2 * tally.get(vision, 0) <= sum(tally.values()) and looks_real
+            and looks["template"] != template and _weighs_like(looks["template"], weight_kg)):
+        template, by, moved = looks["template"], "looks", f"no majority {tally}"
+    # ... and a split with a majority too, when the looks are sure of another
+    # real model and the dog weighs what dogs of that look do, both ends
+    # (not off the puppy for a dog of puppy weight: the looks call small
+    # drop-eared puppies retrievers, an adult's long-coated body)
+    elif (by_vision and tally and tally.get(vision, 0) < sum(tally.values()) and looks_real and looks.get("sure")
+          and looks["template"] != template and _weighs_within(looks["template"], weight_kg)
+          and not (template == "jindo_puppy" and weight_kg is not None
+                   and weight_kg < (weight_range("jindo") or (0.0, 0.0))[0])):
+        template, by, moved = looks["template"], "looks", f"split vote {tally}, the looks sure"
+    if template == "chihuahua" and by == "vision" and not _weighs_like("chihuahua", weight_kg):
+        fits = looks_real and looks["template"] != "chihuahua" and _weighs_like(looks["template"], weight_kg)
+        template, by = (looks["template"], "looks") if fits else ("jindo", "default")
+        moved = f"{weight_kg} kg is above a chihuahua's weight"
+    if (template == "jindo" and looks.get("template") == "jindo_puppy" and looks.get("sure") and weight_kg is not None
+            and looks_weights_ok() and weight_kg < (weight_range("jindo") or (0.0, 0.0))[0]):
+        template, moved = "jindo_puppy", f"a puppy by its looks, {weight_kg} kg"
     heavy = False
     if template == "jindo_puppy" and weight_kg is not None and looks_weights_ok() and weight_kg > puppy_max_kg():
         template, heavy = "jindo", True
-    return {"template": template, "by": "vision" if by_vision else "looks" if looks else "default",
-            "match": shape.get("model_match") if by_vision else None,
-            "differences": list(shape.get("differences") or []) if by_vision else [],
+    kept = by == "vision"   # the call's match and differences are against its own model
+    return {"template": template, "by": by, "moved": moved,
+            "match": shape.get("model_match") if kept else None,
+            "differences": list(shape.get("differences") or []) if kept else [],
             "heavy_puppy": heavy or looks.get("looks") == "jindo_puppy" and looks.get("template") == "jindo",
             "looks": looks.get("template"), "looks_confidence": looks.get("confidence"),
             "no_template": looks.get("template") == NO_TEMPLATE}

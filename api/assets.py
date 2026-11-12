@@ -214,7 +214,7 @@ def build_pet_asset(
         )
         coat = result.image
         normal_image = result.normal
-        report["texture"] = result.report
+        report["texture"] = {k: v for k, v in result.report.items() if k != "marking_mask"}
     coat.save(texture_path)
     if normal_image is not None:
         normal_image.save(normal_path)

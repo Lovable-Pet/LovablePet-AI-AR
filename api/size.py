@@ -46,7 +46,7 @@ jindo. Fitted on 21 AI Hub 71520 breed groups (5,495 adults); leaving each
 breed out, it predicts that breed's k within 2.6% mean, 7.1% max
 (docs/size_data/README.md 1d, tools/aihub_size/validate_shape_k.py). On the
 templates that have measured references it gives jindo 18.1 (measured
-18.5), retriever 18.4 (18.9), toy poodle 16.7 (17.0), chihuahua 15.7
+18.5), retriever 18.4 (18.9), toy poodle 16.7 (17.9), chihuahua 15.7
 (15.8), maltese 16.9 (15.9: the long coat's fur volume, which the jindo
 correction does not take out). A measured reference therefore stays first.
 
@@ -84,9 +84,13 @@ REFERENCE: dict[str, tuple[float, float]] = {
     # n=3,044 medians (Simpson 2017 Table 3), k 18.9. The 26 AI Hub goldens
     # give 55.5 cm / 31.0 kg, k 18.1; labradors are heavier (k 16.7).
     "retriever": (0.572, 27.8),
-    # toy + miniature poodles measured at 12 months, n=60 (Ortiz 2015), k 17.0.
-    # The AI Hub "poodle" group mixes sizes (28 / 3.8, k 18.3, height CV 23%).
-    "toypoodle": (0.27, 4.0),
+    # AI Hub 71520 adult poodles, n=1,242, medians, k 17.9. They mix toys and
+    # miniatures (height CV 23%), and so do the shelter's poodles. Until
+    # 2026-11-12 this was 27 cm / 4.0 kg, k 17.0 (toy + miniature poodles at 12
+    # months, n=60, Ortiz 2015): dog by dog, that rule put these 1,242 poodles
+    # 6.9% short (the light quarter -9.1%, the heavy quarter -4.9%), this one
+    # 2.1% (5-fold, tools/aihub_size/check_rule.py and rule_variants.py)
+    "toypoodle": (0.28, 3.8),
     # AI Hub smooth-coat chihuahuas, n=39 medians, k 15.6 (long coat n=148:
     # 20 / 2.55, k 14.6). The mesh is smooth-coated.
     "chihuahua": (0.22, 2.7),

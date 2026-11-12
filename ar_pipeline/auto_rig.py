@@ -234,6 +234,10 @@ def seams_from_rig(obj, v: np.ndarray, dominant: list[str], joints: dict[str, li
     for part in ("body", "neck"):
         if part in names:
             sel = ids == names.index(part)
+            if not sel.any():
+                # a puppy's short neck can lose all its vertices to the head
+                # and the body in the majority passes (the jindo puppy 2)
+                continue
             # the horizontal cut sits LOW on the flank, inside the belly's
             # colour: at mid-height it ran along the belly/flank colour
             # boundary, and the refinement cannot blend across a UV seam,

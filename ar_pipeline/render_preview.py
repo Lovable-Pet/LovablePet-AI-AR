@@ -159,7 +159,7 @@ def apply_clip(clip_name, frame):
     return chosen
 
 
-def add_ground(span: float) -> None:
+def add_ground(span: float, at_zero: bool = False) -> None:
     """A floor under the animal.
 
     Without one the pet hangs in empty space and reads as a cut-out, which
@@ -172,7 +172,9 @@ def add_ground(span: float) -> None:
         for obj in bpy.data.objects if obj.type == "MESH"
         for corner in obj.bound_box
     )
-    bpy.ops.mesh.primitive_plane_add(size=span * 12, location=(0, 0, lowest))
+    # --floor0: the model's own floor (z = 0, where the template's feet stand
+    # at rest), for judging a clip's ground contact; else under its lowest point
+    bpy.ops.mesh.primitive_plane_add(size=span * 12, location=(0, 0, 0.0 if at_zero else lowest))
     plane = bpy.context.active_object
     material = bpy.data.materials.new("ground")
     material.use_nodes = True
@@ -243,6 +245,9 @@ def main() -> None:
     if "--clear" in argv:
         clear = True
         argv.remove("--clear")
+    floor_zero = "--floor0" in argv
+    if floor_zero:
+        argv.remove("--floor0")
     key_angle = 35.0
     if "--light" in argv:
         index = argv.index("--light")
@@ -250,13 +255,19 @@ def main() -> None:
         del argv[index:index + 2]
     if len(argv) != 2:
         print("[render_preview] usage: ... -- in.glb out.png [--clip NAME] [--frame N] "
-              "[--zoom F] [--angle DEG] [--face] [--light DEG] [--grey] [--clear]")
+              "[--zoom F] [--angle DEG] [--face] [--light DEG] [--grey] [--clear] [--floor0]")
         sys.exit(1)
     glb_path, out_png = argv
 
     reset()
     bpy.ops.import_scene.gltf(filepath=glb_path)
     pose_frame = apply_clip(clip_name, frame) if clip_name else 1
+    # a clip that moves the body (the jindo's sitting since 11-03) ends where
+    # the mesh's rest bounds say nothing about: a floor under them left the
+    # sitting dog hovering. The templates stand on z = 0, so a posed render
+    # gets that floor
+    posed = bool(clip_name) and any(a.name.lower() == clip_name.lower() for a in bpy.data.actions)
+    floor_zero = floor_zero or posed
 
     meshes = [obj for obj in bpy.data.objects if obj.type == "MESH"]
     if not meshes:
@@ -289,7 +300,7 @@ def main() -> None:
                   height_share if height_share is not None else (0.15 if face else 0.35))
     build_lighting(span, key_angle)
     if not clear:
-        add_ground(span)
+        add_ground(span, at_zero=floor_zero)
 
     scene = bpy.context.scene
     # the EEVEE identifier was renamed between Blender versions, so pick

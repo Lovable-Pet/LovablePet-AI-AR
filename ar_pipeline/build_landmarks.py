@@ -34,7 +34,11 @@ protect.png
 
 Usage:
     python ar_pipeline/build_landmarks.py \
-        output/skeleton_shiba_small.glb output/templates/shiba_small output/geometry
+        output/skeleton_shiba_small.glb output/templates/shiba_small output/geometry [--protect-only]
+
+--protect-only rewrites protect.png alone, from the eyes and nose already in
+landmarks.json (fur_direction.png is not quite deterministic, so a protect
+rule change need not touch it).
 """
 
 from __future__ import annotations
@@ -82,13 +86,23 @@ NOSE_LEATHER_GROW_PX = 1
 # Meshy jindo) the eye's feature island is whole-protected and carries a
 # ring of the template's own white fur round the lids, which came back on
 # every dog as white spectacles. On an island within this reach of an eye
-# landmark only the eye opening is protected: the dark lid line (linear
-# luma below EYE_LID_MAX_LUMA, its largest piece) with the iris and the
-# highlight it encloses, grown a little.
+# landmark only the eye opening is protected: the dark pieces (linear luma
+# below EYE_LID_MAX_LUMA) that touch the eye's own feature texels - the lid
+# line, the iris, the pupil - within EYE_OPENING_CAP_M of the eye centre,
+# with whatever they enclose (the highlight). Taking the largest dark piece alone kept the pupil and iris of
+# the chihuahua, the poodle and the retriever and left their dark lid rim and
+# the wet highlight to the coat: the eye lost its outline (user: "눈 부분
+# 정확히 구분").
 EYE_ISLAND_REACH_M = 0.03
+# ... no further out than this: the chihuahua's lid ring sits 1.6-2.5 cm
+# from its eye centre while its feature texels (the iris) stop at 1.4
+EYE_OPENING_CAP_M = 0.03
 # 0.2 plus a 2 px grow kept the lid's grey fade into the white fur, a grey
-# rim round every eye; the lid itself is below 0.1.
-EYE_LID_MAX_LUMA = 0.1
+# rim round every eye. 0.1 still kept the fade's inner part and the
+# chihuahua's brown lid skin, lighter than a black coat: a halo round the
+# eye (user: "눈 경계면 명확하지 않음"); the lid line itself is below 0.04.
+# The fade now goes to the coat, darkened by the template's shading.
+EYE_LID_MAX_LUMA = 0.04
 EYE_OPENING_GROW_PX = 0
 # Paw pads: darker than this (linear luma) inside the paws mask.
 PAD_MAX_LUMA = 0.12
@@ -286,20 +300,17 @@ def smooth_and_pad(direction: np.ndarray, ok: np.ndarray, valid: np.ndarray,
 # protect
 # --------------------------------------------------------------------------
 
-def eye_opening(island: np.ndarray, luma: np.ndarray) -> np.ndarray | None:
-    """The eye opening inside an eye-socket island: the lid line's largest
-    dark piece, holes filled (iris, highlight), grown; soft-edged. None when
-    the island has no dark lid."""
-    dark = ndimage.binary_closing(island & (luma < EYE_LID_MAX_LUMA), iterations=2)
-    labels, count = ndimage.label(dark)
-    if count == 0:
-        return None
-    sizes = ndimage.sum(dark, labels, range(1, count + 1))
-    lid = labels == 1 + int(np.argmax(sizes))
-    opening = ndimage.binary_fill_holes(lid)
+def eye_opening(near: np.ndarray, seed: np.ndarray, luma: np.ndarray) -> np.ndarray:
+    """The eye opening round one eye: the dark pieces within `near` that
+    touch `seed` (the eye's feature texels) - lid line, iris, pupil - with
+    what they enclose (the highlight), grown; soft-edged. Empty when nothing
+    there is dark."""
+    dark = ndimage.binary_closing(near & (luma < EYE_LID_MAX_LUMA), iterations=2) & near
+    labels, count = ndimage.label(dark, structure=np.ones((3, 3)))
+    touching = np.unique(labels[seed & dark])
+    opening = ndimage.binary_fill_holes(np.isin(labels, touching[touching > 0]))
     if EYE_OPENING_GROW_PX:
-        opening = ndimage.binary_dilation(opening, iterations=EYE_OPENING_GROW_PX)
-    opening &= island
+        opening = ndimage.binary_dilation(opening, iterations=EYE_OPENING_GROW_PX) & near
     return np.clip(ndimage.gaussian_filter(opening.astype(np.float32), 0.7), 0, 1)
 
 
@@ -312,9 +323,15 @@ def nose_leather(island: np.ndarray, luma: np.ndarray) -> np.ndarray:
 
 
 def trim_eye_sockets(protect: np.ndarray, luma: np.ndarray, valid: np.ndarray, position: np.ndarray,
-                     eyes_world: list[np.ndarray]) -> tuple[np.ndarray, int]:
-    """protect with every island near an eye cut to its eye opening."""
+                     eyes_world: list[np.ndarray], features: np.ndarray) -> tuple[np.ndarray, int]:
+    """protect with every island near an eye cut to the eye opening, and the
+    whole opening added - it is taken from the texels round the eye centre,
+    not from the feature islands, which on the chihuahua stop inside the lid."""
     protect = protect.copy()
+    opening = np.zeros(protect.shape, dtype=np.float32)
+    for eye in eyes_world:
+        near = valid & (np.linalg.norm(position - eye, axis=-1) < EYE_OPENING_CAP_M)
+        opening = np.maximum(opening, eye_opening(near, near & (features > 0.5), luma))
     labels, count = ndimage.label(protect > 0.5)
     trimmed = 0
     for index in range(1, count + 1):
@@ -325,11 +342,9 @@ def trim_eye_sockets(protect: np.ndarray, luma: np.ndarray, valid: np.ndarray, p
         reach = min(float(np.median(np.linalg.norm(position[texels] - eye, axis=1))) for eye in eyes_world)
         if reach >= EYE_ISLAND_REACH_M:
             continue
-        opening = eye_opening(island, luma)
-        if opening is not None:
-            protect[island] = opening[island]
-            trimmed += 1
-    return protect, trimmed
+        protect[island] = opening[island]
+        trimmed += 1
+    return np.maximum(protect, opening), trimmed
 
 
 def protect_mask(features: np.ndarray, paws: np.ndarray, base: Image.Image,
@@ -362,7 +377,7 @@ def protect_mask(features: np.ndarray, paws: np.ndarray, base: Image.Image,
     if position is not None and nose_world is not None:
         print(f"[landmarks] protect: {nose_islands} nose island(s) kept to the leather only")
     if position is not None and eyes_world:
-        protect, sockets = trim_eye_sockets(protect, luma, valid, position, eyes_world)
+        protect, sockets = trim_eye_sockets(protect, luma, valid, position, eyes_world, features)
         print(f"[landmarks] protect: {sockets} eye socket(s) kept to the eye opening only")
 
     pads = (paws > 0.5) & (luma < PAD_MAX_LUMA) & valid
@@ -377,10 +392,12 @@ def protect_mask(features: np.ndarray, paws: np.ndarray, base: Image.Image,
 # --------------------------------------------------------------------------
 
 def main() -> None:
-    if len(sys.argv) != 4:
+    protect_only = "--protect-only" in sys.argv
+    argv = [a for a in sys.argv[1:] if a != "--protect-only"]
+    if len(argv) != 3:
         print(__doc__)
         sys.exit(1)
-    glb_path, template_dir, geometry_dir = (Path(p) for p in sys.argv[1:])
+    glb_path, template_dir, geometry_dir = (Path(p) for p in argv)
     # the sixteen source masks: the landmarks need the ears, the tail and the
     # throat on their own, which the ten region masks no longer separate
     masks_dir = template_dir / "masks_source"
@@ -397,6 +414,15 @@ def main() -> None:
     masks = {name: load_mask(masks_dir, name, size) for name in names}
     features = load_mask(features_dir, "_features", size)
     base = Image.open(template_dir / "base_color.png").convert("RGB")
+
+    if protect_only:
+        points = json.loads((template_dir / "landmarks.json").read_text(encoding="utf-8"))["points"]
+        world = {k: np.asarray(points[k]["world"], dtype=np.float32) for k in ("left_eye", "right_eye", "nose")}
+        protect = protect_mask(features, masks["paws"], base, valid, position, world["nose"],
+                               [world["left_eye"], world["right_eye"]])
+        Image.fromarray((protect * 255).astype(np.uint8), mode="L").save(template_dir / "protect.png")
+        print(f"[landmarks] wrote protect.png only ({int((protect > 0.5).sum())} texels)")
+        return
 
     mesh = TemplateMesh.load(glb_path, size)
     joints = mesh.joints

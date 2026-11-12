@@ -14,11 +14,11 @@ absolute colour words and no pattern names.
 
 from __future__ import annotations
 
-import asyncio
 from collections import Counter
 from typing import Any
 
 from .agents import AgentRefusal, Transport
+from .sampling import sample
 
 SAMPLES = 3
 
@@ -41,6 +41,30 @@ LIGHTNESS_ANSWERS = ("slightly", "clearly", "near_white", "not_cream")
 TIPPING_ANSWERS = ("none", "slight", "clear", "unknown")
 CREAM_SHARE = {"slightly": 0.35, "clearly": 0.6, "near_white": 0.9}
 WHITE_LEG_FEATURES = ("white_paws", "white_socks")
+# Where the coloured patches of a white-bodied coat sit and how much of the
+# body they cover. The layout call says only that there are patches, and one
+# fixed placement fit neither a white puppy with one small flank patch
+# (shelter maltese 6, drawn as a saddle) nor a parti with a saddle and a rump
+# patch (maltese 7, drawn without the rump). On five patched dogs (11-02:
+# maltese 6 and 7, eval e13 and e15, puppy 13) the amount split small /
+# large as the photos do. Where: asked as a saddle yes/no beside a flank
+# yes/no, saddle came back yes in 15 of 15 samples, the flank puppy's too
+# ("small patch on back"); asked instead whether the top line of the back
+# right above the largest patch is white, the flank puppy came back side 3/3
+# and the saddled parti over_spine 3/3. The rump is its own yes/no - a dog
+# can have a saddle and a rump patch.
+PATCH_PLACE_ANSWERS = ("yes", "no", "unknown")
+PATCH_LARGEST_ANSWERS = ("over_spine", "side", "none", "unknown")
+PATCH_AMOUNT_ANSWERS = ("none", "small", "large", "most", "unknown")
+# The top line of the neck behind a coloured head: the head's colour
+# running on down to the shoulders, or white. Asked as "the back and upper
+# sides of the neck", 2 of 3 white-necked dogs with coloured hanging ears
+# came back head (shelter maltese 6, eval e15). Patches stay off the
+# neck (texture.PATCH_OFF_SOURCES: four of five patched dogs had a white
+# neck), and a parti whose brown head ran down its neck to a white band at
+# the shoulders came out with a white neck under a brown head (shelter
+# maltese 7, user 11-07: "갈색털이 뒷목 거의 덮었는데").
+NAPE_ANSWERS = ("head", "light", "unknown")
 
 BODY_COLOURS_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -51,8 +75,9 @@ BODY_COLOURS_SCHEMA: dict[str, Any] = {
             "description": "The colour of MOST of the front of the chest, from the throat under the chin down "
                            "to between the front legs: dark (black, chocolate or grey), dark_tan_spots (black "
                            "or chocolate, broken only by two small tan spots on the breastbone), tan (any warm "
-                           "brown, red or fawn - also when a small white spot sits on it), cream, white, "
-                           "unknown (not visible).",
+                           "brown, red or fawn - also when a small white spot sits on it), cream, white "
+                           "(only when white covers most of the front - a small white spot or a few white "
+                           "hairs on a dark or tan chest is dark or tan), unknown (not visible).",
         },
         "belly": {
             "type": "string",
@@ -82,13 +107,49 @@ BODY_COLOURS_SCHEMA: dict[str, Any] = {
                            "(a paler shade of the same colour), clearly (plainly pale, still warm), near_white "
                            "(almost white). not_cream for any other chest answer.",
         },
+        "patch_amount": {
+            "type": "string",
+            "enum": list(PATCH_AMOUNT_ANSWERS),
+            "description": "Patches of colour on a white or near-white body, from behind the neck to the root "
+                           "of the tail (not the head, the neck or the tail): none (no such patches - a white "
+                           "body, colour only on the head, ears or tail, or a dog coloured all over), small (one "
+                           "or two patches, each smaller than the dog's head), large (patches larger than the "
+                           "head, the body still mostly white), most (half the body or more is coloured), "
+                           "unknown (the body is not visible).",
+        },
+        "patch_largest": {
+            "type": "string",
+            "enum": list(PATCH_LARGEST_ANSWERS),
+            "description": "The largest patch on the body: over_spine (it covers the middle line along the top "
+                           "of the back - the top line of the back right above it is coloured too), side (it "
+                           "sits on the side of the body with white fur between it and the spine - the top "
+                           "line of the back right above it is white), none (no patches on the body), unknown "
+                           "(the top of the back is not visible).",
+        },
+        "patch_rump": {
+            "type": "string",
+            "enum": list(PATCH_PLACE_ANSWERS),
+            "description": "Is a patch over the hips, the top of the hindquarters or the outside of the "
+                           "thighs, in front of the tail? yes, no (also when there are no patches), unknown "
+                           "(the hindquarters are not visible).",
+        },
+        "nape": {
+            "type": "string",
+            "enum": list(NAPE_ANSWERS),
+            "description": "The top line of the neck, from the back of the skull to the shoulders - not the "
+                           "ears (long ears hanging over the neck do not count): head (the head's colour carries "
+                           "on along the top of the neck to the shoulders or most of the way - also for a dog "
+                           "coloured all over), light (white or near-white there - the colour stops at the skull "
+                           "and the ears), unknown (not visible).",
+        },
         "note": {"type": "string", "description": "One short phrase on what you saw, or empty."},
     },
-    "required": ["chest", "belly", "paws", "back_tipping", "chest_lightness", "note"],
+    "required": ["chest", "belly", "paws", "back_tipping", "chest_lightness", "patch_amount", "patch_largest",
+                 "patch_rump", "nape", "note"],
     "additionalProperties": False,
 }
 
-BODY_COLOURS_SYSTEM = """You look at a photograph of a dog and name three fur colours.
+BODY_COLOURS_SYSTEM = """You look at a photograph of a dog and name the colours of its body fur.
 
 Answer only from the fur you can see in this picture. Do not reason from
 the breed or from what dogs with this kind of coat usually have.
@@ -96,8 +157,15 @@ the breed or from what dogs with this kind of coat usually have.
 chest: the front of the chest, from the throat under the chin down to
 between the front legs. Name the colour of MOST of that area. A black or
 chocolate chest with two small tan spots on the breastbone is
-dark_tan_spots. A small white spot on a tan chest is still tan. Shading
-and shine on black fur are still dark.
+dark_tan_spots. A small white spot or a few white hairs on a tan chest is
+still tan, on a black chest still dark - white only when white covers most
+of the front. Shading and shine on black fur are still dark.
+
+nape: the top line of the neck, between the back of the skull and the
+shoulders. Look there, not at the ears: coloured ears hanging down over a
+white neck do not make it coloured. head when the head's colour carries on
+along it to the shoulders or most of the way; light when the neck behind
+the skull is white or near-white.
 
 back_tipping: look at the top of the back and neck and compare it with the
 lower flank. clear when the top is plainly greyer or blacker, the hair
@@ -122,7 +190,16 @@ there is white or near-white, lighter than the legs above; tan only when
 the feet are the same warm colour as the legs.
 
 dark is black, chocolate or grey; tan is any clearly warm brown, red or
-fawn; cream is off-white with a warm tint; white is a plain white."""
+fawn; cream is off-white with a warm tint; white is a plain white.
+
+patches: only patches of colour on a white or near-white body, between the
+neck and the root of the tail - not the head, the ears or the tail. Say how
+much of the body they cover, and whether a patch sits over the hips and
+thighs (rump). For the largest patch, look at the top line of the back
+right above it: coloured there, it covers the spine (over_spine); white
+there, with white fur between the patch and the spine, it is on the side
+(side). A coloured dog with a white chest or white feet has no patches
+(none, no)."""
 
 
 async def read_body_colours(transport: Transport, photo_blocks: list[dict[str, Any]],
@@ -132,12 +209,10 @@ async def read_body_colours(transport: Transport, photo_blocks: list[dict[str, A
     A part most samples could not see is not painted from the one that
     guessed (eval v2 e14: belly tan from 1 of 3, the other two unknown)."""
     blocks = [*photo_blocks, {"type": "text", "text": "The front of the chest, the belly and the feet: "
-                                                        "what colour is each?"}]
+                                                        "what colour is each? And the patches on the body, "
+                                                        "if any: where, and how much?"}]
 
-    async def one() -> dict[str, Any]:
-        return await transport.complete(system=BODY_COLOURS_SYSTEM, blocks=blocks, schema=BODY_COLOURS_SCHEMA)
-
-    payloads = await asyncio.gather(*(one() for _ in range(samples)), return_exceptions=True)
+    payloads = await sample(transport, system=BODY_COLOURS_SYSTEM, blocks=blocks, schema=BODY_COLOURS_SCHEMA, n=samples)
     readings: list[dict[str, Any]] = []
     for payload in payloads:
         if isinstance(payload, AgentRefusal):
@@ -159,11 +234,49 @@ async def read_body_colours(transport: Transport, photo_blocks: list[dict[str, A
                    if r.get("chest") == "cream" and r.get("chest_lightness") in CREAM_SHARE)
     lightness = said.most_common(1)[0][0] if said else None
     tipping, tipping_votes = vote("back_tipping", TIPPING_ANSWERS)
+    nape, nape_votes = vote("nape", NAPE_ANSWERS)
     return chest, belly, paws, {"chest": chest_votes, "belly": belly_votes, "paws": paw_votes,
                                 "back_tipping": tipping, "back_tipping_votes": tipping_votes,
+                                "nape": nape, "nape_votes": nape_votes,
                                 "chest_lightness": dict(said), "cream_share": CREAM_SHARE.get(lightness),
+                                **vote_patches(readings),
                                 "samples": len(readings),
                                 "notes": [str(r.get("note", "")) for r in readings if r.get("note")]}
+
+
+def light_by_family(answer: str, said: dict[str, int] | None, samples: int | None, base_color: str) -> str:
+    """A part no single colour won (`answer` unknown) that most samples
+    called light is light: the light colour more of them named, white on a
+    tie for a white dog and cream for any other. A black-and-tan shiba's
+    white bib, read dark / cream / white, kept the layout's tan chest
+    (shelter adult jindo 6); on file the split light majorities were all
+    light in their photos (a cream chihuahua's feet, a white puppy's chest,
+    a white dog's feet and belly)."""
+    if answer != "unknown" or not said or not samples:
+        return answer
+    cream, white = int(said.get("cream", 0)), int(said.get("white", 0))
+    if (cream + white) * 2 <= samples:
+        return answer
+    if cream == white:
+        return "white" if str(base_color).lower() == "white" else "cream"
+    return "white" if white > cream else "cream"
+
+
+def vote_patches(readings: list[dict[str, Any]]) -> dict[str, Any]:
+    """patch_amount: the amount more than half of all the samples gave, else
+    unknown; patch_places: "side" when more than half put the largest patch
+    on the side, "rump" when more than half said yes to the rump."""
+    def majority(key: str, allowed: tuple[str, ...]) -> tuple[str, dict[str, int]]:
+        said = Counter(r.get(key) for r in readings if r.get(key) in allowed)
+        top = said.most_common(1)
+        return (top[0][0] if top and top[0][1] * 2 > len(readings) else "unknown"), dict(said)
+
+    amount, amounts = majority("patch_amount", PATCH_AMOUNT_ANSWERS)
+    largest, largests = majority("patch_largest", PATCH_LARGEST_ANSWERS)
+    rump, rumps = majority("patch_rump", PATCH_PLACE_ANSWERS)
+    places = (["side"] if largest == "side" else []) + (["rump"] if rump == "yes" else [])
+    return {"patch_amount": amount, "patch_places": places,
+            "patch_votes": {"amount": amounts, "largest": largests, "rump": rumps}}
 
 
 # answer -> colour role (simple._role_colour); "dark_tan_spots" paints the
@@ -239,7 +352,17 @@ def apply_body_colours(region_colors: list[dict[str, Any]], markings: list[dict[
         put("underside", CHEST_ROLES[chest], f"belly follows the {chest} chest")
     if paws in PAW_ROLES:
         put("paws", PAW_ROLES[paws], f"paws {paws}")
+    # tan or dark feet under the layout's light legs on a warm coat: the legs
+    # are the coat's colour - an urajiro's cream legs where the photo shows
+    # ginger forelegs and the feet read tan 2 of 2 (shelter chihuahua 9, user
+    # 11-07). The layout's light paws stay, the toes under the coloured leg
+    # (simple.default_gradients)
+    legs = entries.get("legs_lower")
+    if (paws in ("tan", "dark") and legs is not None and str(legs.get("source", "")).startswith("pattern_default")
+            and color_family(str(legs.get("color", ""))) == "light" and color_family(base) == "point"):
+        put("legs_lower", "base", f"legs follow the {paws} feet")
     return changed
 
 
-__all__ = ["read_body_colours", "apply_body_colours", "filter_leg_features", "PAW_ANSWERS", "BODY_COLOURS_SCHEMA", "CHEST_ANSWERS", "BELLY_ANSWERS"]
+__all__ = ["read_body_colours", "apply_body_colours", "filter_leg_features", "vote_patches", "PAW_ANSWERS",
+           "BODY_COLOURS_SCHEMA", "CHEST_ANSWERS", "BELLY_ANSWERS"]

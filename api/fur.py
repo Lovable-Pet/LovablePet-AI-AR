@@ -68,9 +68,17 @@ FUR_PALETTE: dict[str, tuple[str, str, str]] = {
     # whose cheek measures LAB (90, 0, 9); the vision read said "cream"
     # meaning off-white. Mid L 88 b 11, shadow L 72.
     "cream": ("#B8AC94", "#E7DCC5", "#F6F0E4"),
-    "fawn": ("#7A6247", "#C4A177", "#E6D2B4"),
+    # mid hue 70, chroma 30 (was #7A6247/#C4A177/#E6D2B4: hue 76, chroma
+    # 28): yellow shelter dogs' coats measure hue 66-72 in their photos, and
+    # the yellower table read as khaki beige next to the golden photo (user,
+    # 11-01); each stop turned by the same angle
+    "fawn": ("#7E6146", "#CA9F75", "#EAD1B2"),
     "red": ("#6B3A22", "#B5672F", "#DCA268"),
-    "tan": ("#6E4526", "#B07A42", "#D6A876"),
+    # mid chroma 30 (was #6E4526/#B07A42/#D6A876, chroma 41): the tan points
+    # measured on 22 runs' photos have median chroma 22 (13-39), and the
+    # shelter puppies' tan legs and chests came out orange (user, 11-01:
+    # "다리 탄색이 너무 찐함"); same lightness and hue
+    "tan": ("#664832", "#A67D57", "#CCAA88"),
     "chocolate": ("#2A1A12", "#4E3325", "#8A6448"),
     "gray": ("#3A3A3C", "#7E7E82", "#BEBEC2"),
     # skin showing through fine hair: desaturated and light, never a saturated

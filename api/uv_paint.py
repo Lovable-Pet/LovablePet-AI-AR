@@ -58,6 +58,18 @@ LAYOUT_IOU_FLOOR = 0.7
 # 1.0, real repaints 0.61-0.91, the atlas shifted 20 px 0.38, rescaled 5%
 # 0.10, a drawing of a dog 0.00.
 FEATURE_SSIM_FLOOR = 0.5
+# Each island is compared with this much of its surroundings (texels at the
+# 2048 atlas): the jindo puppy's eye islands are near-flat black eyeballs, and
+# on a dark coat their own box held no structure but the highlight specks -
+# every dark puppy's refine scored 0.21-0.50 and was thrown away, though the
+# eyes had not moved (10-31, 14 shelter puppies; two rolls paid each). With
+# the margin: real rolls 0.52-0.77, the same rolls shifted 20 px 0.25 or
+# less, rescaled 5% 0.25 or less.
+FEATURE_MARGIN_PX = 24
+# ... and a window flatter than this (luminance standard deviation of the
+# build) says nothing either way and is left out: a black puppy's eye in
+# black fur (0.03). The layout check still guards those.
+FEATURE_MIN_STD = 0.1
 CACHE_DIR = Path("output/cache/uv_paint")
 
 COLOUR_WORDS = {
@@ -203,8 +215,10 @@ def layout_iou(painted: Image.Image, valid: np.ndarray, base: Image.Image) -> fl
 
 def feature_alignment(painted: Image.Image, base: Image.Image, masks_dir: str | Path) -> float | None:
     """SSIM between the repaint and the template inside the whole protected
-    feature islands (eyeballs, nose leather, mouth), at the atlas size.
-    Colour is free there too, so luminance is normalised per island."""
+    feature islands (eyeballs, nose leather, mouth), each seen with
+    FEATURE_MARGIN_PX of its surroundings, at the atlas size. Colour is free
+    there too, so luminance is normalised per island. None when no island
+    has the contrast to judge (FEATURE_MIN_STD)."""
     from skimage.metrics import structural_similarity
 
     from .eyes import feature_islands, WHOLE_SHARE
@@ -217,14 +231,18 @@ def feature_alignment(painted: Image.Image, base: Image.Image, masks_dir: str | 
     _, labels, count = feature_islands(masks_dir, size)
     a = np.asarray(painted.convert("L").resize(size, Image.LANCZOS), dtype=np.float32) / 255.0
     b = np.asarray(base.convert("L"), dtype=np.float32) / 255.0
+    margin = int(round(FEATURE_MARGIN_PX * size[0] / 2048))
     scores, weights = [], []
     for index in range(1, count + 1):
         island = labels == index
         if island.sum() < 500 or protect[island].mean() < WHOLE_SHARE:
             continue
         rows, cols = np.nonzero(island)
-        y0, y1, x0, x1 = rows.min(), rows.max() + 1, cols.min(), cols.max() + 1
+        y0, y1 = max(rows.min() - margin, 0), rows.max() + 1 + margin
+        x0, x1 = max(cols.min() - margin, 0), cols.max() + 1 + margin
         wa, wb = a[y0:y1, x0:x1], b[y0:y1, x0:x1]
+        if float(wb.std()) < FEATURE_MIN_STD:
+            continue
         wa = (wa - wa.mean()) / (wa.std() + 1e-3)
         wb = (wb - wb.mean()) / (wb.std() + 1e-3)
         rng = float(max(wa.max() - wa.min(), wb.max() - wb.min(), 1e-3))
@@ -378,6 +396,16 @@ def finish_painted(painted: Image.Image, base_texture: Image.Image, masks_dir: s
     # template's own padding is the old coat's colour and bled in as an
     # orange rim along every seam.
     inside = ndimage.binary_erosion(valid, iterations=1)
+    # ... but an island the erosion takes whole (two texels across or less)
+    # keeps its own texels: refilled from the nearest other island, a
+    # 4-texel island at a white wrist took a black island's colour, and the
+    # seam pass, averaging it with the leg's vertices it shares a position
+    # with, drew a dark ring round the wrist (user, 11-05)
+    labels, count = ndimage.label(valid)
+    if count:
+        survives = np.zeros(count + 1, dtype=bool)
+        survives[np.unique(labels[inside])] = True
+        inside = inside | (valid & ~survives[labels])
     indices = ndimage.distance_transform_edt(~inside, return_distances=False, return_indices=True)
     composed = composed[indices[0], indices[1]]
 
@@ -399,8 +427,14 @@ def finish_painted(painted: Image.Image, base_texture: Image.Image, masks_dir: s
     if mesh_glb is not None and Path(mesh_glb).exists():
         from .mesh import TemplateMesh
         from .seams import smooth_seams
+        from .assets import geometry_dir_for
         mesh = TemplateMesh.load(mesh_glb, base_texture.size)
-        composed, report["seams"] = smooth_seams(np.clip(composed, 0, 1), mesh)
+        position_path = geometry_dir_for(masks_dir) / "position.npy"
+        position = np.load(position_path) if position_path.exists() else None
+        composed, report["seams"] = smooth_seams(np.clip(composed, 0, 1), mesh, position=position, valid=valid)
+        if position is not None and position.shape[:2] == composed.shape[:2]:
+            from .seams import fill_stray_triangles
+            composed, report["stray_triangles"] = fill_stray_triangles(composed, mesh, position, valid)
 
     return Image.fromarray((to_srgb(np.clip(composed, 0, 1)) * 255).astype(np.uint8), mode="RGB"), report
 

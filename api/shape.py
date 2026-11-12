@@ -20,6 +20,26 @@ GROUPS = {
 }
 
 
+# a target shown by the nearest milder one: a dog read with hanging ears gets
+# the folded tips. First on the jindo puppy 2, which carries ear_fold only (its
+# dropped ear stuck out sideways like a wing; user, 11-01), and since 11-11 on
+# the jindo too, though it carries ear_drop (body_shape.EAR_TARGETS) - so a
+# reading saved before that, with ear_drop in its weights, is drawn the same
+STAND_INS = {"ear_drop": "ear_fold"}
+
+
+def fit_to_template(weights: dict[str, float], known: set[str]) -> dict[str, float]:
+    """`weights` limited to the targets the template has, one with a
+    stand-in (STAND_INS) replaced by it when the template has that."""
+    fitted: dict[str, float] = {}
+    for name, value in weights.items():
+        if STAND_INS.get(name) in known:
+            name = STAND_INS[name]
+        if name in known:
+            fitted[name] = value
+    return fitted
+
+
 def target_names(glb_path: str | Path) -> list[str]:
     gltf = GLTF2().load(str(glb_path))
     return list(((gltf.meshes[0].extras or {}).get("targetNames")) or [])
@@ -47,4 +67,4 @@ def set_shape(glb_path: str | Path, weights: dict[str, float], out_path: str | P
     return out
 
 
-__all__ = ["GROUPS", "set_shape", "target_names"]
+__all__ = ["GROUPS", "STAND_INS", "fit_to_template", "set_shape", "target_names"]
