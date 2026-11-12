@@ -149,6 +149,7 @@ python -m ar_pipeline.mouth --slug <slug> --install          # 짖기용 입 (�
 python -m ar_pipeline.pose_clips --slug <slug> --install      # 기본 클립
 python -m ar_pipeline.pose_clips --slug <slug> --clip bark --install
 python -m ar_pipeline.pose_clips --slug <slug> --clip lying --clip sit_down --clip stand_up --clip lie_down --clip get_up --install
+python -m ar_pipeline.mouth_clips --slug <slug> --install     # 이미 있는 클립에 헥헥거리는 입만 얹기 (몸 동작은 그대로)
 ```
 
 죽은 척·자세 전환의 모션캡처(`ar_pipeline/data/dog_clips.npz`, AI4Animation SIGGRAPH 2018)는 **CC BY-NC 4.0: 출처 표시, 상업적 이용 불가**.

@@ -2760,12 +2760,13 @@ def turned_local(rots: list, k: int, axis: np.ndarray, deg: float) -> None:
     rots[k] = q if np.dot(q, rots[k]) >= 0 else -q
 
 
-def open_mouth(sk: Skeleton, name: str, result: dict) -> None:
+def open_mouth(sk: Skeleton, name: str, result: dict, spans: tuple | None = None) -> None:
     """A built clip's mouth over its MOUTH spans: the jaw turned about the
     head's left as the bark turns it, the head nodding about the neck's,
     on top of what the clip has; and breathe_jnt pumping with the panting
-    in place of the slow breath."""
-    spans = MOUTH.get(name)
+    in place of the slow breath. `spans` in place of MOUTH's for a clip
+    timed otherwise (ar_pipeline/mouth_clips.py)."""
+    spans = spans or MOUTH.get(name)
     if not spans or "jaw_jnt" not in sk.j or not sk.mask([sk.j["jaw_jnt"]]).any():
         return
     jaw, head = sk.j["jaw_jnt"], sk.j["head_jnt"]
