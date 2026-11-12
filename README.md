@@ -146,6 +146,7 @@ python ar_pipeline/render_anchors.py --template <slug>_small
 ```
 python -m ar_pipeline.rig_fix --slug <slug> --install
 python -m ar_pipeline.mouth --slug <slug> --install          # 짖기용 입 (진도)
+python -m ar_pipeline.mouth --slug <slug> --remake --install # 이미 있는 입을 걷어내고 다시 (소형견 템플릿: mouth.MUZZLES)
 python -m ar_pipeline.pose_clips --slug <slug> --install      # 기본 클립
 python -m ar_pipeline.pose_clips --slug <slug> --clip bark --install
 python -m ar_pipeline.pose_clips --slug <slug> --clip lying --clip sit_down --clip stand_up --clip lie_down --clip get_up --install
