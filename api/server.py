@@ -167,6 +167,16 @@ def _fit_view(fit: dict[str, Any] | None) -> dict[str, Any] | None:
             "no_template": bool(pick.get("no_template"))}
 
 
+def _shape_view(answers: dict[str, Any]) -> dict[str, str]:
+    """The body-shape answers as /v1/fit shows them: one word per part, as
+    docs/API.md has it. The call's list of differences is fit.differences;
+    left in here it broke a client that reads shape as a map of strings -
+    Spring's Map<String, String> (docs/spring/PetPipelineDtos.java) failed
+    every fit check on a photo the gate passed with "Cannot deserialize
+    value of type String from Array value" (prod, 2026-11-13)."""
+    return {key: value for key, value in answers.items() if isinstance(value, str)}
+
+
 def _size_view(size: dict[str, Any] | None) -> dict[str, Any] | None:
     if not size or size.get("skipped"):
         return None
@@ -432,7 +442,7 @@ async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> d
     except KeyError as exc:  # a mesh without the joints to measure its shape
         size = {"skipped": True, "reason": str(exc)}
     return {"pet_id": meta.pet_id, "fit": {**_fit_view(fit), "photo_rejected": []}, "size": size,
-            "shape": answers, "photo": quality_view(quality)}
+            "shape": _shape_view(answers), "photo": quality_view(quality)}
 
 
 def _rejected_fit(pet_id: str, reasons: list[str]) -> dict[str, Any]:

@@ -120,6 +120,8 @@ fair/poor는 `fit.reasons`에 한국어 사유로 들어가고 점수도 깎인�
 나온 사진 필요"처럼 재촬영 안내문으로 바로 보여줄 수 있다. 노출이 poor이면 생성 때 사진 색 측정을 건너뛰고 표 색으로 만든다.
 기준: 짧은 변 220px 미만 fair·120px 미만 poor; 노출 클립 20 % 초과 fair·40 % 초과 poor. 평가셋 20장은 전부 good.
 
+`shape`의 값은 모두 문자열이다(부위마다 한 단어: `ears`, `muzzle`, `coat_length`, `closest_model`, `model_match` …). 모델과 다른 부위 목록은 `fit.differences`에만 있다 — Spring의 `Map<String, String>`으로 그대로 읽힌다.
+
 `size.withers_m`은 어깨 높이(m)다. 고른 템플릿과 기록 체중으로만 정한다(나이는 쓰지 않음). `rule`은 `"weight"`(견종 실측 기준값) 또는 `"shape"`(실측 기준값이 없는 템플릿, 지금은 `jindo_puppy`: 메시의 등길이·가슴둘레 비율로 낸 k, AI Hub 71520으로 맞춘 식, 견종 하나를 뺀 검증 평균 오차 2.6%, 이때 `k`도 붙는다). 생성된 GLB에 이미 적용된다.
 템플릿 견종의 실측 성견(진도: 수컷 50.67 cm · 20.5 kg)에서 체중의 세제곱근에 비례해 정한다. 템플릿과 체형이 같은 개에만 맞으므로
 `fit.level`이 `poor`인 개는 크기도 믿을 수 없다.
