@@ -133,7 +133,7 @@ python ar_pipeline/render_anchors.py --template <slug>_small
 - 브라우저에서 흑백 경계에 번개무늬: `python -m ar_pipeline.mip_islands --glb <만든 개 GLB> --slug <slug>`
 - 눈·코 보호 영역만 다시: `python ar_pipeline/build_landmarks.py <glb> <템플릿 폴더> <geometry> --protect-only`
 - 흰 털 위 어두운 털 조각: `python -m ar_pipeline.fix_normals --slug <slug>`
-- 홍채 없는 회색 눈: `python -m ar_pipeline.paint_eyes --slug <slug> --install`
+- 홍채 없는 회색 눈: `python -m ar_pipeline.paint_eyes --slug <slug> --install` (홍채는 있고 반사광만 없으면 `--lights-only`)
 - 검은 원판·털뿐인 발바닥: `python -m ar_pipeline.paint_pads --slug <slug> [--ref jindo] --install`
 - 흰 털에 박힌 검은 줄·점: `python -m ar_pipeline.fill_gutters --slug <slug> --install`
 - 스무딩으로 녹은 가슴 되돌리기: `python -m ar_pipeline.restore_geometry --slug <slug> --from <이전 GLB>` 뒤 `fix_normals`

@@ -61,14 +61,36 @@ HIGHLIGHT_LAB = np.array([97.0, 0.0, -1.0])
 CATCHLIGHTS = (((0.40, 0.25), 0.19), ((0.05, 0.50), 0.08))
 SHEEN_L = 10.0
 LOWER_LID = (0.80, 0.94, 30.0)     # from, to (disc radii, lower half only), L*
+# --lights-only, an eye that keeps its own iris and pupil (the jindo puppy's). Two
+# white catch-lights on it read as stickers (user, 11-13: "좀 자연스럽게
+# 잘모르겠음"): the shelter puppies' eyes, and the retriever's and the jindo's
+# painted ones, carry no white dot but the sky - a broad, soft, blue-grey
+# reflection over the upper part of the eye, across pupil and iris alike - and
+# at most one small glint in it. So, in disc radii (up, toward the light):
+#   SKY     the reflection's centre, its half-widths (across, up), colour, strength
+#   GLINT   one small bright point inside it, its radius
+#   GLOW    the iris lit from within on the side away from the reflection
+#           (light through the cornea falls there): the ring it is on, the
+#           lightness and the brown it adds
+#   IRIS_EDGE  where the eyeball ends and the lid's dark rim begins
+SKY_AT, SKY_AXES = (0.34, 0.06), (0.64, 0.34)
+# (at L* 64 and 0.55, the glint 0.09 wide, the light was there close up and
+# gone at the size the dog is looked at - user, 11-13: "반사광 약한듯")
+SKY_LAB, SKY_ALPHA = np.array([78.0, -2.0, -8.0]), 0.82
+GLINT_AT, GLINT_R, GLINT_LAB = (0.40, 0.26), 0.13, np.array([97.0, 0.0, -1.0])
+GLOW_RING, GLOW_L, GLOW_AB = (0.40, 0.80), 7.0, (2.0, 4.0)
+GLOW_MIN_CHROMA = (3.0, 6.0)      # the pupil is under this, the iris over it
+IRIS_EDGE = 0.86
 # the disc: texels darker than this within this distance of the eye landmark
 DISC_MAX_L = 40.0
 DISC_REACH_M = 0.015
 
 
-def paint(slug: str) -> tuple[Image.Image, Image.Image, list[str]]:
+def paint(slug: str, lights_only: bool = False) -> tuple[Image.Image, Image.Image, list[str]]:
     """(painted texture, before/after preview, report lines), from the
-    backed-up original when there is one."""
+    backed-up original when there is one. `lights_only`: the eye keeps the
+    iris and pupil it has and gets the sky's reflection, one glint and the
+    iris's glow (SKY, GLINT, GLOW)."""
     tpl = Path(f"output/templates/{slug}_small")
     glb = Path(f"output/skeleton_{slug}_small.glb")
     original = Path(f"work/backup_eyes_{slug}") / glb.name
@@ -122,8 +144,33 @@ def paint(slug: str) -> tuple[Image.Image, Image.Image, list[str]]:
         lid_from, lid_to, lid_l = LOWER_LID
         arc = np.clip(np.minimum(rho - lid_from, lid_to - rho) / 0.04, 0.0, 1.0) * np.clip(-height / 0.5, 0.0, 1.0)
         colour[..., 0] = colour[..., 0] * (1 - 0.6 * arc) + lid_l * 0.6 * arc
+        if lights_only:
+            # an eye that has its iris painted already (the jindo puppy's: a
+            # brown ring round a black pupil, and no light in it - user,
+            # 11-13: "진도강아지 안광좀추가") keeps it, under the sky's
+            # reflection (SKY, GLINT, GLOW above)
+            colour = lab.copy()
+            along = (offset @ toward_x) / radius
+            lit = np.array(SKY_AT) / np.linalg.norm(SKY_AT)
+            away = -(height * lit[0] + along * lit[1]) / np.maximum(rho, 1e-3)
+            # ... on the iris alone, by the colour it has: the chihuahua's wide
+            # pupil reaches into the ring and went a hazy grey-brown there
+            iris_here = np.clip((np.hypot(lab[..., 1], lab[..., 2]) - GLOW_MIN_CHROMA[0])
+                                / (GLOW_MIN_CHROMA[1] - GLOW_MIN_CHROMA[0]), 0.0, 1.0)
+            glow = (np.clip((rho - GLOW_RING[0]) / 0.08, 0.0, 1.0) * np.clip((GLOW_RING[1] - rho) / 0.08, 0.0, 1.0)
+                    * np.clip((away - 0.1) / 0.6, 0.0, 1.0) * iris_here)
+            colour[..., 0] += GLOW_L * glow
+            colour[..., 1] += GLOW_AB[0] * glow
+            colour[..., 2] += GLOW_AB[1] * glow
+            inside = np.clip((IRIS_EDGE - rho) / 0.1, 0.0, 1.0)
+            sky = (SKY_ALPHA * np.clip(1.0 - np.hypot((along - SKY_AT[1]) / SKY_AXES[0], (height - SKY_AT[0]) / SKY_AXES[1]),
+                                       0.0, 1.0) ** 1.2 * inside)[..., None]
+            colour = colour * (1 - sky) + SKY_LAB * sky
+            glint = (np.clip((1.0 - np.hypot(along - GLINT_AT[1], height - GLINT_AT[0]) / GLINT_R) / 0.6, 0.0, 1.0)
+                     * inside)[..., None]
+            colour = colour * (1 - glint) + GLINT_LAB * glint
         # the catch-lights, up and toward +x from the centre
-        for (u, a), size in CATCHLIGHTS:
+        for (u, a), size in () if lights_only else CATCHLIGHTS:
             spot = radius * (u * up + a * toward_x)
             light = np.clip(1.0 - np.linalg.norm(offset - spot, axis=-1) / (size * radius), 0.0, 1.0) ** 0.6
             colour = colour * (1 - light)[..., None] + HIGHLIGHT_LAB * light[..., None]
@@ -151,10 +198,12 @@ def main() -> None:
     parser.add_argument("--slug", required=True)
     parser.add_argument("--out", default=None, help="where the preview goes (default work/eyes_<slug>/)")
     parser.add_argument("--install", action="store_true", help="write into the template GLB and base_color.png")
+    parser.add_argument("--lights-only", action="store_true",
+                        help="keep the eye's own iris and pupil, add the sky's reflection and a glint")
     args = parser.parse_args()
     out = Path(args.out or f"work/eyes_{args.slug}")
     out.mkdir(parents=True, exist_ok=True)
-    painted, preview, report = paint(args.slug)
+    painted, preview, report = paint(args.slug, lights_only=args.lights_only)
     painted.save(out / "base_color.png")
     preview.save(out / "eyes_preview.png")
     print("\n".join(report), f"\npreview {out / 'eyes_preview.png'}")
