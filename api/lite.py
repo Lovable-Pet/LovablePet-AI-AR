@@ -1685,6 +1685,82 @@ PALE_COAT_MIN_L = 60.0
 OWN_GRAY_L = (30.0, 65.0)
 
 
+# A coat READ grey is the grey of its own fur as well (photo_colours.gray_coat):
+# the table's one grey, mid L* 53 and a touch blue, was a blue-grey blanket on
+# a husky's charcoal back and on a dirty grey-cream poodle (review jindo 08,
+# toy poodle 07). The tint along the warm axis only, and only under a neutral
+# border out of low sun (palette.gray_target); the lightness OWN_GRAY_STRENGTH
+# of the way to the fur's median GRAY_FACE_LIFT lighter, by OWN_GRAY_MAX_SHIFT_L
+# at most - a photo's exposure moves a grey coat's lightness more than the
+# coat does (a white poodle measures L* 55 filling the frame).
+OWN_GRAY_STRENGTH = 0.7
+OWN_GRAY_MAX_SHIFT_L = 10.0
+
+
+def own_gray(appearance: dict[str, Any], grey: dict[str, Any] | None, sunlit: bool = False) -> str | None:
+    """appearance["gray_lab"] from the dog's own grey fur when its coat was
+    read grey and nothing set it yet; returns what was set, or None."""
+    from .fur import FUR_PALETTE, hex_to_linear
+    from .palette import GRAY_FACE_LIFT, gray_target
+    from .projection import linear_to_lab
+
+    if not grey or not grey.get("lab") or appearance.get("gray_lab"):
+        return None
+    coat_is_grey = str(appearance.get("base_color") or "").lower() == "gray" or any(
+        entry.get("region") == "back" and str(entry.get("color", "")).lower() == "gray"
+        and str(entry.get("coverage", "full")) == "full" for entry in appearance.get("region_colors") or [])
+    if not coat_is_grey:
+        return None
+    table_l = float(linear_to_lab(hex_to_linear(FUR_PALETTE["gray"][1])[None, None, :])[0, 0][0])
+    fur_l, fur_a, fur_b = (float(v) for v in grey["lab"])
+    shift = float(np.clip(OWN_GRAY_STRENGTH * (fur_l + GRAY_FACE_LIFT - table_l),
+                          -OWN_GRAY_MAX_SHIFT_L, OWN_GRAY_MAX_SHIFT_L))
+    tinted = grey.get("border") == "neutral" and not sunlit
+    appearance["gray_lab"] = gray_target(table_l + shift, fur_a if tinted else 0.0, fur_b if tinted else 0.0,
+                                         lift=0.0, l_range=OWN_GRAY_L)
+    return (f"grey of its own fur {grey['lab']} ({grey.get('share')} of the animal) -> {appearance['gray_lab']}"
+            + ("" if tinted else "; lightness only"))
+
+
+# A coat read grey whose crown the head close-up cannot settle is two colours
+# hair by hair (texture.MIX_*). No layout says "mixed", so the samples split
+# instead: read dark by most of them, the grey carries black hairs (a husky's
+# charcoal crown and neck - review jindo 08, crown dark 4 / gray 1, was a flat
+# pale grey blanket); split between grey and a light colour, MIXED_MIN_VOTES
+# or more each, it carries that colour's (a grey poodle gone cream - review
+# toy poodle 07, gray 3 / cream 2, was a grey cap and back on a cream dog).
+# The share of the hairs is MIXED_PER_VOTE of the share of the votes. A light
+# split is the HEAD's: the votes are the crown's, and the layout call still
+# read the body grey - the head takes the votes' share whole and the body
+# half of it (toy poodle 07's head is cream through grey, its body grey with
+# cream tips; at the head's share all over it was a cream dog). Of the 88
+# judged dogs with a face call these two are the ones it takes; a white dog's
+# cream / white split is not a grey coat.
+MIXED_MIN_VOTES = 2
+MIXED_MIN_SAMPLES = 4
+MIXED_PER_VOTE = 0.5
+
+
+def mixed_grey(base: str | None, crown_votes: dict[str, Any] | None) -> dict[str, Any] | None:
+    """appearance["mix"] for a coat read grey, from the crown's votes: the
+    colour mixed through it, what it runs through, the share of the hairs
+    (and the head's, when it differs); None for a plain grey or another coat."""
+    votes = {str(k): int(v) for k, v in (crown_votes or {}).items() if isinstance(v, (int, float)) and v}
+    total = sum(votes.values())
+    if str(base or "").lower() != "gray" or total < MIXED_MIN_SAMPLES:
+        return None
+    dark = votes.get("dark", 0)
+    # ... with no vote for a warm crown: dark 3 / tan 2 was a hairless dog's
+    # grey skin (hard photo 189), not black hair through grey
+    if dark * 2 > total and not votes.get("tan", 0):
+        return {"color": "black", "over": "gray", "amount": round(MIXED_PER_VOTE * dark / total, 2)}
+    light = max(("cream", "white"), key=lambda name: votes.get(name, 0))
+    if votes.get("gray", 0) >= MIXED_MIN_VOTES and votes.get(light, 0) >= MIXED_MIN_VOTES:
+        share = votes[light] / total
+        return {"color": light, "over": "gray", "amount": round(MIXED_PER_VOTE * share, 2), "head": round(share, 2)}
+    return None
+
+
 def coat_without_warm_fur(appearance: dict[str, Any], coat: dict[str, Any] | None,
                           coat_mid_l: float | None) -> str | None:
     """The warm base and every region of it cream or grey when the photo's
@@ -2404,6 +2480,11 @@ async def run_lite(
             "inferred_regions": [e["region"] for e in region_colors
                                  if str(e.get("source", "")).startswith("pattern")],
         }
+        # a grey coat the crown's votes split over: two colours hair by hair
+        mixed = mixed_grey(decision.base_color, (face_log.get("votes") or {}).get("crown"))
+        if mixed:
+            appearance["mix"] = mixed
+            face_log["mixed_grey"] = mixed
         log["steps"]["reading"] = {"pattern": decision.as_dict(), "summary": describe_decision(decision),
                                    "features": features, "feature_votes": decision.feature_votes}
     appearance.update({"pet_id": resolved.pet_id, "base_template": base_template,
@@ -2560,6 +2641,17 @@ async def run_lite(
                     {"type": "ears", "region": "skull", "color": "black", "size": "medium", "anchor": "none",
                      "note": "the backs of the dark ears on a grey coat"})
                 log["steps"]["no_warm_fur"] += "; dark ears black"
+    # a coat read grey from the start: the grey of its own fur (own_gray)
+    if photo_animal is not None and not appearance.get("gray_lab"):
+        from .photo_colours import gray_coat
+        try:
+            grey_fur = gray_coat(Image.open(original_photo).convert("RGB"), photo_animal)
+        except Exception as exc:  # noqa: BLE001 - the table's grey stands
+            grey_fur = None
+            log["steps"]["own_gray_error"] = f"{type(exc).__name__}: {exc}"
+        own = own_gray(appearance, grey_fur, sunlit=sunlit)
+        if own:
+            log["steps"]["own_gray"] = own
     whitened = white_back(appearance, measured or {})
     if whitened:
         log["steps"]["white_back"] = whitened

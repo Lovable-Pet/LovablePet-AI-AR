@@ -447,6 +447,34 @@ def light_coat(image: Image.Image, animal_mask: np.ndarray | None) -> dict[str, 
 # is all there is to tune on, so the line is the safe side of it.
 # A grey card does not save such a photo: the floor in the shade is blue
 # while the dog is in the sun, and balancing by it turns the dog yellower.
+# A grey coat's own grey: the animal's pixels of low chroma that are neither
+# black nor white fur. The table's grey is one mid blue-grey for a charcoal
+# husky and a pale dirty poodle alike.
+GRAY_COAT_MAX_CHROMA = 8.0
+GRAY_COAT_L = (15.0, 75.0)
+GRAY_COAT_MIN_SHARE = 0.1
+GRAY_COAT_MIN_PIXELS = 500
+
+
+def gray_coat(image: Image.Image, animal_mask: np.ndarray | None) -> dict[str, Any] | None:
+    """The grey fur of the animal (GRAY_COAT_*): its median LAB, the quartiles
+    of its lightness, its share of the animal and the border's kind; None
+    when there is too little of it to go by."""
+    got = _animal_lab(image, animal_mask)
+    if got is None:
+        return None
+    lab, kind = got
+    chroma = np.hypot(lab[:, 1], lab[:, 2])
+    low, high = GRAY_COAT_L
+    grey = (chroma < GRAY_COAT_MAX_CHROMA) & (lab[:, 0] > low) & (lab[:, 0] < high)
+    if grey.sum() < GRAY_COAT_MIN_PIXELS or grey.mean() < GRAY_COAT_MIN_SHARE:
+        return None
+    fur = lab[grey]
+    return {"lab": [round(float(v), 1) for v in np.median(fur, axis=0)],
+            "l_quartiles": [round(float(v), 1) for v in np.percentile(fur[:, 0], [25, 75])],
+            "share": round(float(grey.mean()), 3), "border": kind}
+
+
 SUN_BANDS = ((40, 65), (65, 97))
 SUN_MIN_CHROMA = 10.0
 SUN_RATIO = 1.5

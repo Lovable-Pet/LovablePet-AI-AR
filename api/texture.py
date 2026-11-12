@@ -353,6 +353,38 @@ BRINDLE_MOTTLE_ON_GREY = 0.62
 # opacity. Flat grey read as a grey blanket over a tan dog (shelter
 # maltese 10, its back grey and tan hair in the photo).
 GRIZZLE_OPACITY = 0.45
+# Mixed hairs (appearance["mix"]): a second colour through a coat hair by
+# hair, with no layout of its own - a salt-and-pepper grey, a grey poodle
+# gone cream at the tips, a wiry grey-and-tan terrier. Painted as two flat
+# colours with an edge between them such a dog read as a two-tone one
+# (review toy poodle 07: grey cap and back, cream face and legs, where the
+# photo is one grey-cream coat).
+#   mix["amount"] is the share of the coat's hairs that are mix["color"], at
+# most MIX_MAX; mix["head"] that share on the head regions when it differs
+# (the head eased into the body over MIX_HEAD_SIGMA_M of the surface).
+#   The share is painted as a TONE: the two colours blended by it, with the
+# fur's own fine streaks stirring it by MIX_HAIR of itself (noise MIX_GRAIN_PX
+# wide smeared MIX_STREAK_PX along the hair) and a slow drift of MIX_CLOUD of
+# itself over MIX_CLOUD_SIGMA_M of the surface. Two things were tried and
+# dropped. The dark brindle's clouds at full depth put black through a pale
+# grey as blotches, a leopard's rosettes on a husky. The hairs drawn one by
+# one - the top share of the streak noise painted solid - were dashes a
+# centimetre long at this texel size: a zebra, and a speckled poodle. A
+# texel is wider than a hair, so the mix is the tone the hairs average to.
+#   On the texels painted mix["over"] (the base colour without it): where the
+# coat is within MIX_NEAR (CIE76) of that colour's own paint, fading out over
+# MIX_FADE, so a marking or a face feature keeps its paint. By the paint and
+# not by the region masks: the grey that feathers into a cream paw's or
+# chest's mask was left out and stood as a dark band round the ankles.
+MIX_MAX = 0.6
+MIX_GRAIN_PX = 1.0
+MIX_STREAK_PX = 16
+MIX_HAIR = 0.3
+MIX_CLOUD = 0.15
+MIX_CLOUD_SIGMA_M = 0.02
+MIX_HEAD_SIGMA_M = 0.03
+MIX_NEAR = 8.0
+MIX_FADE = 12.0
 MERLE_COVER = 0.35
 # ... and fur painted lighter than this (CIE L*, faded over the range) is left
 # without them: the white markings (cream mid L 88, white 93; fawn 68, tan 56)
@@ -2101,6 +2133,54 @@ def _brindle_mottle(shape: tuple[int, int], direction: np.ndarray | None, valid:
     return (weight * BRINDLE_MOTTLE_OPACITY * valid).astype(np.float32)
 
 
+def apply_mix(composed: np.ndarray, gray: np.ndarray, appearance: dict[str, Any],
+              direction: np.ndarray | None, valid: np.ndarray, seed: int,
+              palette=None, masks: "MaskLibrary | None" = None,
+              landmarks=None) -> tuple[np.ndarray, dict[str, Any] | None]:
+    """Pass 5b: a second colour's hairs through the coat (MIX_*), after the
+    overlay. Returns the texture and what was mixed, None when nothing was."""
+    from .projection import linear_to_lab
+
+    mix = appearance.get("mix") or {}
+    colour = str(mix.get("color") or "").lower()
+    over = str(mix.get("over") or appearance.get("base_color") or "").lower()
+    amount = float(np.clip(mix.get("amount") or 0.0, 0.0, MIX_MAX))
+    head = mix.get("head")
+    head = amount if head is None else float(np.clip(head, 0.0, MIX_MAX))
+    if (colour not in FUR_COLORS or over not in FUR_COLORS or colour == over or max(amount, head) <= 0.0
+            or landmarks is None or landmarks.position is None
+            or not any(str(entry.get("color", "")).lower() == over
+                       for entry in appearance.get("region_colors") or [])):
+        return composed, None
+    shape = gray.shape
+    surface = landmarks.valid if landmarks.valid is not None else valid
+    # the share of the hairs, texel by texel: the head's on the head ...
+    share = np.full(shape, amount, dtype=np.float32)
+    if head != amount and masks is not None:
+        on_head = np.zeros(shape, dtype=np.float32)
+        for region in _FACE_REGIONS:
+            mask = masks.get(region)
+            if mask is not None:
+                on_head = np.maximum(on_head, mask)
+        share = share + (head - amount) * smooth_on_surface(on_head, landmarks.position, surface, MIX_HEAD_SIGMA_M)
+    # ... drifting slowly over the coat, and stirred by the fur's streaks
+    rng = np.random.default_rng(seed + 31)
+    drift = smooth_on_surface(rng.random(shape).astype(np.float32), landmarks.position, surface, MIX_CLOUD_SIGMA_M)
+    drift = (drift - float(drift[surface].mean())) / max(float(drift[surface].std()), 1e-6)
+    hair = (anisotropic_noise(shape, direction, seed + 33, streak=MIX_STREAK_PX, grain=MIX_GRAIN_PX)
+            if direction is not None else noise_field(shape, seed + 33))
+    hair = (hair - float(hair[surface].mean())) / max(float(hair[surface].std()), 1e-6)
+    weight = np.clip(share * (1.0 + MIX_CLOUD * np.clip(drift, -2.0, 2.0) / 2.0)
+                     * (1.0 + MIX_HAIR * np.clip(hair, -2.0, 2.0) / 2.0), 0.0, 1.0)
+    # only the texels still that colour: a blaze, a dark muzzle or a cream
+    # cheek laid over the coat is not the fur the hairs run through
+    apart = np.linalg.norm(linear_to_lab(composed) - linear_to_lab(paint_region(gray, over, None, palette)), axis=-1)
+    weight = (weight * np.clip(1.0 - (apart - MIX_NEAR) / MIX_FADE, 0.0, 1.0) * surface).astype(np.float32)
+    return (_blend(composed, paint_region(gray, colour, None, palette), weight),
+            {"color": colour, "over": over, "amount": round(amount, 2), "head": round(head, 2),
+             "painted": round(float(weight[surface].mean()), 3)})
+
+
 @dataclass
 class TextureResult:
     image: Image.Image
@@ -2209,6 +2289,8 @@ def compose_texture(
     composed, overlay = apply_overlay(composed, gray, appearance, direction, valid, seed, palette,
                                       masks=masks, landmarks=landmarks)
     report["overlay"] = overlay
+    composed, report["mix"] = apply_mix(composed, gray, appearance, direction, valid, seed, palette,
+                                        masks=masks, landmarks=landmarks)
 
     # 6 - and the check that the photo actually landed: in the ring around
     # the protected eyes and nose the composite with the face must still look
