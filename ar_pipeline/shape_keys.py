@@ -44,6 +44,8 @@ Usage:
     python -m ar_pipeline.shape_keys output/skeleton_jindo_small.glb output/skeleton_jindo_small_shaped.glb
     python -m ar_pipeline.shape_keys SRC.glb DST.glb --only ears
     python -m ar_pipeline.shape_keys SRC.glb DST.glb --only ear_fold --template output/templates/jindo_puppy_small
+    python -m ar_pipeline.shape_keys SRC.glb DST.glb --replace ear_drop     # a template: one target rebuilt in place
+    python -m ar_pipeline.shape_keys DOG.glb DST.glb --replace ear_drop --from output/skeleton_jindo_small.glb
 """
 
 from __future__ import annotations
@@ -81,6 +83,30 @@ EAR_DROP_LENGTHEN = 1.3
 EAR_DROP_GATHER = 0.35
 # ears picked by the template's masks take the fur fringe within this of them
 EAR_FRINGE_M = 0.012
+# The turn above is the mask path's (a template whose ears its masks pick). On the jindo it read as a broken
+# ear (user, 2026-11-11, on the shelter dogs built with it): a pricked ear is a deep cup, and turned whole its
+# walls came down as crumpled shards with the cup's dark skin uppermost, its inner root dragged a flat shelf
+# across the crown, and the hollow it stood in stayed open in the top of the head. The jindo's dropped ear is
+# built instead (hanging_ear): the hollow closed into plain skull, and the ear laid out as a flat flap down the
+# head's side - its back outward, its cup pressed shut against the head, its inner edge to the front.
+EAR_HANG_LENGTH = 0.085       # the flap, root to tip (the pricked ear stands 0.054 above its root)
+EAR_HANG_GAP = 0.003          # between the flap and the head
+EAR_HANG_TILT_DEG = 14.0      # the tip swings this far forward of the root
+EAR_HANG_THICK = 0.18         # the cup's depth kept as the flap's thickness
+EAR_HANG_LEAVE = 0.22         # by this share of the ear's height the ear has left the skull and is flap
+EAR_HANG_TOP = 0.12           # below this share the flap is its top edge
+EAR_HANG_BELOW_ROOT = 0.006   # the flap's top edge this far under the ear's root
+EAR_HANG_HUG = 0.7            # how closely the flap follows the head's side front to back (1 = lies on it)
+# the cup's skin sheet and the fur sheet behind it are a hair apart; pressed flat they crossed and the dark skin
+# showed through the coat in slivers. The skin is kept this far under the fur, and leaves the skull later
+EAR_HANG_SHEET = 0.0015
+EAR_HANG_SKIN_LAG = 0.08
+# the hollow the ear stands in: what a membrane stretched over the ear's base lifts by more than LIFT, looked
+# for this far round the ear and this deep under its root
+EAR_HOLLOW_PAD = 0.012
+EAR_HOLLOW_DEPTH = 0.056
+EAR_HOLLOW_LIFT = 0.003
+EAR_HOLLOW_PASSES = (150, 400)   # smoothing passes: to find the hollow, to close it
 
 # --- tail: behind the rump at z -0.29 and above the hocks (y 0.44)
 TAIL_ROOT_Z = -0.285
@@ -185,12 +211,115 @@ def _tail_centre(pos: np.ndarray, weight: np.ndarray) -> np.ndarray:
     return centre[which]
 
 
-def ear_targets(pos: np.ndarray, ears: Ears = Ears(), mask: np.ndarray | None = None) -> dict[str, np.ndarray]:
+def _welded(pos: np.ndarray, tri: np.ndarray) -> tuple[np.ndarray, list[np.ndarray]]:
+    """(vertex -> the first vertex at its place, each vertex's neighbours on the welded surface). UV seams
+    split vertices; the surface they lie on is one."""
+    key = np.round(pos / 1e-5).astype(np.int64)
+    _, first, inverse = np.unique(key, axis=0, return_index=True, return_inverse=True)
+    same = first[inverse.reshape(-1)]
+    welded = same[tri]
+    pairs = np.concatenate([welded[:, [0, 1]], welded[:, [1, 2]], welded[:, [2, 0]]])
+    pairs = np.concatenate([pairs, pairs[:, ::-1]])
+    pairs = pairs[np.argsort(pairs[:, 0], kind="stable")]
+    starts = np.searchsorted(pairs[:, 0], np.arange(len(pos) + 1))
+    return same, [np.unique(pairs[starts[i]:starts[i + 1], 1]) for i in range(len(pos))]
+
+
+def hanging_ear(pos: np.ndarray, tri: np.ndarray, side: float, ears: Ears = Ears()) -> np.ndarray:
+    """The positions with this side's pricked ear hanging (EAR_HANG_* above): the hollow under the ear closed
+    into skull, the ear a flat flap down the head's side."""
+    from scipy.interpolate import RegularGridInterpolator
+    from scipy.ndimage import gaussian_filter
+    from scipy.spatial import cKDTree
+
+    root_y = ears.root_y
+    upper = ear_weight(pos, side, root_y, ears) > 0
+    same, around = _welded(pos, tri)
+
+    def relaxed(members: np.ndarray, passes: int) -> np.ndarray:
+        """`members` moved onto the membrane their rim spans (each to its neighbours' mean, repeated)."""
+        flag = np.zeros(len(pos), bool)
+        flag[same[members]] = True
+        ids = np.flatnonzero(flag)
+        out = pos.copy()
+        for _ in range(passes):
+            out[ids] = np.array([out[around[i]].mean(axis=0) if len(around[i]) else out[i] for i in ids])
+        return out[same]
+
+    # the head without the ear: the hollow is what the membrane lifts, and closes with the ear
+    x = side * pos[:, 0]
+    near = ((~upper) & (x > ears.min_x - EAR_HOLLOW_PAD) & (x < ears.hinge_x + EAR_HOLLOW_PAD)
+            & (pos[:, 2] > ears.z[0]) & (pos[:, 2] < ears.z[1])
+            & (pos[:, 1] > root_y - EAR_HOLLOW_DEPTH) & (pos[:, 1] <= root_y + 1e-6))
+    hollow = near & (np.linalg.norm(relaxed(upper | near, EAR_HOLLOW_PASSES[0]) - pos, axis=1) > EAR_HOLLOW_LIFT)
+    part = upper | hollow
+    cap = relaxed(part, EAR_HOLLOW_PASSES[1])
+
+    # the ear in its own frame: across (a, + outward), deep (d, + forward: the cup opens that way), up (u, 0..1)
+    ear = pos[upper]
+    base = ear[ear[:, 1] < root_y + EAR_RAMP]
+    x_c = 0.5 * ((side * base[:, 0]).min() + (side * base[:, 0]).max())
+    z_c = 0.5 * (base[:, 2].min() + base[:, 2].max())
+    a = x - x_c
+    d = pos[:, 2] - z_c
+    u = np.clip((pos[:, 1] - root_y) / float(ear[:, 1].max() - root_y), 0.0, 1.0)
+    edges = np.linspace(0, 1, 7)
+    centres = 0.5 * (edges[:-1] + edges[1:])
+    bands = [upper & (u >= lo) & (u <= hi) for lo, hi in zip(edges[:-1], edges[1:])]
+    d_mid = np.interp(u, centres, [d[band].mean() for band in bands])
+    a_mid = np.interp(u, centres, [a[band].mean() for band in bands])
+    # the cup's skin faces the cup's own middle line (a little in front of the blade), the fur faces away
+    normals = vertex_normals(pos, tri)
+    skin = (side * normals[:, 0] * (a_mid - a) + normals[:, 2] * (d_mid + 0.02 - d)) > 0
+    thick = (d - d_mid) * EAR_HANG_THICK + np.where(skin, EAR_HANG_SHEET, -EAR_HANG_SHEET)
+    half = float(np.abs(thick[upper]).max())
+
+    # the head's side once the ear is off, as a height field over (y, z): the flap lies along it
+    ys = np.arange(root_y - EAR_HANG_LENGTH - 0.03, root_y + 0.011, 0.01)
+    zs = np.arange(z_c - 0.08, z_c + 0.09, 0.01)
+    beside = side * cap[:, 0] > 0.02
+    field = np.full((len(ys), len(zs)), np.nan)
+    for i, y in enumerate(ys):
+        row = beside & (np.abs(cap[:, 1] - y) < 0.008)
+        for j, z in enumerate(zs):
+            cell = row & (np.abs(cap[:, 2] - z) < 0.008)
+            if cell.any():
+                field[i, j] = (side * cap[cell, 0]).max()
+    for i in range(len(ys)):   # a cell with no vertex takes its row's
+        ok = ~np.isnan(field[i])
+        field[i] = np.interp(np.arange(len(zs)), np.flatnonzero(ok), field[i, ok]) if ok.any() else np.nanmax(field)
+    field = gaussian_filter(field, 1.0, mode="nearest")
+    widest = np.maximum.accumulate(field.max(axis=1)[::-1])[::-1]   # never tucked in under a wider head above
+    surface = RegularGridInterpolator((ys, zs), field, bounds_error=False, fill_value=None)
+
+    hang = np.clip((u - EAR_HANG_TOP) / (1.0 - EAR_HANG_TOP), 0.0, 1.0) * EAR_HANG_LENGTH
+    ver = root_y - EAR_HANG_BELOW_ROOT - hang
+    fwd = z_c - a + np.tan(np.radians(EAR_HANG_TILT_DEG)) * hang    # the ear's inner edge is the flap's front
+    on_head = surface(np.stack([np.clip(ver, ys[0], ys[-1]), np.clip(fwd, zs[0], zs[-1])], axis=1))
+    lat = (EAR_HANG_HUG * on_head + (1.0 - EAR_HANG_HUG) * np.interp(ver, ys, widest)
+           + EAR_HANG_GAP + half - thick)                           # the ear's back out, its cup to the head
+    fur_ids, skin_ids = np.flatnonzero(upper & ~skin), np.flatnonzero(upper & skin)
+    if len(fur_ids) >= 3 and len(skin_ids):
+        plane = np.stack([ver, fwd], axis=1)
+        _, nearest = cKDTree(plane[fur_ids]).query(plane[skin_ids], k=3)
+        lat[skin_ids] = np.minimum(lat[skin_ids], lat[fur_ids][nearest].min(axis=1) - EAR_HANG_SHEET)
+    flap = np.stack([side * lat, ver, fwd], axis=1)
+
+    leave = np.where(upper, _smooth((u - np.where(skin, EAR_HANG_SKIN_LAG, 0.0)) / EAR_HANG_LEAVE), 0.0)
+    out = pos.copy()
+    out[part] = (cap + leave[:, None] * (flap - cap))[part]
+    return out
+
+
+def ear_targets(pos: np.ndarray, ears: Ears = Ears(), mask: np.ndarray | None = None,
+                tri: np.ndarray | None = None) -> dict[str, np.ndarray]:
     """ear_fold and ear_drop. `mask` is each vertex's ear membership read
     from the template's ear masks (ear_mask); without it the ears are the
-    geometric band above the root (the jindo)."""
+    geometric band above the root (the jindo), and with `tri` their drop is
+    the built hanging ear (hanging_ear) instead of the turn."""
     fold = pos.copy()
     drop = pos.copy()
+    built = mask is None and tri is not None
     for side in (1.0, -1.0):
         if mask is not None:
             # the ear moves whole, faded in from its root by height only: the
@@ -218,6 +347,9 @@ def ear_targets(pos: np.ndarray, ears: Ears = Ears(), mask: np.ndarray | None = 
         hinge = np.array([root[0], fold_y, root[2]])
         # +x rotation turns +y toward +z: up toward forward, then down
         fold = _rotate(fold, upper, hinge, _rot_x(EAR_FOLD_DEG))
+        if built:
+            drop = drop + (hanging_ear(pos, tri, side, ears) - pos)
+            continue
         hinge = np.array([side * hinge_x, root_y, root[2]])
         longer = pos.copy()
         longer[:, 1] = root_y + (pos[:, 1] - root_y) * EAR_DROP_LENGTHEN
@@ -230,9 +362,9 @@ def ear_targets(pos: np.ndarray, ears: Ears = Ears(), mask: np.ndarray | None = 
     return {"ear_fold": fold, "ear_drop": drop}
 
 
-def targets(pos: np.ndarray, ears: Ears = Ears()) -> dict[str, np.ndarray]:
+def targets(pos: np.ndarray, ears: Ears = Ears(), tri: np.ndarray | None = None) -> dict[str, np.ndarray]:
     """name -> deformed positions (same order as pos)."""
-    out: dict[str, np.ndarray] = ear_targets(pos, ears)
+    out: dict[str, np.ndarray] = ear_targets(pos, ears, tri=tri)
 
     # tail
     tail = tail_weight(pos)
@@ -425,11 +557,11 @@ def add_targets(src: str | Path, dst: str | Path, append_only: bool = False, onl
         mask = ear_mask(template, _read(gltf, bytes(blob), primitive.attributes.TEXCOORD_0).astype(np.float64))
         print(f"[shape] ears from the template's masks: {int((mask > 0.5).sum()) if mask is not None else 0} vertices")
     if only in ("ears", "ear_fold"):
-        made = ear_targets(pos, ears, mask)
+        made = ear_targets(pos, ears, mask, tri)
         if only == "ear_fold":
             made = {"ear_fold": made["ear_fold"]}
     else:
-        made = more_targets(pos, tri) if append_only else {**targets(pos, ears), **more_targets(pos, tri)}
+        made = more_targets(pos, tri) if append_only else {**targets(pos, ears, tri), **more_targets(pos, tri)}
     for name, moved in made.items():
         if name in names:
             raise ValueError(f"{src} already has a target {name}")
@@ -451,10 +583,69 @@ def add_targets(src: str | Path, dst: str | Path, append_only: bool = False, onl
     return names
 
 
+def replace_target(src: str | Path, dst: str | Path, name: str, template: str | Path | None = None,
+                   source: str | Path | None = None) -> int:
+    """One target's data rewritten in place in a GLB that already carries it; everything else in the file
+    stays byte for byte. Returns how many vertices the target moves.
+
+    A template's is built from the code as it stands now. A dog built from the template takes it from the
+    template (`source`): its mesh is the template's own, but its scene is scaled to the dog's size, and the
+    ears measured round its ear joint come out wrong (the rebuilt target differed by 14 cm)."""
+    gltf = GLTF2().load(str(src))
+    blob = bytearray(gltf.binary_blob())
+    primitive = gltf.meshes[0].primitives[0]
+    names = list(((gltf.meshes[0].extras or {}).get("targetNames")) or [])
+    if name not in names:
+        raise ValueError(f"{src} has no target {name} (has {names})")
+    target = primitive.targets[names.index(name)]
+    pos = _read(gltf, bytes(blob), primitive.attributes.POSITION).astype(np.float64)
+    if source is not None:
+        other = GLTF2().load(str(source))
+        other_blob = other.binary_blob()
+        other_primitive = other.meshes[0].primitives[0]
+        other_names = list(((other.meshes[0].extras or {}).get("targetNames")) or [])
+        other_pos = _read(other, other_blob, other_primitive.attributes.POSITION)
+        if other_pos.shape != pos.shape or np.abs(other_pos - pos).max() > 1e-6:
+            raise ValueError(f"{src} is not built on {source}'s mesh")
+        theirs = other_primitive.targets[other_names.index(name)]
+        delta = _read(other, other_blob, theirs["POSITION"]).astype(np.float64)
+        normal_delta = _read(other, other_blob, theirs["NORMAL"]).astype(np.float64)
+    else:
+        normal = _read(gltf, bytes(blob), primitive.attributes.NORMAL).astype(np.float64)
+        tri = _read(gltf, bytes(blob), primitive.indices).reshape(-1, 3).astype(np.int64)
+        mask = None
+        if template is not None:
+            mask = ear_mask(template, _read(gltf, bytes(blob), primitive.attributes.TEXCOORD_0).astype(np.float64))
+        ears = template_ears(src, pos)
+        made = {**targets(pos, ears, tri), **ear_targets(pos, ears, mask, tri), **more_targets(pos, tri)}
+        delta = made[name] - pos
+        new_normal = normal + (vertex_normals(made[name], tri) - vertex_normals(pos, tri))
+        new_normal /= np.maximum(np.linalg.norm(new_normal, axis=1, keepdims=True), 1e-12)
+        normal_delta = new_normal - normal
+    for key, array in (("POSITION", delta), ("NORMAL", normal_delta)):
+        accessor = gltf.accessors[target[key]]
+        view = gltf.bufferViews[accessor.bufferView]
+        offset = (view.byteOffset or 0) + (accessor.byteOffset or 0)
+        data = array.astype(np.float32).tobytes()
+        if accessor.count != len(array) or accessor.componentType != 5126:
+            raise ValueError(f"{src}: target {name} is not the float VEC3 per vertex this writes")
+        blob[offset:offset + len(data)] = data
+        if key == "POSITION":
+            accessor.min = array.min(axis=0).astype(float).tolist()
+            accessor.max = array.max(axis=0).astype(float).tolist()
+    gltf.set_binary_blob(bytes(blob))
+    gltf.save_binary(str(dst))
+    return int((np.linalg.norm(delta, axis=1) > 1e-5).sum())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("src")
     parser.add_argument("dst")
+    parser.add_argument("--replace", default=None, metavar="TARGET",
+                        help="rewrite this one target in a GLB that already has it")
+    parser.add_argument("--from", dest="source", default=None, metavar="TEMPLATE.glb",
+                        help="with --replace on a built dog: take the target from the template it was built on")
     parser.add_argument("--append", action="store_true",
                         help="add only the second set to a GLB that already has the first")
     parser.add_argument("--only", choices=("ears", "ear_fold"), default=None,
@@ -463,6 +654,10 @@ def main() -> None:
     parser.add_argument("--template", default=None,
                         help="the template folder: its ear masks pick the ear vertices (ear_mask)")
     args = parser.parse_args()
+    if args.replace:
+        moved = replace_target(args.src, args.dst, args.replace, template=args.template, source=args.source)
+        print(f"[shape] wrote {args.dst}: {args.replace} rewritten, {moved} vertices move")
+        return
     names = add_targets(args.src, args.dst, append_only=args.append, only=args.only, template=args.template)
     print(f"[shape] wrote {args.dst} with {len(names)} targets: {names}")
 

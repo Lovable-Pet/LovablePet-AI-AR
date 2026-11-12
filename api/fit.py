@@ -72,7 +72,8 @@ def assess_fit(species: str, weight_kg: float, age_text: str = "",
                shape: dict[str, str] | None = None, pattern: str | None = None,
                today: _dt.date | None = None, votes: dict[str, Any] | None = None,
                photo_quality: dict[str, Any] | None = None, pick: dict[str, Any] | None = None,
-               photo_bars: bool = False, from_above: bool = False) -> dict[str, Any]:
+               photo_bars: bool = False, from_above: bool = False,
+               photo_caveats: list[str] | None = None) -> dict[str, Any]:
     """The verdict: level (good/fair/poor), its Korean label, a 0-100 score
     and every check that cost points, with its reason in Korean. `pick` is
     template_pick.combine's answer; without it the template is the adult
@@ -87,8 +88,10 @@ def assess_fit(species: str, weight_kg: float, age_text: str = "",
     sample saw the dog from above (prepare_photo.seen_from_above). The legs
     are foreshortened then, so the leg answers and a "legs" difference are
     not counted. On public shelter photos (2026-10-28) the two puppies seen
-    from above were read short-legged 1/3 and 3/3. The age is only carried
-    into the inputs."""
+    from above were read short-legged 1/3 and 3/3. `photo_caveats`: what the
+    gate saw and goes on with (prepare_photo.gate_caveats: a hand over the
+    coat, a second animal, text on the dog), a caveat each. The age is only
+    carried into the inputs."""
     shape = shape or {}
     if from_above and pick and "legs" in (pick.get("differences") or []):
         from .body_shape import match_from
@@ -178,6 +181,11 @@ def assess_fit(species: str, weight_kg: float, age_text: str = "",
         hit(f"photo_{measure}", level, why)
     if photo_bars:
         hit("photo_bars", "fair", "철장·울타리 너머로 찍힌 사진: 막대에 가린 털은 주변 털로 추정, 부위 색 측정 생략")
+    # what the gate saw and no longer refuses (prepare_photo.CAVEAT_RULES)
+    from .prepare_photo import CAVEAT_RULES
+    for code in photo_caveats or []:
+        if code in CAVEAT_RULES:
+            hit(f"photo_{code}", "fair", CAVEAT_RULES[code])
 
     score = max(0, 100 - sum(PENALTY[c["level"]] for c in checks))
     if any(c["level"] == "poor" for c in checks) or score < FAIR_MIN:
@@ -202,7 +210,8 @@ def describe(fit: dict[str, Any]) -> str:
 
 
 class FitRejected(RuntimeError):
-    """Raised by the lite run when --fit-stop is on and the verdict is poor."""
+    """Raised by the lite run when no template covers the dog (the pick's
+    no_template), or when --fit-stop is on and the verdict is poor."""
 
     def __init__(self, fit: dict[str, Any]):
         super().__init__(describe(fit))

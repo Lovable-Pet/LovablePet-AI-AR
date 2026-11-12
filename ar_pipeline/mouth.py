@@ -54,6 +54,38 @@ HOW
 template that already has a mouth it starts again from that backup. Run it
 after rig_fix (whose --install starts from auto_rig's weights, without the
 mouth) and before pose_clips (which builds bark on it).
+
+OTHER MUZZLES (MUZZLES, --remake)
+---------------------------------
+Every template stands 0.83 m tall, so a toy breed's head is about 1.5x the
+jindo's in the mesh and its muzzle is a different shape: the corner window
+above misses, and the mouth's inside in the jindo's metres is the wrong size.
+The maltese, toy poodle, jindo puppy and chihuahua came from a teammate
+(2026-11-12) with the lips cut only under the nose - 8-12 cm of lip line
+against the jindo's 20 - and the jaw's hinge 2 cm behind that, so the mouth
+opened as a hatch in front of the muzzle with the jindo's teeth crowded into
+it (user, 11-13: "토이푸들, 진도강아지, 치와와 입 자연스럽게 수정좀", then the
+maltese the same way). For a template in MUZZLES:
+
+  * the corners are looked for round a point given in nose-to-eyes units
+    (how far behind the nose, how far below it), the most folded vertex on
+    the outside of each cheek within CORNER_NEAR_M of it, and the front is
+    the vertex nearest a point given the same way on the midline;
+  * the line can be kept near the plane of its corners and front (flat_m),
+    where the lips are drawn or hidden in hair and no crease leads the path;
+  * the gums can stand on an arch inside the lip line (arch), where the
+    muzzle's surface is hair far wider than the jaws;
+  * everything measured in the jindo's metres - the hinge's offsets, the
+    blend distances, the deepening, the gums, palate, tongue and teeth - is
+    scaled by the length of the line the gums stand on over the jindo's
+    (REFERENCE_LINE_M), so the whole dentition stands along a shorter line.
+
+--remake takes the mouth a template already has out first (take_out: the
+mouth's primitive and material dropped, the jaw's skin given back, the old
+cut closed by the weld every step here works on) and keeps everything else
+the template has - its clips with their jaw keys, its texture. With
+--install it backs the template up to work/backup_remouth_<slug>/ once and
+starts from that backup every time, so trying other corners does not stack.
 """
 from __future__ import annotations
 
@@ -89,6 +121,48 @@ CORNER_BEHIND_NOSE_M = 0.05
 MIDLINE_M = 0.005
 FRONT_BEHIND_NOSE_M = 0.03
 FRONT_UNDER_NOSE_M = 0.008
+# the path stays within this of the midline, or LIP_BEYOND_CORNER_M outside
+# the corners where they sit wider (a toy breed's)
+LIP_HALF_WIDTH_M = 0.06
+LIP_BEYOND_CORNER_M = 0.012
+# templates whose lip line is placed (see OTHER MUZZLES), each read off the
+# template's side and underside (the lip the texture draws, the crease the
+# mesh has):
+#   corner, front - where they are, in nose-to-eyes distances (behind the
+#     nose, below it). A corner is the most folded vertex within
+#     CORNER_NEAR_M of that point (side view) among those within
+#     CORNER_OUTER_M of the outermost; the front the vertex nearest that
+#     point on the midline (the crease right under a toy breed's nose folds
+#     more than its lips do, and the toy poodle has no vertex on the midline
+#     there);
+#   flat_m - the line kept near the plane through its corners and front: an
+#     edge costs 1 + (its distance from the plane / flat_m)^2 times more.
+#     Where the lips are no crease in the mesh the path has nothing to
+#     follow: on the chihuahua (its lips are drawn, not modelled) one side
+#     ran along the lip and the other cut across under the chin, and through
+#     the toy poodle's curls it zigzagged 31 cm from tuft to tuft. The jindo
+#     puppy's lips are a crease that dips under its whisker pads: no plane;
+#   arch - the gums and teeth stand on an arch inside the lip line that keeps
+#     this share of its half-width (dental_arch), the gap between lip and
+#     arch closed by a band in the coat's own material (lip_band). For a
+#     muzzle whose surface is its hair: the toy poodle's lip line runs round
+#     a ball of curls 13 cm wide, jagged from tuft to tuft, and its jaws are
+#     half that. The maltese's lips are drawn under its nose, 6 cm wide, and
+#     the line steps out from them round the moustache to the same width: its
+#     arch a little narrower, to stay inside that step.
+# REFERENCE_LINE_M: the jindo's lip line, the length the metres below fit
+MUZZLES = {
+    "maltese": {"corner": (0.88, 0.78), "front": (0.12, 0.58), "flat_m": 0.003, "arch": 0.45},
+    "toypoodle": {"corner": (0.88, 0.39), "front": (0.20, 0.42), "flat_m": 0.003, "arch": 0.5},
+    "jindo_puppy": {"corner": (0.93, 0.42), "front": (0.24, 0.35), "flat_m": None, "arch": None},
+    "chihuahua": {"corner": (1.45, 0.57), "front": (0.31, 0.93), "flat_m": 0.004, "arch": None},
+}
+# the arch's front stands in from the lip line's by this share of what its
+# sides do (the hair under a nose is short)
+ARCH_FRONT_INSET = 0.3
+CORNER_NEAR_M = 0.007
+CORNER_OUTER_M = 0.012
+REFERENCE_LINE_M = 0.20
 # the jaw joint, from the corners (a dog's sits about a fifth of the skull's
 # length behind the corners of its mouth, a little above their line)
 HINGE_BEHIND_M = 0.018
@@ -229,28 +303,50 @@ def folds(wt: np.ndarray, rep: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return keys[pair], np.where(inward, bend, 0.0)
 
 
-def lip_line(rep: np.ndarray, edges: np.ndarray, fold: np.ndarray, at: dict[str, np.ndarray]) -> list[int]:
+def lip_line(rep: np.ndarray, edges: np.ndarray, fold: np.ndarray, at: dict[str, np.ndarray],
+             place: dict | None = None) -> list[int]:
     """Welded ids along the lip line, from the corner on the dog's left (+x)
-    round the front to the corner on its right (see HOW)."""
+    round the front to the corner on its right (see HOW). `place`: where the
+    corners and the front are (a MUZZLES row), instead of the most folded
+    vertices of the cheeks and under the nose."""
     strength = np.bincount(edges.ravel(), weights=np.repeat(fold, 2), minlength=len(rep))
     eyes = (at["L_eye_jnt"] + at["R_eye_jnt"]) / 2
     nose = at["nose_jnt"]
     x, y, z = rep.T
     cheek = (y < nose[1] + 0.005) & (y > nose[1] - CORNER_DROP_M) & \
         (z > eyes[2] - CORNER_BEHIND_EYES_M) & (z < nose[2] - CORNER_BEHIND_NOSE_M)
+    if place is not None:
+        muzzle = nose[2] - eyes[2]
+        off = np.hypot(z - (nose[2] - place["corner"][0] * muzzle), y - (nose[1] - place["corner"][1] * muzzle))
     corners = []
     for side in (1.0, -1.0):
-        pool = np.flatnonzero(cheek & (side * x > CORNER_OFF_MIDLINE_M))
+        if place is None:
+            pool = np.flatnonzero(cheek & (side * x > CORNER_OFF_MIDLINE_M))
+        else:
+            pool = np.flatnonzero((off < CORNER_NEAR_M) & (side * x > CORNER_OFF_MIDLINE_M))
+            if not len(pool):
+                raise SystemExit(f"[mouth] no vertex within {CORNER_NEAR_M} m of the corner asked for (side {side:+.0f})")
+            pool = pool[side * x[pool] > (side * x[pool]).max() - CORNER_OUTER_M]
         corners.append(int(pool[np.argmax(strength[pool])]))
-    pool = np.flatnonzero((np.abs(x) < MIDLINE_M) & (z > nose[2] - FRONT_BEHIND_NOSE_M) &
-                          (y < nose[1] - FRONT_UNDER_NOSE_M) & (y > nose[1] - CORNER_DROP_M))
-    front = int(pool[np.argmax(strength[pool])])
+    if place is None:
+        pool = np.flatnonzero((np.abs(x) < MIDLINE_M) & (z > nose[2] - FRONT_BEHIND_NOSE_M) &
+                              (y < nose[1] - FRONT_UNDER_NOSE_M) & (y > nose[1] - CORNER_DROP_M))
+        front = int(pool[np.argmax(strength[pool])])
+    else:
+        front = int(np.argmin(np.linalg.norm(
+            rep - [0.0, nose[1] - place["front"][1] * muzzle, nose[2] - place["front"][0] * muzzle], axis=1)))
     ends = rep[corners + [front]]
+    wide = max(LIP_HALF_WIDTH_M, float(np.abs(ends[:2, 0]).max()) + LIP_BEYOND_CORNER_M)
     region = (y > ends[:, 1].min() - 0.015) & (y < ends[:, 1].max() + 0.012) & \
-        (z > ends[:2, 2].min() - 0.006) & (np.abs(x) < 0.06)
+        (z > ends[:2, 2].min() - 0.006) & (np.abs(x) < wide)
     keep = region[edges].all(axis=1)
     length = np.linalg.norm(rep[edges[keep, 0]] - rep[edges[keep, 1]], axis=1)
     cost = length * (1.0 + VALLEY_PREFERENCE * (1.0 - np.minimum(fold[keep] / VALLEY_FULL_DEG, 1.0)))
+    if place is not None and place.get("flat_m"):
+        normal = np.cross(ends[0] - ends[2], ends[1] - ends[2])
+        normal /= np.linalg.norm(normal)
+        away = np.abs((rep[edges[keep]].mean(axis=1) - ends[2]) @ normal)
+        cost *= 1.0 + (away / place["flat_m"]) ** 2
     g = graph(edges[keep], cost, len(rep))
     _, before = dijkstra(g, indices=front, return_predecessors=True)
     halves = []
@@ -293,13 +389,17 @@ def cut(tri: np.ndarray, ids: np.ndarray, rep: np.ndarray, line: list[int]) -> t
     for f in band:
         groups.setdefault(find(f), []).append(f)
     # a side below the line: its triangles' centres lower than the line's
-    # vertices they touch
+    # vertices they touch - of two sides, the lower one (under the jindo
+    # puppy's whisker pads the upper lip's side hangs below the line too)
     height = {v: rep[v][1] for v in inner}
-    lower = []
-    for fs in groups.values():
-        rel = [rep[wt[f]].mean(axis=0)[1] - np.mean([height[v] for v in wt[f] if v in height]) for f in fs]
-        if np.mean(rel) < 0:
-            lower.extend(fs)
+    below = {}
+    for root, fs in groups.items():
+        below[root] = -np.mean([rep[wt[f]].mean(axis=0)[1] - np.mean([height[v] for v in wt[f] if v in height])
+                                for f in fs])
+    if len(groups) == 2:
+        lower = list(groups[max(below, key=below.get)])
+    else:
+        lower = [f for root, fs in groups.items() if below[root] > 0 for f in fs]
     tri = tri.copy()
     first_new = len(ids)
     new_of: dict[int, int] = {}
@@ -315,16 +415,23 @@ def cut(tri: np.ndarray, ids: np.ndarray, rep: np.ndarray, line: list[int]) -> t
 
 
 def jaw_share(tri: np.ndarray, ids: np.ndarray, rep: np.ndarray, upper: list[int], lower: list[int],
-              hinge: np.ndarray) -> np.ndarray:
-    """The jaw's share per welded id of the cut mesh (see HOW)."""
+              hinge: np.ndarray, scale: float = 1.0) -> np.ndarray:
+    """The jaw's share per welded id of the cut mesh (see HOW); its distances
+    times `scale`. A vertex the surface does not reach from the lips (a
+    strand of another primitive that only touches the skin) takes the gap of
+    the nearest one it does reach."""
     edges, length = edge_lengths(ids[tri], rep)
     g = graph(edges, length, len(rep))
     d_up = dijkstra(g, indices=upper, min_only=True)
     d_low = dijkstra(g, indices=lower, min_only=True)
-    gap = np.where(np.isfinite(d_up), d_up, 1.0) - np.where(np.isfinite(d_low), d_low, 1.0)
-    share = expit(gap / CHEEK_BLEND_M)
-    share *= smoothstep((rep[:, 2] - (hinge[2] - THROAT_FADE_M)) / (THROAT_FADE_M + JAW_FULL_AHEAD_M))
-    share *= 1.0 - smoothstep((rep[:, 1] - hinge[1]) / ABOVE_HINGE_FADE_M)
+    reached = np.isfinite(d_up) & np.isfinite(d_low)
+    gap = np.where(reached, d_up - d_low, 0.0)
+    if not reached.all():
+        _, near = cKDTree(rep[reached]).query(rep[~reached])
+        gap[~reached] = gap[reached][near]
+    share = expit(gap / (CHEEK_BLEND_M * scale))
+    share *= smoothstep((rep[:, 2] - (hinge[2] - THROAT_FADE_M * scale)) / ((THROAT_FADE_M + JAW_FULL_AHEAD_M) * scale))
+    share *= 1.0 - smoothstep((rep[:, 1] - hinge[1]) / (ABOVE_HINGE_FADE_M * scale))
     share[upper] = 0.0
     share[lower] = 1.0
     return share
@@ -341,13 +448,13 @@ def vertex_normals(pos: np.ndarray, tri: np.ndarray, ids: np.ndarray) -> np.ndar
 
 
 def deepen(pos: np.ndarray, normal: np.ndarray, tri: np.ndarray, ids: np.ndarray, share: np.ndarray,
-           line_pos: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """The lower jaw's skin moved down (see JAW_DEEPEN_M) and its normals
-    turned as its faces turn (the template's own normals kept otherwise):
-    (positions, normals, how far each vertex moved)."""
+           line_pos: np.ndarray, scale: float = 1.0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The lower jaw's skin moved down (see JAW_DEEPEN_M, times `scale`) and
+    its normals turned as its faces turn (the template's own normals kept
+    otherwise): (positions, normals, how far each vertex moved)."""
     _, near = cKDTree(line_pos[:, [0, 2]]).query(pos[:, [0, 2]])
     below = line_pos[near, 1] - pos[:, 1]
-    amount = JAW_DEEPEN_M * share * smoothstep(below / JAW_DEEPEN_RAMP_M)
+    amount = JAW_DEEPEN_M * scale * share * smoothstep(below / (JAW_DEEPEN_RAMP_M * scale))
     before = vertex_normals(pos, tri, ids)
     pos = pos - UP * amount[:, None]
     turned = vertex_normals(pos, tri, ids) - before
@@ -362,14 +469,37 @@ def mix(a: tuple, b: tuple, u: float) -> tuple:
     return tuple(x + (y - x) * u for x, y in zip(a, b))
 
 
-def mouth_mesh(line_pos: np.ndarray) -> dict:
-    """The inside of the mouth (see HOW) hung on the lip line's points:
+def dental_arch(line_pos: np.ndarray, keep: float) -> np.ndarray:
+    """A point per point of the lip line on the arch the gums stand on where
+    the lips are hair (MUZZLES' arch): half an ellipse from corner to corner
+    in the plane of the corners and the front, `keep` of the lip line's
+    half-width wide, its front ARCH_FRONT_INSET of the sides' inset behind
+    the lip line's; each point as far along it as its own is along the line."""
+    along = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(line_pos, axis=0), axis=1))]
+    angle = np.pi * along / along[-1]
+    corners = line_pos[[0, -1]]
+    centre = corners.mean(axis=0)
+    wide = np.abs(corners[:, 0] - centre[0]).mean()
+    front = line_pos[int(np.argmax(line_pos[:, 2]))]
+    deep = front[2] - centre[2] - ARCH_FRONT_INSET * (1.0 - keep) * wide
+    return np.stack([centre[0] + np.sign(corners[0, 0] - centre[0]) * keep * wide * np.cos(angle),
+                     centre[1] + (front[1] - centre[1]) * np.sin(angle),
+                     centre[2] + deep * np.sin(angle)], axis=1)
+
+
+def mouth_mesh(line_pos: np.ndarray, scale: float = 1.0, arch: np.ndarray | None = None) -> dict:
+    """The inside of the mouth (see HOW) hung on the lip line's points, its
+    metres times `scale`:
     positions, colours, triangles and which way each faces (into the mouth,
     or out of a tooth), per vertex which jaw carries it (0 head ... 1 jaw)
     and where tuck draws it if it lies outside the skin, and for the
     vertices on the lips' edge the half and the point of the line they sit
-    on (skinned as the lip there is; tuck leaves them)."""
+    on (skinned as the lip there is; tuck leaves them). `arch`: the mouth
+    hangs on these points (dental_arch) instead, each half's first row
+    carried whole by its jaw ("rim": those rows' vertices, for lip_band)."""
     n = len(line_pos)
+    if arch is not None:
+        line_pos = arch
     xz = line_pos[:, [0, 2]]
     tangent = np.gradient(xz, axis=0)
     tangent /= np.linalg.norm(tangent, axis=1, keepdims=True)
@@ -378,19 +508,21 @@ def mouth_mesh(line_pos: np.ndarray) -> dict:
     inward[flip] *= -1
     inward3 = np.stack([inward[:, 0], np.zeros(n), inward[:, 1]], axis=1)
     z_back = (line_pos[0, 2] + line_pos[-1, 2]) / 2
-    z_front = line_pos[:, 2].max() - FRONT_INSET_M
+    inset = FRONT_INSET_M * scale
+    z_front = line_pos[:, 2].max() - inset
     order = np.argsort(line_pos[:, 2])
     lip_y = lambda z: np.interp(z, line_pos[order, 2], line_pos[order, 1])
     spine_z = np.clip(line_pos[:, 2], z_back, z_front)
     spine_z[[0, -1]] = z_back
-    pos, colour, carry, home, edge = [], [], [], [], {}
+    pos, colour, carry, home, at_corner, edge = [], [], [], [], [], {}
 
-    def add(p, rgb, jaw, to):
-        dark = 1.0 - DEPTH_DARKEN * smoothstep((z_front + FRONT_INSET_M - p[2]) / (z_front + FRONT_INSET_M - z_back))
+    def add(p, rgb, jaw, to, corner=-1):
+        dark = 1.0 - DEPTH_DARKEN * smoothstep((z_front + inset - p[2]) / (z_front + inset - z_back))
         pos.append(np.asarray(p, dtype=np.float64))
         colour.append(linear(rgb) * dark)
         carry.append(jaw)
         home.append(to)
+        at_corner.append(corner)
         return len(pos) - 1
 
     grid, crest = {}, {"upper": [], "lower": []}
@@ -398,21 +530,22 @@ def mouth_mesh(line_pos: np.ndarray) -> dict:
         jaw = 0.0 if half == "upper" else 1.0
         for i, p in enumerate(line_pos):
             spine = np.array([0.0, lip_y(spine_z[i]), spine_z[i]])
-            ring = [(p, LIP_RGB)] + [(p + inward3[i] * d + UP * h, rgb) for d, h, rgb in profile]
+            ring = [(p, LIP_RGB)] + [(p + (inward3[i] * d + UP * h) * scale, rgb) for d, h, rgb in profile]
             start = ring[-1][0]
             for k in range(1, INNER_ROWS + 1):
                 u = k / INNER_ROWS
                 q = start + (spine - start) * u
                 if half == "upper":
-                    q[1] = start[1] + (spine[1] + PALATE_RISE_M - start[1]) * np.sin(u * np.pi / 2)
+                    q[1] = start[1] + (spine[1] + PALATE_RISE_M * scale - start[1]) * np.sin(u * np.pi / 2)
                     rgb = tuple(c * (PALATE_RIDGE_SHADE if k % 2 else 1.0) for c in PALATE_RGB)
                 else:
-                    q[1] = start[1] + (spine[1] + TONGUE_TOP_M - start[1]) * smoothstep(u / 0.6)
+                    q[1] = start[1] + (spine[1] + TONGUE_TOP_M * scale - start[1]) * smoothstep(u / 0.6)
                     rgb = mix(TONGUE_EDGE_RGB, TONGUE_RGB, smoothstep(u / 0.5))
                 ring.append((q, rgb))
             for k, (q, rgb) in enumerate(ring):
-                grid[half, i, k] = add(q, rgb, jaw, spine)
-            edge[grid[half, i, 0]] = (half, i)
+                grid[half, i, k] = add(q, rgb, jaw, spine, {0: 0, n - 1: 1}.get(i, -1))
+            if arch is None:
+                edge[grid[half, i, 0]] = (half, i)
             crest[half].append((ring[CREST_ROWS[0]][0] + ring[CREST_ROWS[1]][0]) / 2)
     rows = 1 + len(UPPER_GUM) + INNER_ROWS
     tris, facing = [], []
@@ -432,12 +565,12 @@ def mouth_mesh(line_pos: np.ndarray) -> dict:
             top, bottom = grid["upper", i, k], grid["lower", i, k]
             column[k, 0], column[k, WALL_ROWS] = top, bottom
             for m in range(1, WALL_ROWS):
-                if k == 0:
+                if k == 0 and arch is None:
                     column[k, m] = top
                     continue
                 s = m / WALL_ROWS
                 rgb = tuple(a * (1.0 - 0.3 * np.sin(s * np.pi)) for a in THROAT_RGB)
-                column[k, m] = add(pos[top] + (pos[bottom] - pos[top]) * s, rgb, s, back)
+                column[k, m] = add(pos[top] + (pos[bottom] - pos[top]) * s, rgb, s, back, 0 if i == 0 else 1)
         for k in range(rows - 1):
             for m in range(WALL_ROWS):
                 a, b = column[k, m], column[k + 1, m]
@@ -453,8 +586,9 @@ def mouth_mesh(line_pos: np.ndarray) -> dict:
         along = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(arch, axis=0), axis=1))]
         for side in (1.0, -1.0):                    # toward the corner at the start of the line, the end
             for at, length, width, thick, sweep in teeth:
+                at, length, width, thick = at * scale, length * scale, width * scale, thick * scale
                 s = along[front] - side * at
-                if not TOOTH_CORNER_GAP_M < s < along[-1] - TOOTH_CORNER_GAP_M:
+                if not TOOTH_CORNER_GAP_M * scale < s < along[-1] - TOOTH_CORNER_GAP_M * scale:
                     continue
                 root = np.array([np.interp(s, along, arch[:, c]) for c in range(3)])
                 k = int(np.clip(np.searchsorted(along, s), 1, n - 1))
@@ -464,7 +598,7 @@ def mouth_mesh(line_pos: np.ndarray) -> dict:
                 across = np.cross(UP, run)
                 backward = -side * run
                 axis = sign * UP
-                base = root - axis * TOOTH_ROOT_M
+                base = root - axis * TOOTH_ROOT_M * scale
                 tip = root + axis * length + backward * sweep * length
                 rings = []
                 for f, size in TOOTH_PROFILE:
@@ -481,7 +615,58 @@ def mouth_mesh(line_pos: np.ndarray) -> dict:
                         tris += [(a, b, c), (a, c, d)]
                         facing += [out, out]
     return {"pos": np.array(pos), "colour": np.array(colour), "carry": np.array(carry), "home": np.array(home),
-            "tris": np.array(tris, dtype=np.int64), "facing": np.array(facing), "edge": edge}
+            "corner": np.array(at_corner),
+            "tris": np.array(tris, dtype=np.int64), "facing": np.array(facing), "edge": edge,
+            "rim": {half: [grid[half, i, 0] for i in range(n)] for half in ("upper", "lower")}}
+
+
+def lip_band(lip_vertices: dict, rim: dict, attr: dict, dense: np.ndarray, targets: list, head_k: int,
+             jaw_k: int, corner_dense: list) -> dict:
+    """The band between the lips' edge and a dental arch inside it (MUZZLES'
+    arch), to go in the coat's own material: from each lip vertex in to the
+    arch's point for it, both jaws, and at each corner the web between the
+    two when the mouth opens. An inner vertex has its lip vertex's UV (the
+    band is the colour of the hair at the lip, whatever coat the dog is
+    given) and morph delta, and its jaw's whole weight - at the corners the
+    corner's (`corner_dense`) - as the mouth's first row there has.
+    `lip_vertices`, `rim`: per half the coat's vertex and the arch's position
+    at each point of the line."""
+    n = len(rim["upper"])
+    pos, normal, uv, weight, source = [], [], [], [], []
+    index = {}
+    for half, up in (("upper", -UP), ("lower", UP)):
+        for i, v in enumerate(lip_vertices[half]):
+            index[half, "lip", i] = len(pos)
+            pos.append(attr["POSITION"][v]); normal.append(attr["NORMAL"][v]); uv.append(attr["TEXCOORD_0"][v])
+            weight.append(dense[v]); source.append(v)
+        for i, v in enumerate(lip_vertices[half]):
+            index[half, "arch", i] = len(pos)
+            rigid = np.zeros(dense.shape[1])
+            rigid[head_k if half == "upper" else jaw_k] = 1.0
+            if i in (0, n - 1):
+                rigid = corner_dense[0 if i == 0 else 1]
+            pos.append(rim[half][i]); normal.append(up); uv.append(attr["TEXCOORD_0"][v])
+            weight.append(rigid); source.append(v)
+    pos = np.array(pos, dtype=np.float64)
+    tris, facing = [], []
+    for half, up in (("upper", -UP), ("lower", UP)):
+        for i in range(n - 1):
+            a, b = index[half, "lip", i], index[half, "lip", i + 1]
+            c, d = index[half, "arch", i + 1], index[half, "arch", i]
+            tris += [(a, b, c), (a, c, d)]
+            facing += [up, up]
+    for i in (0, n - 1):
+        tris.append((index["upper", "lip", i], index["upper", "arch", i], index["lower", "arch", i]))
+        facing.append(np.array([0.0, 0.0, 1.0]))
+    tris = np.array(tris, dtype=np.int64)
+    fn = np.cross(pos[tris[:, 1]] - pos[tris[:, 0]], pos[tris[:, 2]] - pos[tris[:, 0]])
+    flip = (fn * np.array(facing)).sum(axis=1) < 0
+    tris[flip] = tris[flip][:, ::-1]
+    source = np.array(source)
+    return {"pos": pos, "normal": np.array(normal, dtype=np.float64), "uv": np.array(uv), "dense": np.array(weight),
+            "tris": tris,
+            "targets": [{key: (values[source] if key == "POSITION" else np.zeros((len(source), 3)))
+                         for key, values in t.items()} for t in targets]}
 
 
 def winding(points: np.ndarray, pos: np.ndarray, tri: np.ndarray) -> np.ndarray:
@@ -580,28 +765,74 @@ def move_jaw(rig: Rig, blob: bytearray, hinge: np.ndarray) -> np.ndarray:
     return old
 
 
-def apply(glb: Path, out: Path) -> dict:
+def take_out(gltf: GLTF2, mesh) -> int:
+    """The mouth `mesh` already has dropped: its primitive and its material
+    (the materials after it renumbered). Returns its triangles. The jaw's
+    skin is given back in apply (jaw_to_head), the old cut closed by weld."""
+    index = next(i for i, m in enumerate(gltf.materials) if (m.name or "") == MOUTH_MATERIAL)
+    triangles = sum(gltf.accessors[q.indices].count for q in mesh.primitives if q.material == index) // 3
+    mesh.primitives = [q for q in mesh.primitives if q.material != index]
+    # (and a lip band, the small primitive in the coat's material beside the coat itself)
+    coat = max(mesh.primitives, key=lambda q: gltf.accessors[q.attributes.POSITION].count)
+    mesh.primitives = [q for q in mesh.primitives if q is coat or q.material != coat.material]
+    gltf.materials.pop(index)
+    for other in gltf.meshes:
+        for q in other.primitives:
+            if q.material is not None and q.material > index:
+                q.material -= 1
+    return triangles
+
+
+def jaw_to_head(dense: np.ndarray, jaw_k: int, head_k: int) -> np.ndarray:
+    """Weights with the jaw's share given back: nothing on the jaw, the rest
+    of each vertex's weights scaled up to one (what jaw_share's mix was made
+    from); a vertex the jaw had whole goes to the head, as rig_fix gives it
+    the face."""
+    dense = dense.copy()
+    dense[:, jaw_k] = 0.0
+    whole = dense.sum(axis=1) < 0.02
+    dense[whole] = 0.0
+    dense[whole, head_k] = 1.0
+    return dense / dense.sum(axis=1, keepdims=True)
+
+
+def apply(glb: Path, out: Path, place: dict | None = None, scale: float | None = None,
+          remake: bool = False) -> dict:
+    """`place`, `scale`: see OTHER MUZZLES (scale None: the lip line's length
+    over the jindo's where the line is placed, else 1). `remake`: take the
+    mouth the GLB has out first."""
     rig = Rig(glb)
     gltf = rig.gltf
-    if any((m.name or "") == MOUTH_MATERIAL for m in gltf.materials or []):
-        raise SystemExit(f"[mouth] {glb} already has a mouth; start from the GLB without it")
+    had = any((m.name or "") == MOUTH_MATERIAL for m in gltf.materials or [])
+    if had and not remake:
+        raise SystemExit(f"[mouth] {glb} already has a mouth; start from the GLB without it, or --remake")
     blob = bytearray(rig.blob)
     mesh = gltf.meshes[next(n.mesh for n in gltf.nodes if n.mesh is not None and n.skin is not None)]
+    taken = take_out(gltf, mesh) if had else 0
     prim = max(mesh.primitives, key=lambda p: gltf.accessors[p.attributes.POSITION].count)
+    # primitives on the coat's own vertices (split_whiskers' strands)
+    siblings = [q for q in mesh.primitives if q is not prim and q.attributes.POSITION == prim.attributes.POSITION]
     attr = {k: read(gltf, blob, v) for k, v in vars(prim.attributes).items() if isinstance(v, int)}
     targets = [{k: read(gltf, blob, v) for k, v in t.items()} for t in prim.targets or []]
     tri = read(gltf, blob, prim.indices).astype(np.int64).reshape(-1, 3)
+    strands = [read(gltf, blob, q.indices).astype(np.int64).reshape(-1, 3) for q in siblings]
     names = [(gltf.nodes[j].name or "").split(".")[0] for j in rig.joints]
     world = rig.world()
     at = {n: world[i][:3, 3].copy() for n, i in rig.by_name.items()}
 
     ids, rep = weld(attr["POSITION"])
     edges, fold = folds(ids[tri], rep)
-    line = lip_line(rep, edges, fold, at)
+    line = lip_line(rep, edges, fold, at, place)
+    lip = rep[line]
+    line_m = float(np.linalg.norm(np.diff(lip, axis=0), axis=1).sum())
+    arch = dental_arch(lip, place["arch"]) if place is not None and place.get("arch") else None
+    if scale is None:
+        stand = lip if arch is None else arch
+        scale = float(np.linalg.norm(np.diff(stand, axis=0), axis=1).sum()) / REFERENCE_LINE_M if place is not None else 1.0
     tri, src, new_ids, lower_id, sides = cut(tri, ids, rep, line)
     rep2 = np.r_[rep, rep[list(lower_id)]]
     corners = rep[[line[0], line[-1]]]
-    hinge = np.array([0.0, corners[:, 1].mean() + HINGE_ABOVE_M, corners[:, 2].mean() - HINGE_BEHIND_M])
+    hinge = np.array([0.0, corners[:, 1].mean() + HINGE_ABOVE_M * scale, corners[:, 2].mean() - HINGE_BEHIND_M * scale])
     old_jaw = move_jaw(rig, blob, hinge)
 
     # the skin: every attribute and morph delta of a new vertex as its source's
@@ -617,17 +848,20 @@ def apply(glb: Path, out: Path) -> dict:
         weights = weights / (255.0 if w_acc.componentType == 5121 else 65535.0)
     jaw_k = names.index("jaw_jnt")
     head_k = names.index("head_jnt")
-    share = jaw_share(tri, new_ids, rep2, line[1:-1], list(lower_id.values()), hinge)[new_ids]
+    share = jaw_share(np.concatenate([tri] + strands), new_ids, rep2, line[1:-1], list(lower_id.values()), hinge,
+                      scale)[new_ids]
     dense = dense_weights(joints, weights, len(names))
+    if had:
+        dense = jaw_to_head(dense, jaw_k, head_k)
     dense *= (1.0 - share)[:, None]
     dense[:, jaw_k] += share
     joints, weights = top_weights(dense)
     attr["POSITION"], attr["NORMAL"], deepened = deepen(attr["POSITION"], attr["NORMAL"], tri, new_ids, share,
-                                                        rep[line])
+                                                        lip, scale)
 
     # the mouth: inside on the head or the jaw, its lips' edge as the skin
     # it meets (no crack between them, however the head and jaw turn)
-    m = mouth_mesh(rep[line])
+    m = mouth_mesh(lip, scale, arch)
     dist, near = cKDTree(attr["POSITION"][:len(ids)]).query(m["pos"], k=TARGET_NEIGHBOURS)
     idw = 1.0 / np.maximum(dist, 1e-6)
     idw /= idw.sum(axis=1, keepdims=True)
@@ -640,9 +874,23 @@ def apply(glb: Path, out: Path) -> dict:
     for v, (half, i) in m["edge"].items():
         wid = lower_id.get(line[i], line[i]) if half == "lower" else line[i]
         m_dense[v] = dense[np.flatnonzero(new_ids == wid)[0]]
+    # the rings at the two corners (palate, tongue and the throat wall
+    # between them) go as the corner's own skin does: carried whole by the
+    # jaw, the lower one swung out through the cheek, whose share there is
+    # half (the jindo puppy, 11-13: a black flap beside the open mouth)
+    corner_dense = [dense[np.flatnonzero(new_ids == line[k])[0]] for k in (0, -1)]
+    for k in (0, 1):
+        m_dense[m["corner"] == k] = corner_dense[k]
     m_joints, m_weights = top_weights(m_dense)
+    band = None
+    if arch is not None:
+        first = lambda wid: int(np.flatnonzero(new_ids == wid)[0])
+        band = lip_band({"upper": [first(v) for v in line], "lower": [first(lower_id.get(v, v)) for v in line]},
+                        {half: m["pos"][m["rim"][half]] for half in ("upper", "lower")}, attr, dense, targets,
+                        head_k, jaw_k, corner_dense)
 
-    # write: the coat's accessors anew, the mouth as a second primitive
+    # write: the coat's accessors anew (the strands' primitives on the same
+    # ones), the mouth as a primitive of its own
     for key, values in attr.items():
         setattr(prim.attributes, key, append_accessor(gltf, blob, values, f"VEC{values.shape[1]}",
                                                       bounds=key == "POSITION"))
@@ -653,6 +901,10 @@ def apply(glb: Path, out: Path) -> dict:
     prim.indices = append_accessor(gltf, blob, tri.ravel(), "SCALAR", component=index_type)
     prim.targets = [{key: append_accessor(gltf, blob, values, "VEC3", bounds=key == "POSITION")
                      for key, values in t.items()} for t in targets]
+    for q in siblings:
+        for key in list(attr) + ["JOINTS_0", "WEIGHTS_0"]:
+            setattr(q.attributes, key, getattr(prim.attributes, key))
+        q.targets = [dict(t) for t in prim.targets]
     gltf.materials.append(Material(
         name=MOUTH_MATERIAL, doubleSided=True,
         pbrMetallicRoughness=PbrMetallicRoughness(baseColorFactor=[1.0, 1.0, 1.0, 1.0], metallicFactor=0.0,
@@ -668,19 +920,34 @@ def apply(glb: Path, out: Path) -> dict:
         material=len(gltf.materials) - 1, mode=4,
         targets=[{"POSITION": append_accessor(gltf, blob, d, "VEC3", bounds=True)} for d in m_targets])
     mesh.primitives.append(mouth)
+    if band is not None:
+        b_joints, b_weights = top_weights(band["dense"])
+        mesh.primitives.append(Primitive(
+            attributes=Attributes(
+                POSITION=append_accessor(gltf, blob, band["pos"], "VEC3", bounds=True),
+                NORMAL=append_accessor(gltf, blob, band["normal"], "VEC3"),
+                TEXCOORD_0=append_accessor(gltf, blob, band["uv"], "VEC2"),
+                JOINTS_0=append_accessor(gltf, blob, b_joints, "VEC4", component=joint_type),
+                WEIGHTS_0=append_accessor(gltf, blob, b_weights, "VEC4")),
+            indices=append_accessor(gltf, blob, band["tris"].ravel(), "SCALAR", component=5123),
+            material=prim.material, mode=4,
+            targets=[{key: append_accessor(gltf, blob, values, "VEC3", bounds=key == "POSITION")
+                      for key, values in t.items()} for t in band["targets"]]))
     packed = prune(gltf, bytes(blob))
     gltf.buffers[0].byteLength = len(packed)
     gltf.set_binary_blob(bytes(packed))
     out.parent.mkdir(parents=True, exist_ok=True)
     gltf.save(str(out))
-    lip = rep[line]
-    return {"line": len(line), "line_cm": round(float(np.linalg.norm(np.diff(lip, axis=0), axis=1).sum()) * 100, 1),
+    muzzle = at["nose_jnt"][2] - (at["L_eye_jnt"][2] + at["R_eye_jnt"][2]) / 2
+    return {"line": len(line), "line_cm": round(line_m * 100, 1), "scale": round(float(scale), 3),
             "corners": [[round(float(v), 3) for v in c] for c in corners],
             "front": [round(float(v), 3) for v in rep[line[int(np.argmax(lip[:, 2]))]]],
-            "sides": sides, "new_vertices": len(src),
+            "back_of_muzzle": round(float((lip[:, 2].max() - corners[:, 2].mean()) / muzzle), 2),
+            "sides": sides, "new_vertices": len(src), "taken_out": taken, "strand_primitives": len(siblings),
             "jaw": [round(float(v), 3) for v in old_jaw], "hinge": [round(float(v), 3) for v in hinge],
             "jaw_skin": int((share > 0.5).sum()), "jaw_partial": int(((share > 0.02) & (share < 0.98)).sum()),
-            "deepened": int((deepened > 1e-4).sum()), "mouth": (len(m["pos"]), len(m["tris"])), "tucked": tucked}
+            "deepened": int((deepened > 1e-4).sum()), "mouth": (len(m["pos"]), len(m["tris"])), "tucked": tucked,
+            "lip_band": None if band is None else (len(band["pos"]), len(band["tris"]))}
 
 
 def main() -> None:
@@ -690,21 +957,38 @@ def main() -> None:
     parser.add_argument("--glb", default=None, help="open the mouth of this GLB instead of the template")
     parser.add_argument("--out", default=None)
     parser.add_argument("--install", action="store_true")
+    parser.add_argument("--remake", action="store_true",
+                        help="take the mouth the template has out first (see OTHER MUZZLES)")
+    parser.add_argument("--place", nargs=6, type=float,
+                        metavar=("CORNER_BACK", "CORNER_DROP", "FRONT_BACK", "FRONT_DROP", "FLAT_M", "ARCH"),
+                        help="a MUZZLES row to try instead of the template's (FLAT_M 0: no plane, ARCH 0: none)")
+    parser.add_argument("--scale", type=float, default=None, help="the mouth's metres times this (default: see OTHER MUZZLES)")
     args = parser.parse_args()
     template = ROOT / "output" / f"skeleton_{args.slug}_{args.size}.glb"
-    glb = Path(args.glb) if args.glb else template
-    if args.install:
+    place = MUZZLES.get(args.slug)
+    if args.place:
+        place = {"corner": tuple(args.place[:2]), "front": tuple(args.place[2:4]), "flat_m": args.place[4] or None,
+                 "arch": args.place[5] or None}
+    if args.remake:
+        backup = ROOT / "work" / f"backup_remouth_{args.slug}" / template.name
+        if args.install and not backup.exists():
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(template, backup)
+        source = Path(args.glb) if args.glb else backup if backup.exists() else template
+        out = template if args.install else Path(args.out) if args.out else ROOT / "work" / f"mouth_{args.slug}.glb"
+    elif args.install:
         backup = ROOT / "work" / f"backup_mouth_{args.slug}" / template.name
         has_mouth = any((m.name or "") == MOUTH_MATERIAL for m in GLTF2().load(str(template)).materials or [])
         if not has_mouth:
             backup.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(template, backup)
         elif not backup.exists():
-            raise SystemExit(f"[mouth] {template} has a mouth and there is no {backup} to start again from")
+            raise SystemExit(f"[mouth] {template} has a mouth and there is no {backup} to start again from (--remake)")
         source, out = backup, template
     else:
-        source, out = glb, Path(args.out) if args.out else ROOT / "work" / f"mouth_{args.slug}.glb"
-    report = apply(source, out)
+        source = Path(args.glb) if args.glb else template
+        out = Path(args.out) if args.out else ROOT / "work" / f"mouth_{args.slug}.glb"
+    report = apply(source, out, place, args.scale, args.remake)
     print(f"[mouth] {report} -> {out}")
 
 

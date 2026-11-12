@@ -20,7 +20,12 @@ Then two parts, in this order:
    rejection needs both samples to agree on it (a photograph is never
    refused on one reading). Conditions that do not stop the run - a
    harness, a back view - become NOTES the reading and repaint prompts
-   carry ("ignore the harness; paint fur only").
+   carry ("ignore the harness; paint fur only"). Since 2026-11-11 a hand
+   or arm over the coat, a second animal and text over the animal do not
+   stop it either (CAVEAT_RULES), nor, from the next day, clothing or an
+   object over the coat: the notice's photograph is the only one there is,
+   so the run goes on with a note and a caveat in the verdict. What stops
+   it is a photograph whose subject is not a dog.
 
 2. CUT (local, no call). rembg lifts the foreground. The gate also named
    the grid cell the animal's body sits in, so of rembg's pieces the one
@@ -30,7 +35,7 @@ Then two parts, in this order:
    the largest piece is taken. The rest of the frame is filled with a
    neutral grey and the result is cropped to the animal with a margin. That file replaces the photograph for every later stage. What
    rembg cannot separate - an arm across the dog's back, text printed over
-   the fur - is exactly what the gate refuses.
+   the fur - is what the gate names, and the prompts are told to look past.
 
 Cage bars or a wire fence between the camera and the dog are not refused:
 the coat, the outline and the looks show between the bars as they do to a
@@ -63,6 +68,7 @@ import numpy as np
 from PIL import Image, ImageFilter
 
 from .agents import Transport
+from .sampling import sample
 
 # The whole photograph is shown to the gate at most this wide.
 GATE_SIDE = 768
@@ -118,11 +124,24 @@ Do not judge quality or give a confidence. Answer with the form only."""
 # Conditions that stop the run, with what to tell the shelter.
 REJECT_RULES: dict[str, str] = {
     "not_a_dog": "사진의 주 피사체가 개가 아닙니다.",
-    "several_animals": "동물이 둘 이상 보입니다. 이 개만 나온 사진이 필요합니다.",
-    "person_covers": "사람의 손·팔·몸이 개의 털을 가리고 있습니다. 가리지 않은 사진이 필요합니다.",
-    "object_covers": "물체가 개의 털을 크게 가리고 있습니다.",
-    "text_on_animal": "글자·도장·워터마크가 개의 몸 위에 있습니다. 글자 없는 원본이 필요합니다.",
-    "clothing": "개가 옷을 입고 있습니다. 옷을 벗은 사진이 필요합니다.",
+}
+# Conditions that stopped the run until 2026-11-11 and now go on with a caveat
+# in the fit verdict (fit.assess_fit photo_caveats) and a note in the prompts
+# (gate_notes). A shelter's notice has the one photograph it has: of a sample
+# of 418 notices a person's hand or arm is over the dog in 24 %, and a refusal
+# there is a dog with no model. Built anyway, 64 hard photographs gave the
+# right coat for 5 of the 8 held dogs, the 3 with a second animal beside them
+# and the 3 with a logo or stamp, against 25 of the 45 the gate had passed
+# (tools/hard_photos, NOTES "어려운 보호소 사진 고르기").
+# Clothing and an object over the coat joined them a day later (2026-11-12):
+# the four such photos among the 64 - a sweater, a blanket with a cone, a tarp
+# over all but the head and paws, a towel - gave the right coat when built.
+CAVEAT_RULES: dict[str, str] = {
+    "several_animals": "다른 동물이 같이 찍힌 사진: 가운데 개만 읽음, 옆 동물의 털색이 섞였을 수 있음",
+    "person_covers": "사람의 손·팔이 털을 가린 사진: 가린 부분은 주변 털로 추정",
+    "text_on_animal": "글자·도장·로고가 몸 위에 있는 사진: 그 밑의 털은 주변 털로 추정",
+    "object_covers": "물체가 털을 크게 가린 사진: 보이는 털로만 읽고 가린 부분은 추정",
+    "clothing": "옷을 입은 사진: 옷 밑의 털은 보이는 털로 추정",
 }
 
 
@@ -142,6 +161,7 @@ class PreparedPhoto:
     coverage: float                  # share of the original frame that is animal
     pieces_dropped: int
     rejected: list[str] = field(default_factory=list)
+    caveats: list[str] = field(default_factory=list)   # CAVEAT_RULES conditions the gate agreed on
     notes: list[str] = field(default_factory=list)
     readings: list[dict[str, Any]] = field(default_factory=list)
     quality: dict[str, Any] | None = None   # photo_quality.measure_quality on the cut-out
@@ -158,7 +178,8 @@ class PreparedPhoto:
             "box": list(self.box), "coverage": round(self.coverage, 3), "pieces_dropped": self.pieces_dropped,
             "bars": self.bars, "subject_box": list(self.subject_box) if self.subject_box else None,
             "watermarks": self.watermarks,
-            "rejected": self.rejected, "notes": self.notes, "gate": self.readings, "quality": self.quality,
+            "rejected": self.rejected, "caveats": self.caveats, "notes": self.notes, "gate": self.readings,
+            "quality": self.quality,
         }
 
 
@@ -190,6 +211,8 @@ def _person_covers(reading: dict[str, Any]) -> str:
 
 
 def reject_reasons(reading: dict[str, Any], species: str = "dog") -> list[str]:
+    """Every condition this one reading reports, stopping (REJECT_RULES) or
+    not (CAVEAT_RULES); judge_gate and gate_caveats take what all agree on."""
     reasons = []
     if reading.get("subject") != species:
         reasons.append("not_a_dog")
@@ -201,11 +224,22 @@ def reject_reasons(reading: dict[str, Any], species: str = "dog") -> list[str]:
         reasons.append("object_covers")
     if reading.get("text_on_animal"):
         reasons.append("text_on_animal")
-    if reading.get("clothing"):
+    # a garment seen on a dog in someone's arms is as often the sleeve, the
+    # glove or the towel round it: two held dogs with no clothes on and one
+    # wrapped in a towel were refused for it (hard photos 64, 224, 291)
+    if reading.get("clothing") and _person_covers(reading) == "none":
         reasons.append("clothing")
     return reasons
 
 
+CLOTHING_NOTE = ("The animal wears a garment: ignore it entirely and treat the coat beneath it as continuing the "
+                 "coat that shows on the head, legs and tail.")
+OBJECT_NOTE = ("An object hides part of the animal: read only the coat that shows, and treat the hidden part as "
+               "continuing it.")
+OTHER_ANIMAL_NOTE = ("Another animal is in the photograph: read only the animal the picture centres on, and none "
+                     "of the other animal's coat, even where the two touch.")
+TEXT_NOTE = ("Printed text, a stamp or a logo lies over the animal: ignore it entirely and treat the coat beneath "
+             "as continuing the neighbouring coat.")
 BARS_NOTE = ("The animal is photographed through cage bars or a fence: ignore the bars entirely and treat "
              "the coat behind each bar as continuing the coat on either side of it.")
 # A hand that hides only a little (person_covers "small") does not stop the run. The cut keeps it with the dog,
@@ -234,6 +268,14 @@ def gate_notes(readings: list[dict[str, Any]]) -> list[str]:
     # every sample saw a hand: "small" in one and "large" in the other is still a hand
     if readings and all(_person_covers(r) != "none" for r in readings):
         notes.append(HAND_NOTE)
+    if readings and all(int(r.get("animals") or 0) > 1 for r in readings):
+        notes.append(OTHER_ANIMAL_NOTE)
+    if readings and all(r.get("text_on_animal") for r in readings):
+        notes.append(TEXT_NOTE)
+    if readings and all(r.get("clothing") and _person_covers(r) == "none" for r in readings):
+        notes.append(CLOTHING_NOTE)
+    if readings and all(r.get("object_covers_animal") for r in readings):
+        notes.append(OBJECT_NOTE)
     views = [r.get("view") for r in readings]
     if views and all(v == "back" for v in views):
         notes.append("The photograph shows the animal from behind; the face and chest are not visible.")
@@ -267,11 +309,11 @@ async def gate_photo(transport: Transport, image: Image.Image, species: str = "d
     shown = draw_grid(_shrink(image, GATE_SIDE))
     blocks = [_image_block(shown), {"type": "text", "text": "Fill in the form for this photograph."}]
     readings: list[dict[str, Any]] = []
-    for _ in range(samples):
-        try:
-            readings.append(await transport.complete(system=GATE_SYSTEM, blocks=blocks, schema=GATE_SCHEMA))
-        except Exception as exc:  # noqa: BLE001 - one failed sample must not refuse a photo
-            print(f"[prepare] gate sample failed ({type(exc).__name__}: {exc})")
+    for payload in await sample(transport, system=GATE_SYSTEM, blocks=blocks, schema=GATE_SCHEMA, n=samples):
+        if isinstance(payload, dict):
+            readings.append(payload)
+        else:  # one failed sample must not refuse a photo
+            print(f"[prepare] gate sample failed ({type(payload).__name__}: {payload})")
     reasons, notes = judge_gate(readings, species)
     return reasons, notes, readings
 
@@ -284,6 +326,15 @@ def judge_gate(readings: list[dict[str, Any]], species: str = "dog") -> tuple[li
     per_sample = [set(reject_reasons(r, species)) for r in readings]
     agreed = set.intersection(*per_sample)
     return [r for r in REJECT_RULES if r in agreed], gate_notes(readings)
+
+
+def gate_caveats(readings: list[dict[str, Any]], species: str = "dog") -> list[str]:
+    """The CAVEAT_RULES conditions every reading reported: the run goes on,
+    the fit verdict names them."""
+    if not readings:
+        return []
+    agreed = set.intersection(*[set(reject_reasons(r, species)) for r in readings])
+    return [r for r in CAVEAT_RULES if r in agreed]
 
 
 # --------------------------------------------------------------------------- cut
@@ -488,10 +539,11 @@ async def prepare_photo(
         animal = np.zeros((image.size[1], image.size[0]), dtype=bool)
         animal[box[1]:box[3], box[0]:box[2]] = mask
     return PreparedPhoto(path=target, original=photo_path, cut=cut is not None, box=box, coverage=coverage,
-                         pieces_dropped=dropped, rejected=reasons, notes=notes, readings=readings, quality=quality,
+                         pieces_dropped=dropped, rejected=reasons, caveats=gate_caveats(readings, species),
+                         notes=notes, readings=readings, quality=quality,
                          bars=bars, subject_box=subject, watermarks=watermarks, animal_mask=animal)
 
 
-__all__ = ["BARS_NOTE", "GATE_SCHEMA", "HAND_NOTE", "PhotoRejected", "PreparedPhoto", "bridge_bars", "choose_pieces", "cut_out",
-           "cut_out_with_mask", "gate_anchors", "gate_photo", "judge_gate", "prepare_photo", "reject_reasons",
-           "seen_from_above"]
+__all__ = ["BARS_NOTE", "CAVEAT_RULES", "GATE_SCHEMA", "HAND_NOTE", "PhotoRejected", "PreparedPhoto", "REJECT_RULES",
+           "bridge_bars", "choose_pieces", "cut_out", "cut_out_with_mask", "gate_anchors", "gate_caveats", "gate_photo",
+           "judge_gate", "prepare_photo", "reject_reasons", "seen_from_above"]

@@ -14,11 +14,11 @@ absolute colour words and no pattern names.
 
 from __future__ import annotations
 
-import asyncio
 from collections import Counter
 from typing import Any
 
 from .agents import AgentRefusal, Transport
+from .sampling import sample
 
 SAMPLES = 3
 
@@ -212,10 +212,7 @@ async def read_body_colours(transport: Transport, photo_blocks: list[dict[str, A
                                                         "what colour is each? And the patches on the body, "
                                                         "if any: where, and how much?"}]
 
-    async def one() -> dict[str, Any]:
-        return await transport.complete(system=BODY_COLOURS_SYSTEM, blocks=blocks, schema=BODY_COLOURS_SCHEMA)
-
-    payloads = await asyncio.gather(*(one() for _ in range(samples)), return_exceptions=True)
+    payloads = await sample(transport, system=BODY_COLOURS_SYSTEM, blocks=blocks, schema=BODY_COLOURS_SCHEMA, n=samples)
     readings: list[dict[str, Any]] = []
     for payload in payloads:
         if isinstance(payload, AgentRefusal):

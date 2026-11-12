@@ -107,6 +107,8 @@ PHOTO_OK = {"subject": "dog", "animals": 1, "person_covers": "none", "object_cov
             "bars_in_front": False, "text_on_animal": False, "clothing": False, "harness": False, "view": "front",
             "animal_cell": {"col": "E", "row": 5}, "note": ""}
 PHOTO_HELD = {**PHOTO_OK, "person_covers": "large", "harness": True}
+PHOTO_DRESSED = {**PHOTO_OK, "clothing": True}
+PHOTO_NO_DOG = {**PHOTO_OK, "subject": "none", "animals": 0}
 
 
 def critic(rounds: list[list[dict[str, Any]]], samples: int = 2):
@@ -242,10 +244,27 @@ def mixed() -> ScriptedTransport:
 
 
 def held_dog() -> ScriptedTransport:
-    """The black shiba held by a person: the gate refuses it."""
+    """The black shiba held by a person: built with a caveat in the verdict
+    (refused until 2026-11-11, prepare_photo.CAVEAT_RULES)."""
     transport = black_shiba()
     transport._answers["photo_gate"] = [PHOTO_HELD]
     return transport
 
 
-CASES = {"black_shiba": black_shiba, "jindo": jindo, "mixed": mixed, "held_dog": held_dog}
+def dressed_dog() -> ScriptedTransport:
+    """The black shiba in a sweater: built with a caveat in the verdict
+    (refused until 2026-11-12)."""
+    transport = black_shiba()
+    transport._answers["photo_gate"] = [PHOTO_DRESSED]
+    return transport
+
+
+def not_a_dog() -> ScriptedTransport:
+    """A photograph with no dog in it: the gate refuses it (status photo_rejected)."""
+    transport = black_shiba()
+    transport._answers["photo_gate"] = [PHOTO_NO_DOG]
+    return transport
+
+
+CASES = {"black_shiba": black_shiba, "jindo": jindo, "mixed": mixed, "held_dog": held_dog, "dressed_dog": dressed_dog,
+         "not_a_dog": not_a_dog}

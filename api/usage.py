@@ -25,6 +25,18 @@ PRICES: dict[str, tuple[float, float, float]] = {
     "gpt-5": (1.25, 0.125, 10.00),
     "gpt-5-mini": (0.25, 0.025, 2.00),
     "gpt-5-nano": (0.05, 0.005, 0.40),
+    # the GPT-5.6 and GPT-6 families, standard tier, short context (pricing
+    # page, 2026-11-12). Listed by full name: "gpt-5" above would otherwise
+    # price a gpt-5.6 model by its prefix. Their reasoning tokens arrive in
+    # completion_tokens and are billed as output.
+    "gpt-5.6-sol": (4.00, 0.40, 20.00),
+    "gpt-5.6-terra": (2.00, 0.20, 12.00),
+    "gpt-5.6-luna": (0.20, 0.02, 1.20),
+    "gpt-6-astra": (10.00, 1.00, 50.00),
+    "gpt-6-sol": (2.00, 0.20, 10.00),
+    "gpt-6-luna": (0.10, 0.01, 0.50),
+    "gpt-6.1-sol": (2.00, 0.10, 10.00),
+    "gpt-6.1-terra": (1.00, 0.05, 5.00),
     "gpt-image-1": (10.00, 2.50, 40.00),
     "gpt-image-1-mini": (2.50, 0.625, 8.00),
     "gpt-image-1.5": (8.00, 2.00, 32.00),

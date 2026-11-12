@@ -13,11 +13,11 @@ pattern names, no record hint. It can only answer with what it sees.
 
 from __future__ import annotations
 
-import asyncio
 from collections import Counter
 from typing import Any
 
 from .agents import AgentRefusal, Transport
+from .sampling import sample
 
 # Five, not three: with three the cheeks of a white-cheeked dog came back
 # cream 2 / white 1 on one run and tan 2 / cream 1 on the next - a two-vote
@@ -208,10 +208,7 @@ async def read_face_colours(transport: Transport, crop_block: dict[str, Any],
                                                    "inside of the ears, the fur round the eyes, and whether a "
                                                    "light blaze runs up between the eyes: what colour is each?"}]
 
-    async def one() -> dict[str, Any]:
-        return await transport.complete(system=FACE_COLOURS_SYSTEM, blocks=blocks, schema=FACE_COLOURS_SCHEMA)
-
-    payloads = await asyncio.gather(*(one() for _ in range(samples)), return_exceptions=True)
+    payloads = await sample(transport, system=FACE_COLOURS_SYSTEM, blocks=blocks, schema=FACE_COLOURS_SCHEMA, n=samples)
     readings: list[dict[str, Any]] = []
     for payload in payloads:
         if isinstance(payload, AgentRefusal):

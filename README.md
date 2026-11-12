@@ -133,7 +133,7 @@ python ar_pipeline/render_anchors.py --template <slug>_small
 - 브라우저에서 흑백 경계에 번개무늬: `python -m ar_pipeline.mip_islands --glb <만든 개 GLB> --slug <slug>`
 - 눈·코 보호 영역만 다시: `python ar_pipeline/build_landmarks.py <glb> <템플릿 폴더> <geometry> --protect-only`
 - 흰 털 위 어두운 털 조각: `python -m ar_pipeline.fix_normals --slug <slug>`
-- 홍채 없는 회색 눈: `python -m ar_pipeline.paint_eyes --slug <slug> --install`
+- 홍채 없는 회색 눈: `python -m ar_pipeline.paint_eyes --slug <slug> --install` (홍채는 있고 반사광만 없으면 `--lights-only`)
 - 검은 원판·털뿐인 발바닥: `python -m ar_pipeline.paint_pads --slug <slug> [--ref jindo] --install`
 - 흰 털에 박힌 검은 줄·점: `python -m ar_pipeline.fill_gutters --slug <slug> --install`
 - 스무딩으로 녹은 가슴 되돌리기: `python -m ar_pipeline.restore_geometry --slug <slug> --from <이전 GLB>` 뒤 `fix_normals`
@@ -146,9 +146,11 @@ python ar_pipeline/render_anchors.py --template <slug>_small
 ```
 python -m ar_pipeline.rig_fix --slug <slug> --install
 python -m ar_pipeline.mouth --slug <slug> --install          # 짖기용 입 (진도)
+python -m ar_pipeline.mouth --slug <slug> --remake --install # 이미 있는 입을 걷어내고 다시 (소형견 템플릿: mouth.MUZZLES)
 python -m ar_pipeline.pose_clips --slug <slug> --install      # 기본 클립
 python -m ar_pipeline.pose_clips --slug <slug> --clip bark --install
 python -m ar_pipeline.pose_clips --slug <slug> --clip lying --clip sit_down --clip stand_up --clip lie_down --clip get_up --install
+python -m ar_pipeline.mouth_clips --slug <slug> --install     # 이미 있는 클립에 헥헥거리는 입만 얹기 (몸 동작은 그대로)
 ```
 
 죽은 척·자세 전환의 모션캡처(`ar_pipeline/data/dog_clips.npz`, AI4Animation SIGGRAPH 2018)는 **CC BY-NC 4.0: 출처 표시, 상업적 이용 불가**.
