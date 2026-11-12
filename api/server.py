@@ -417,7 +417,8 @@ async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> d
             path = tmp / "photo_clean.png"
             image.save(path)
         # local: is the photograph big, sharp and exposed enough to read
-        quality = await asyncio.to_thread(quality_of_file, path)
+        # (with the small local mask: the full cut is 43-56 s on the Lambda, and a screen waits on this)
+        quality = await asyncio.to_thread(quality_of_file, path, quick=True)
         try:
             looks = await asyncio.to_thread(pick_template, path, meta.weight_kg)
         except Exception:  # noqa: BLE001 - no weights or no backbone: the vision call alone

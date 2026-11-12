@@ -38,6 +38,8 @@ fair-to-poor, x2.5 blows out 15 of 20, x0.3 crushes only the dark dogs.
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 from typing import Any
 
 import numpy as np
@@ -134,15 +136,49 @@ def measure_quality(image: Image.Image, mask: np.ndarray | None = None,
     }
 
 
-def quality_of_file(path, use_rembg: bool = True) -> dict[str, Any]:
+# The fit check's mask (quality_of_file quick=True): rembg's small model, run
+# here. The cut the job makes is BRIA RMBG 2.0 on the Lambda, 43-56 s a
+# photo on its 3 GB and never under 40: with it /v1/fit took 70 s and more,
+# past the 60 s the admin screen waits, so every fit check there ended in
+# "적합도를 확인하지 못했어요" though the server answered (prod, 2026-11-13).
+# u2netp is 4.7 MB and takes about a second; its mask is rougher at the
+# edge, which the three measurements - a box, and statistics inside it - do
+# not feel (see the comparison in NOTES.md).
+QUICK_MODEL = "u2netp"
+
+
+@lru_cache(maxsize=1)
+def _quick_session():
+    from rembg import new_session
+
+    return new_session(QUICK_MODEL, providers=["CPUExecutionProvider"])
+
+
+def quick_mask(image: Image.Image) -> np.ndarray | None:
+    """Where the animal is, from the small local model: a bool mask at the
+    photo's size, or None when the model cannot run here or finds nothing."""
+    try:
+        from rembg import remove
+
+        mask = np.asarray(remove(image, session=_quick_session(), only_mask=True).convert("L")) > 127
+    except Exception as exc:  # noqa: BLE001 - no model, no download: the whole frame is measured
+        print(f"[quality] quick mask failed ({type(exc).__name__}: {str(exc)[:120]})")
+        return None
+    return mask if mask.mean() >= 0.01 else None
+
+
+def quality_of_file(path, use_rembg: bool = True, quick: bool = False) -> dict[str, Any]:
     """Measure a photograph on disk (EXIF rotation applied), cutting the
     animal out with rembg when available so the measurement is of the fur,
-    not the floor."""
+    not the floor. `quick`: with the small local model (QUICK_MODEL) in
+    place of the full cut - for /v1/fit, which a screen waits on."""
     from PIL import ImageOps
 
     image = ImageOps.exif_transpose(Image.open(path)).convert("RGB")
     mask = None
-    if use_rembg:
+    if use_rembg and quick:
+        mask = quick_mask(image)
+    elif use_rembg:
         from .imagegen import _rembg_alpha
 
         alpha = _rembg_alpha(image)

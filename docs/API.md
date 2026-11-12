@@ -114,6 +114,8 @@ multipart: `record`, `photo` (jpeg/png/webp, 15MB 이하). 5~20초, 약 $0.02.
 - 서버가 처음 판정할 때 DINOv2(약 1.2 GB)를 한 번 읽는다. 모델 시트 이미지(`output/model_sheet/`, `python -m api.model_sheet`)가 서버에
   있어야 한다.
 
+`/v1/fit`의 사진 품질은 서버 안의 작은 모델(rembg `u2netp`, 사진당 1초 미만)로 개 영역을 잡아 잰다. 생성 작업은 Lambda의 정밀한 오려 내기(한 장 43~56초)로 재므로 같은 사진의 숫자가 조금 다를 수 있다 — 보호소 사진 127장에서 종합 판정이 같은 것이 119장, 달라진 8장은 대부분 철창·작게 찍힌 사진에서 한 단계 엄격해진 쪽이다. `/v1/fit`이 Lambda를 기다리면 70초를 넘겨 화면(60초)·Spring(90초) 제한에 걸린다.
+
 **사진 품질** (`photo`, 호출 없이 로컬 계산): 개 영역의 짧은 변 픽셀(`size`), 선명도(`sharpness`, 흐림·흔들림·작은 사진 확대),
 노출(`exposure`, 털의 몇 %가 완전 검정/흰색인지)을 각각 good/fair/poor로 매기고 가장 나쁜 것이 `photo.level`이다.
 fair/poor는 `fit.reasons`에 한국어 사유로 들어가고 점수도 깎인다(fair −20, poor −50) — "사진 속 개가 너무 작음(짧은 변 82px): … 개가 크게
