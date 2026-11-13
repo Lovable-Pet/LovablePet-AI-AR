@@ -300,6 +300,51 @@ async def _load_jobs() -> None:
         _jobs[job["job_id"]] = job
 
 
+# The fit check's two local models, read when the server starts and not by the first request after it:
+# on prod the first /v1/fit after a deploy spent about 30 s on them (the small mask's session 14 s, DINOv2
+# 16 s) and ran past Spring's 90 s (2026-11-13). In a thread, so /health answers meanwhile; a fit check
+# that arrives first waits for it instead of loading a second copy (_warm_task). Nothing is downloaded
+# here but the 4.6 MB mask model: DINOv2 is warmed only when its files are already in the cache.
+_warm_task: asyncio.Future | None = None
+
+
+def _warm_models() -> None:
+    import time
+    started = time.monotonic()
+    done = []
+    try:
+        from PIL import Image
+
+        from .photo_quality import quick_mask
+        quick_mask(Image.new("RGB", (320, 320), (128, 128, 128)))
+        done.append(f"quick mask {time.monotonic() - started:.1f}s")
+    except Exception as exc:  # noqa: BLE001 - the first request loads it instead
+        done.append(f"quick mask failed ({type(exc).__name__})")
+    try:
+        from . import template_pick
+        cache = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface") / "hub"
+        cached = any(cache.glob("models--*dinov2*")) if cache.exists() else False
+        if cached and template_pick.looks_weights_ok():
+            mark = time.monotonic()
+            import torch
+            model, transform, dev = template_pick._backbone()
+            with torch.no_grad():
+                model(transform(Image.new("RGB", (64, 64), (128, 128, 128))).unsqueeze(0).to(dev))
+            done.append(f"looks model {time.monotonic() - mark:.1f}s")
+        else:
+            done.append("looks model not cached: left to the first request")
+    except Exception as exc:  # noqa: BLE001
+        done.append(f"looks model failed ({type(exc).__name__}: {str(exc)[:80]})")
+    print(f"[warm] {', '.join(done)}", flush=True)
+
+
+@app.on_event("startup")
+async def _warm() -> None:
+    global _warm_task
+    if os.environ.get("PIPELINE_WARM", "1") != "0":
+        _warm_task = asyncio.get_running_loop().run_in_executor(None, _warm_models)
+
+
 @app.get("/health")
 async def health() -> dict[str, Any]:
     return {"ok": True, "blender": Path(BLENDER).exists(), "openai_key": bool(os.environ.get("OPENAI_API_KEY")),
@@ -398,8 +443,26 @@ async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> d
 
     from .photo_quality import quality_of_file, quality_view
 
+    import time
+
     meta = _parse_record(record)
     tmp = JOBS_DIR / "_fit" / uuid.uuid4().hex[:8]
+    # one line per check with where the time went: a screen waits on this (60 s) and Spring gives it 90
+    took: dict[str, float] = {}
+    mark = started = time.monotonic()
+
+    def lap(stage: str) -> None:
+        nonlocal mark
+        took[stage] = time.monotonic() - mark
+        mark = time.monotonic()
+
+    def report(outcome: str) -> None:
+        print(f"[fit] {meta.pet_id}: {outcome} in {time.monotonic() - started:.1f}s ("
+              + ", ".join(f"{k} {v:.1f}" for k, v in took.items()) + ")", flush=True)
+
+    if _warm_task is not None and not _warm_task.done():
+        await asyncio.wait([_warm_task])
+        lap("waited for warm-up")
     path = await _store_photo(photo, tmp)
     try:
         transport = default_transport()
@@ -408,10 +471,13 @@ async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> d
             image = ImageOps.exif_transpose(opened).convert("RGB")
         image, watermarks = remove_watermarks(image)
         digest = _photo_digest(path)     # of the upload: the job's copy of the photo has the same bytes
+        lap("upload")
         rejected, _, readings = await gate_photo(transport, image)
+        lap("gate")
         if readings:
             _keep_gate(digest, readings)
         if rejected:
+            report("photo refused")
             return _rejected_fit(meta.pet_id, rejected)
         if watermarks:
             path = tmp / "photo_clean.png"
@@ -419,12 +485,15 @@ async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> d
         # local: is the photograph big, sharp and exposed enough to read
         # (with the small local mask: the full cut is 43-56 s on the Lambda, and a screen waits on this)
         quality = await asyncio.to_thread(quality_of_file, path, quick=True)
+        lap("quality")
         try:
             looks = await asyncio.to_thread(pick_template, path, meta.weight_kg)
         except Exception:  # noqa: BLE001 - no weights or no backbone: the vision call alone
             looks = None
         # the outline and the closest grey model in one call (body_shape.py)
+        lap("looks")
         answers, votes = await read_body_shape(transport, photo_blocks([path]), models=True)
+        lap("shape")
         _keep_shape(digest, answers, votes)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(502, f"vision call failed: {type(exc).__name__}: {exc}") from exc
@@ -442,6 +511,7 @@ async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> d
         size = _size_view(scale_for(meta.weight_kg, glb))
     except KeyError as exc:  # a mesh without the joints to measure its shape
         size = {"skipped": True, "reason": str(exc)}
+    report(f"{fit['level']} on {fit['template']}")
     return {"pet_id": meta.pet_id, "fit": {**_fit_view(fit), "photo_rejected": []}, "size": size,
             "shape": _shape_view(answers), "photo": quality_view(quality)}
 
