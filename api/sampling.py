@@ -39,4 +39,49 @@ async def sample(transport, *, system: str, blocks: list[dict[str, Any]], schema
         return_exceptions=True))
 
 
-__all__ = ["sample"]
+def with_margin(blocks: list[dict[str, Any]], share: float) -> list[dict[str, Any]]:
+    """The same blocks with every photograph set on a grey ground, `share`
+    of its longer side wider all round. Nothing of the photograph is lost;
+    the model sees it at another scale and position."""
+    if share <= 0:
+        return blocks
+    import base64
+    import io
+
+    from PIL import Image
+
+    out = []
+    for block in blocks:
+        if block.get("type") != "image":
+            out.append(block)
+            continue
+        image = Image.open(io.BytesIO(base64.standard_b64decode(block["source"]["data"]))).convert("RGB")
+        pad = round(max(image.size) * share)
+        ground = Image.new("RGB", (image.width + 2 * pad, image.height + 2 * pad), (128, 128, 128))
+        ground.paste(image, (pad, pad))
+        buffer = io.BytesIO()
+        ground.save(buffer, format="PNG")
+        out.append({**block, "source": {"type": "base64", "media_type": "image/png",
+                                         "data": base64.standard_b64encode(buffer.getvalue()).decode("ascii")}})
+    return out
+
+
+async def sample_views(transport, *, system: str, blocks: list[dict[str, Any]], schema: dict[str, Any], n: int,
+                       requests: int = 1, margins: tuple[float, ...] = ()) -> list[list[dict[str, Any] | BaseException]]:
+    """`requests` requests of `n` answers each, at once. With `margins`,
+    request k sees the photographs with margins[k] of grey round them
+    (with_margin; the first is usually 0, the photograph as it is).
+
+    Why the views differ: gpt-6-luna gave one photograph the same answer in
+    every sample of every request sent together (a tan dog's chest: unknown
+    27 of 27), and another answer, as unanimous, in the build an hour
+    before (cream 3 of 3) - asking the same picture again adds votes, not
+    opinions. A head cropped three ways got three answers for its muzzle
+    (tan 10/10, dark 4/10, dark 10/10; new shelter photo 37, 2026-11-14)."""
+    requests = max(int(requests), 1)
+    views = [with_margin(blocks, margins[k]) if k < len(margins) else blocks for k in range(requests)]
+    return list(await asyncio.gather(*(sample(transport, system=system, blocks=view, schema=schema, n=n)
+                                       for view in views)))
+
+
+__all__ = ["sample", "sample_views", "with_margin"]

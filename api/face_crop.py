@@ -99,6 +99,7 @@ class FaceCrop:
     frontal: bool
     visible: bool
     raw_box: dict[str, str]
+    head_box: tuple[int, int, int, int] | None = None    # the answered box before its padding
 
     def to_photo(self, x: float, y: float) -> tuple[float, float]:
         """A point in crop pixels -> original photo pixels."""
@@ -212,11 +213,13 @@ async def crop_face(photo_path: str | Path, transport: Transport, samples: int =
 
     box = (int(np.clip(min(bx0, bx1), 0, width)), int(np.clip(min(by0, by1), 0, height)),
            int(np.clip(max(bx0, bx1), 0, width)), int(np.clip(max(by0, by1), 0, height)))
+    head_box = None
     if not visible or box[2] - box[0] < MIN_FACE_SIDE or box[3] - box[1] < MIN_FACE_SIDE:
         visible = False
         frontal = False
         box = (sx0, sy0, sx1, sy1)
     else:
+        head_box = box
         box = _pad(box, (width, height), PAD_SHARE)
 
     return FaceCrop(
@@ -226,6 +229,7 @@ async def crop_face(photo_path: str | Path, transport: Transport, samples: int =
         frontal=frontal,
         visible=visible,
         raw_box={k: str(v) for k, v in raw.items()} if raw else {},
+        head_box=head_box,
     )
 
 
@@ -239,4 +243,20 @@ def crop_block(crop: FaceCrop) -> dict[str, Any]:
     return _image_block(image)
 
 
-__all__ = ["FaceCrop", "crop_block", "crop_face", "subject_box"]
+def crop_views(photo_path: str | Path, crop: FaceCrop, pads: tuple[float, ...]) -> list[dict[str, Any]]:
+    """The same head framed again, as image blocks: the answered box padded
+    by each of `pads` instead of PAD_SHARE (0 is the box itself). Empty
+    when no head was found."""
+    if crop.head_box is None or not pads:
+        return []
+    from dataclasses import replace
+
+    image = Image.open(photo_path).convert("RGB")
+    views = []
+    for share in pads:
+        box = _pad(crop.head_box, image.size, share)
+        views.append(crop_block(replace(crop, image=image.crop(box), box=box)))
+    return views
+
+
+__all__ = ["FaceCrop", "crop_block", "crop_face", "crop_views", "subject_box"]

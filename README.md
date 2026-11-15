@@ -104,6 +104,7 @@ AWS 준비 (한 번, 서울 리전 ap-northeast-2):
 | 이름 | 뜻 |
 |---|---|
 | `OPENAI_API_KEY` | 비전·이미지 모델 키 |
+| `OPENAI_MODEL` | 사진을 읽는 모델, 기본 `gpt-6-luna` (`gpt-4o`로 두면 예전 모델) |
 | `PIPELINE_API_KEY` | 설정하면 모든 `/v1` 요청에 `X-API-Key` 헤더가 필요 |
 | `PIPELINE_CONCURRENCY` | 동시 작업 수, 기본 1 (uvicorn 워커는 하나로 둔다 — 작업 목록이 프로세스 메모리에 있다) |
 | `PIPELINE_PUBLIC_URL` | 응답 파일 URL 앞에 붙일 주소 |

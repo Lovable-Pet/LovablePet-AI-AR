@@ -33,9 +33,11 @@ disagree, three rules settle the cases that are not really disagreements:
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import json
+import os
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -52,8 +54,9 @@ from .patterns import (
     instantiate_defaults,
     overlay_for,
 )
+from .reading_model import has_rule, profile
 from .regions import REGIONS
-from .sampling import sample
+from .sampling import sample, with_margin
 
 ANCHOR_PATTERNS = ("tan_point", "urajiro", "irish", "saddle", "solid")
 SAMPLES = 3
@@ -131,7 +134,14 @@ EAR_FEATURES = {"dark": ("dark_ears",), "tan": ("tan_ears",), "cream": ("cream_e
                 "pink": ("pink_ears",), "unknown": ()}
 
 
-def _feature_vocabulary() -> dict[str, str]:
+# Features offered under the literal wording only: gpt-6-luna names "a small
+# white chest patch" for what it is, and with only white_chest ("a white
+# chest and throat") to say it by, a black puppy with a white spot on its
+# breastbone got a white front (new shelter photos, 2026-11-13).
+LITERAL_FEATURES = ("white_chest_patch",)
+
+
+def _feature_vocabulary(wording: str = "tuned") -> dict[str, str]:
     """simple.FEATURES without importing simple at module load (it imports
     this module's neighbours); the enum is filled in on first use. The two
     sock features are left out: white_legs asks that."""
@@ -142,20 +152,107 @@ def _feature_vocabulary() -> dict[str, str]:
     # gpt-4.1-mini listed white_muzzle here for a dog with a black nose bar
     # and white muzzle SIDES, and painted a white stripe down the bridge
     asked_elsewhere.update({"tan_cheeks", "white_muzzle"})
+    if wording != "literal":
+        asked_elsewhere.update(LITERAL_FEATURES)
     return {name: text for name, (text, _) in FEATURES.items() if name not in asked_elsewhere}
 
 
-def _classify_schema() -> dict[str, Any]:
-    vocabulary = _feature_vocabulary()
+# The layout question in two wordings. "tuned" is CLASSIFY_SYSTEM as it
+# stands, fitted to gpt-4o over the shelter photos. "literal" is for a
+# model that takes each sentence to the letter (gpt-6-luna): on 40 new
+# shelter photos (2026-11-13, tools/cost/classify_replay.py) it wrote the
+# coat down rightly in `reason` and still chose a slot gpt-4o does not -
+# "a strong tan cap and tan patches" under solid white, "irregular
+# patching does not fit a defined layout" under other (the tuned text says
+# other for "random patches"), "dark brindled all over" under other, tan
+# points on a black dog as base tan / second black. Which wording a model
+# gets is its profile's (api/reading_model.py); PATTERN_PROMPT overrides.
+PATTERN_PROMPTS = ("tuned", "literal")
+
+# (the tuned sentence, the literal one)
+LITERAL_WORDING = (
+    ("""Answer brindle for a striped coat and merle for a mottled/marbled one,
+whatever their layout.""",
+     """Answer brindle for a striped coat - dark streaks over a tan, fawn or grey
+ground, also when the stripes are faint or broken and the dog reads as dark
+and streaky all over - and merle for a mottled/marbled one, whatever their
+layout. Dirt, wet or matted fur and shadow make streaks too: a pale cream
+or light fawn dog whose darker streaks look like dirt or wet fur is solid,
+not brindle and not sable."""),
+    ("""Answer piebald for a WHITE dog whose head and ears are coloured (a cap
+over the skull and ears, the muzzle often white), with or without coloured
+patches on the body; base_color is white and second_color the cap's
+colour. Name the body patches with the body_patches feature. The cap
+must be a strong colour (black, brown, red, orange) covering most of the
+skull; a white dog with faintly cream ears or shading is solid. Answer other when none of these describes the coat -
+random patches, piebald spotting, or a coat you cannot see enough of.""",
+     """Answer piebald for a WHITE dog with patches of a strong colour (black,
+brown, red, orange, tan): a cap over the skull and ears, or patches over
+the ears and around the eyes with a white stripe between them, with or
+without patches on the body. The patches need not be regular or
+symmetrical, and the head may carry two colours (black with tan cheeks).
+base_color is white and second_color the patches' main colour. Name the
+body patches with the body_patches feature. Piebald needs a body that is
+seen to be mostly white: a dark dog with a white blaze, muzzle, collar,
+chest and legs is irish, and so is a dark head with a white blaze when the
+body is not in the photograph. Stains are not patches: a white dog with
+reddish-brown tear stains under the eyes, a stained beard or stained feet,
+faintly cream ears or shading, or a colour cast from its surroundings, is
+solid. Answer other only for a coat you cannot see enough of, or one that
+is neither white with patches nor any layout above."""),
+    ("""Choose base_color as the colour covering most of the animal, and
+second_color as the colour of the pattern's marked regions (none for solid,
+and the stripe colour for brindle)""",
+     """Choose base_color as the colour covering most of the animal, and
+second_color as the colour of the pattern's marked regions (none for solid,
+and the stripe colour for brindle). A coat of one colour with only a small
+white chest patch or white toes is solid with second_color none: the
+white_chest_patch feature and white_legs say that white (white_chest is a
+whole white chest and throat). For tan_point, base_color is the DARK
+coat (black, chocolate, gray) and second_color the warmer colour of the
+points, also when the photograph shows more of the points than of the
+back; a tan, red or fawn coat with a darker face, ears or back is never
+tan_point - it is solid, or sable when the back is plainly grey-black.
+Between solid and sable, answer solid unless the grey-black overlay on the
+back is unmistakable: a dark muzzle, darker ears or a back one shade deeper
+than the flank is still solid"""),
+    ("""- irish: a white collar, chest, belly, paws and tail tip on a coloured coat.""",
+     """- irish: a white collar, chest, belly, paws and tail tip on a coloured coat.
+  Only a small white patch on the chest, or only white toes, is not irish:
+  that coat is solid (white_chest_patch and white_legs say the white)."""),
+)
+
+
+def pattern_prompt(model: str | None = None) -> str:
+    """Which wording the layout question takes: PATTERN_PROMPT when set,
+    else the reading model's own (tuned for a model without a profile)."""
+    name = os.environ.get("PATTERN_PROMPT") or profile(model).get("pattern_prompt") or "tuned"
+    if name not in PATTERN_PROMPTS:
+        raise ValueError(f"PATTERN_PROMPT: {name!r} is not one of {PATTERN_PROMPTS}")
+    return name
+
+
+def _classify_schema(wording: str = "tuned") -> dict[str, Any]:
+    vocabulary = _feature_vocabulary(wording)
     schema = json.loads(json.dumps(CLASSIFY_SCHEMA))
     schema["properties"]["features"]["items"]["enum"] = list(vocabulary)
     return schema
 
 
-def _classify_system() -> str:
-    vocabulary = _feature_vocabulary()
+def _worded_system(wording: str) -> str:
+    system = CLASSIFY_SYSTEM
+    if wording == "literal":
+        for tuned, literal in LITERAL_WORDING:
+            if tuned not in system:
+                raise RuntimeError(f"the literal wording replaces a sentence that is gone: {tuned[:60]!r}")
+            system = system.replace(tuned, literal)
+    return system
+
+
+def _classify_system(wording: str = "tuned") -> str:
+    vocabulary = _feature_vocabulary(wording)
     listing = "\n".join(f"- {name}: {text}" for name, text in vocabulary.items())
-    return CLASSIFY_SYSTEM + f"""
+    return _worded_system(wording) + f"""
 
 Then say how far white reaches up the legs (white_legs). Look at the
 wrist (front legs) and the hock (hind legs): white that stops below them is
@@ -420,19 +517,45 @@ async def classify_pattern(
     record_base_color: str,
     samples: int = SAMPLES,
     max_rounds: int = MAX_ROUNDS,
+    requests: int | None = None,
 ) -> PatternDecision:
-    """Vote the pattern across `samples` readings, re-sampling on a split."""
-    blocks = [
-        *anchor_blocks(anchors_dir),
-        {"type": "text", "text": "The photograph(s) to classify:"},
-        *photo_blocks,
-        {"type": "text", "text": (
-            f"The shelter record gives the base coat colour as '{record_base_color}'. "
-            "Which layout does this dog wear, and in which two colours?"
-        )},
-    ]
+    """Vote the pattern across `samples` readings, re-sampling on a split.
+    `requests`: that many separate requests of `samples` each, voted as one
+    round; None takes the reading model's own (reading_model.py)."""
+    model = getattr(transport, "model", None)
+    if requests is None:
+        requests = int(profile(model).get("layout_requests", 1))
+    anchors = anchor_blocks(anchors_dir)
 
-    system, schema = _classify_system(), _classify_schema()
+    # The record's colour stays in the question for every model. gpt-6-luna
+    # answers the word it is given (a pale cream dog "tan" for a record of
+    # 갈색), and asked without it (2026-11-14) it was right on a shaved
+    # pinkish dog and a white dog with patches the word had pulled to tan -
+    # but it called white dogs cream and tan dogs fawn, put a black back on
+    # an orange pomeranian, and read two black dogs as red-legged and as
+    # brindle. Blind, on the dogs that changed: hard photos 5 better / 2
+    # worse (2 and 1 of them the word's doing; the rest the model answering
+    # anew), two unseen sets of 30 1 better / 5 worse, all the word's.
+    def asked(photographs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            *anchors,
+            {"type": "text", "text": "The photograph(s) to classify:"},
+            *photographs,
+            {"type": "text", "text": (
+                f"The shelter record gives the base coat colour as '{record_base_color}'. "
+                "Which layout does this dog wear, and in which two colours?"
+            )},
+        ]
+
+    blocks = asked(photo_blocks)
+    # the model's view_margins: request k looks at the photographs with that
+    # much grey round them (sampling.with_margin) - the same picture sent
+    # again comes back the same (two samples agree 90% within a request and
+    # 88% between requests sent together, 79% between two asks an hour apart)
+    margins = tuple(profile(model).get("view_margins", ()))
+
+    wording = pattern_prompt(model)
+    system, schema = _classify_system(wording), _classify_schema(wording)
 
     all_samples: list[dict[str, Any]] = []
     resolution = ""
@@ -446,7 +569,15 @@ async def classify_pattern(
         for _attempt in range(3):
             if pending <= 0:
                 break
-            payloads = await sample(transport, system=system, blocks=blocks, schema=schema, n=pending)
+            if _attempt == 0 and requests > 1:
+                # the same question in several requests at once, voted as one round
+                views = [asked(with_margin(photo_blocks, margins[k])) if k < len(margins) and margins[k] > 0 else blocks
+                         for k in range(requests)]
+                batches = await asyncio.gather(*(sample(transport, system=system, blocks=view, schema=schema,
+                                                        n=samples) for view in views))
+                payloads = [payload for batch in batches for payload in batch]
+            else:
+                payloads = await sample(transport, system=system, blocks=blocks, schema=schema, n=pending)
             pending = 0
             for payload in payloads:
                 if isinstance(payload, AgentRefusal):
@@ -466,6 +597,17 @@ async def classify_pattern(
             [reading["pattern"] for reading in readings],
             [reading.get("second_color", "none") for reading in readings],
         )
+        # a marked layout that beat "solid" by a bare majority is built solid
+        # (plain_on_close_vote): asked again the same model flips between the
+        # two, and the plain coat is the one that cannot look painted on - a
+        # near-black puppy seen from far, tan_point black/tan 5 and solid
+        # black 4, came out with bright tan legs and muzzle its photograph
+        # does not show (hard photo 77, the one dog of 214 with such a vote)
+        named = Counter(reading["pattern"] for reading in readings)
+        if (has_rule(model, "plain_on_close_vote") and pattern not in (None, "solid")
+                and named[pattern] * 3 < len(readings) * 2 and named["solid"] * 3 >= len(readings)):
+            resolution = f"{resolution}; solid had {named['solid']}, a close vote: solid"
+            pattern = "solid"
 
     if pattern is None:
         pattern = "other"
@@ -489,6 +631,23 @@ async def classify_pattern(
     if second in (None, "none") or second not in FUR_COLORS or pattern == "solid":
         second = None
     base, second = paired_colours(agreeing, base, second)
+    # a sable's dark tips named "gray" are black (sable_tips_black). The
+    # question's own words are "a visibly GREY-BLACK overlay" and "greyer or
+    # blacker than the flank", and gpt-6-luna gives the first word back: of
+    # its sable samples on file "gray" is the second colour far more often
+    # than "black" (new6 46: gray 6, black 3). Drawn as named, the table's
+    # cool grey went on the muzzle, chest and belly of a tan long-coated dog
+    # whose tips are black-brown - grey patches on tan
+    if has_rule(model, "sable_tips_black") and pattern == "sable" and second == "gray" and base not in ("gray", "black"):
+        second = "black"
+        resolution = f"{resolution}; a sable's gray tips: black"
+    # ... and so are a brindle's stripes (brindle_stripes_black): "dark
+    # streaks over a tan, fawn or grey coat" came back as gray stripes for the
+    # two brindles drawn among the 90 fresh photos of 11-15 (6 and 9 samples of
+    # 9), a fawn dog and a puppy striped in pale grey with a grey muzzle
+    if has_rule(model, "brindle_stripes_black") and pattern == "brindle" and second == "gray" and base not in ("gray", "black"):
+        second = "black"
+        resolution = f"{resolution}; a brindle's gray stripes: black"
 
     # Most dogs have dark brown eyes, so a split or silent vote takes that
     # rather than whichever sample answered first: a wrong pale iris is far
@@ -504,7 +663,7 @@ async def classify_pattern(
     # features: a majority of the agreeing samples, most-named first, at
     # most four. A sample that answered no features (or an older script
     # without the field) simply votes for none.
-    vocabulary = _feature_vocabulary()
+    vocabulary = _feature_vocabulary(wording)
     named = Counter(f for s in agreeing for f in set(s.get("features") or []) if f in vocabulary)
     n = max(len(agreeing), 1)
     feature_votes = {name: round(count / n, 3) for name, count in named.most_common()}

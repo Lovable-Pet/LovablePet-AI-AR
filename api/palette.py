@@ -598,6 +598,41 @@ def face_dark(crop: Image.Image) -> tuple[float | None, float | None, float, flo
             round(float(tint[0]), 1), round(float(tint[1]), 1))
 
 
+# A piebald's patches, looked for in the head crop itself: the share of the
+# upper face that is strongly coloured fur - dark (L* under 50), or more
+# than PIEBALD_CHROMA away from the crop's own white fur in a*/b* (so a
+# cast over the whole photo cancels). On the new shelter photos of
+# 2026-11-13 the patched heads measured 0.44-0.88 (brown ears and eye
+# patches either side of a white stripe 0.53, orange ears 0.67), a white
+# poodle with red tear stains under a red crate's light 0.24, a white
+# maltese with stained ears 0.02.
+PIEBALD_HEAD_SHARE = 0.40
+PIEBALD_CHROMA = 20.0
+
+
+def face_coloured(crop: Image.Image) -> float | None:
+    """The share of the dog's pixels in the upper face of a head crop that
+    are strongly coloured fur (PIEBALD_*); None with too few dog pixels."""
+    from .fur import to_linear
+    from .projection import linear_to_lab
+
+    whole = np.asarray(crop.convert("RGB"), dtype=np.float32)
+    h, w = whole.shape[:2]
+    (y0, y1), (x0, x1) = FACE_UPPER
+    rgb = whole[int(y0 * h):int(y1 * h), int(x0 * w):int(x1 * w)]
+    lab = linear_to_lab(to_linear(rgb))
+    fill = ((np.abs(rgb - rgb.mean(axis=-1, keepdims=True)).max(axis=-1) < 1.0)
+            & (np.abs(rgb.mean(axis=-1) - 128.0) < 3.0))
+    dog = ~fill
+    if int(dog.sum()) < FACE_CREAM_MIN_PIXELS:
+        return None
+    white = dog & (lab[..., 0] > 70.0) & (np.hypot(lab[..., 1], lab[..., 2]) < 14.0)
+    neutral = np.median(lab[white][:, 1:], axis=0) if int(white.sum()) >= FACE_CREAM_MIN_PIXELS else np.zeros(2)
+    chroma = np.hypot(lab[..., 1] - neutral[0], lab[..., 2] - neutral[1])
+    strong = dog & ((lab[..., 0] < 50.0) | (chroma > PIEBALD_CHROMA))
+    return round(float(strong.sum()) / float(dog.sum()), 2)
+
+
 # A crown read grey (lite gray_for_black) is painted the grey of its own
 # dark fur: the gray ramp (mid L* 53, a touch blue) made a white puppy's
 # smoky grey-brown eye patches (photo L* 27, a* +3.6 against its white fur)
@@ -888,12 +923,16 @@ COAT_MIN_SHARE = 0.1
 def chroma_from_coat(appearance: dict, palette: dict[str, tuple[str, str, str]],
                      coat: dict | None) -> tuple[dict[str, tuple[str, str, str]], dict | None]:
     """(palette, report): every warm ramp's a*/b* scaled by one factor, the
-    one that puts the most-used warm name's mid at the coat's chroma."""
+    one that puts the most-used warm name's mid at the coat's chroma. A coat
+    marked dull (appearance["dull_coat"], lite.coat_without_warm_fur: too
+    little warm fur in the photo to take a chroma from) gets the least the
+    name is given, COAT_CHROMA_SHARE[0] of the table's."""
     from .fur import hex_to_linear, to_srgb
     from .projection import lab_to_linear, linear_to_lab
 
-    if (not coat or coat.get("border") != "neutral" or int(coat.get("pixels") or 0) < COAT_MIN_PIXELS
-            or float(coat.get("share") or 0.0) < COAT_MIN_SHARE):
+    dull = bool(appearance.get("dull_coat")) and bool(coat) and coat.get("border") == "neutral"
+    if not dull and (not coat or coat.get("border") != "neutral" or int(coat.get("pixels") or 0) < COAT_MIN_PIXELS
+                     or float(coat.get("share") or 0.0) < COAT_MIN_SHARE):
         return palette, None
     used: dict[str, int] = {}
     for entry in [*(appearance.get("region_colors") or []), *(appearance.get("markings") or [])]:
@@ -915,8 +954,9 @@ def chroma_from_coat(appearance: dict, palette: dict[str, tuple[str, str, str]],
     mid = float(np.hypot(*labs(palette.get(main) or FUR_PALETTE[main])[1][1:]))
     if table < 1e-3 or mid < 1e-3:
         return palette, None
-    target = float(np.clip(float(coat["chroma"]) / COAT_RENDER_CHROMA,
-                           COAT_CHROMA_SHARE[0] * table, COAT_CHROMA_SHARE[1] * table))
+    target = (COAT_CHROMA_SHARE[0] * table if dull else
+              float(np.clip(float(coat["chroma"]) / COAT_RENDER_CHROMA,
+                            COAT_CHROMA_SHARE[0] * table, COAT_CHROMA_SHARE[1] * table)))
     scale = target / mid
     out = dict(palette)
     for name in used:
@@ -927,7 +967,7 @@ def chroma_from_coat(appearance: dict, palette: dict[str, tuple[str, str, str]],
             moved.append(_rgb_to_hex(tuple(int(round(float(np.clip(c, 0, 1)) * 255)) for c in rgb)))
         out[name] = tuple(moved)
     return out, {"coat": coat, "main": main, "chroma": [round(mid, 1), round(target, 1)], "scale": round(scale, 2),
-                 "names": sorted(used)}
+                 "names": sorted(used), **({"dull": True} if dull else {})}
 
 
 # A dog read cream all over takes its cream from the photo's lit fur
