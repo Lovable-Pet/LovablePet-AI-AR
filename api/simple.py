@@ -51,6 +51,10 @@ FEATURES: dict[str, tuple[str, dict[str, str]]] = {
     # and out to the shoulder fronts; the belly rule carries a light chest
     # on between the forelegs
     "white_chest": ("a white chest and throat", {"chest": "white"}),
+    # no region: a placed marking (lite, chest_patch), and offered under the
+    # literal wording of the layout question only (pattern_classify)
+    "white_chest_patch": ("only a small white patch on the front of the chest; the rest of the chest is "
+                          "the coat's colour", {}),
     "white_belly": ("a white belly and underside", {"underside": "white"}),
     # the two sock heights are told apart at the wrist: white that stops at
     # the toes or the pastern is white_paws, white that reaches the wrist or

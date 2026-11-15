@@ -24,8 +24,7 @@ from typing import Any
 import openai
 
 from .agents import AgentRefusal
-
-DEFAULT_MODEL = "gpt-4o"
+from .reading_model import DEFAULT_MODEL, profile
 
 # Keywords strict mode rejects or silently ignores. Dropped from the copy sent
 # to OpenAI; the originals stay intact for Anthropic.
@@ -125,13 +124,15 @@ class OpenAITransport:
         model: str | None = None,
     ) -> None:
         self._client = client or openai.AsyncOpenAI()
-        self._model = model or os.environ.get("OPENAI_MODEL", DEFAULT_MODEL)
+        self._model = model or os.environ.get("OPENAI_MODEL") or DEFAULT_MODEL
+        # read by the calls whose wording follows the model (pattern_classify)
+        self.model = self._model
         # OPENAI_REASONING_EFFORT (none, low, ...): a reasoning model thinks
         # before it answers and bills the thinking as output - on the
         # face-colours call gpt-6-luna wrote 3,263 tokens for five answers
-        # of 65 each, 326 with "none". Unset, the model's own default; never
-        # sent to gpt-4o, which rejects the parameter.
-        self._effort = os.environ.get("OPENAI_REASONING_EFFORT") or None
+        # of 65 each, 326 with "none". Unset, what the model's profile says
+        # (reading_model.py); never sent to gpt-4o, which rejects the parameter.
+        self._effort = os.environ.get("OPENAI_REASONING_EFFORT") or profile(self._model).get("reasoning_effort")
 
     async def complete(
         self, *, system: str, blocks: list[dict[str, Any]], schema: dict[str, Any]

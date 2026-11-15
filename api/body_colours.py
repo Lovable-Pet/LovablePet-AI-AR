@@ -18,7 +18,6 @@ from collections import Counter
 from typing import Any
 
 from .agents import AgentRefusal, Transport
-from .sampling import sample
 
 SAMPLES = 3
 
@@ -65,6 +64,35 @@ PATCH_AMOUNT_ANSWERS = ("none", "small", "large", "most", "unknown")
 # the shoulders came out with a white neck under a brown head (shelter
 # maltese 7, user 11-07: "갈색털이 뒷목 거의 덮었는데").
 NAPE_ANSWERS = ("head", "light", "unknown")
+# The trunk: white or coloured. Asked only of a model whose profile lists it
+# (reading_model body_extra): gpt-6-luna reads a white dog with a black head
+# seen from the front as "irish black/white" - its literal wording says a dark
+# head with a white blaze is irish when the body is not in the photograph -
+# and the irish layout then paints the back black (new shelter photos 18 and
+# 17 of 2026-11-13 and -14: "mostly white body with a dark head and ears" in
+# the samples' own words). The other answers of this call do not say it:
+# patch_amount's "none" is a white body and a dog coloured all over alike,
+# and the nape came back unknown from a front view. The whole animal's
+# lightness does not say it either (a white-collared black collie measured
+# lighter than the white terrier in shade).
+TRUNK_ANSWERS = ("white", "coloured", "unknown")
+EXTRA_QUESTIONS: dict[str, tuple[dict[str, Any], str]] = {
+    "trunk": ({
+        "type": "string",
+        "enum": list(TRUNK_ANSWERS),
+        "description": "The trunk - the back, the sides and the rump, behind the neck; not the head, the front "
+                       "of the chest, the legs or the tail: white (white, cream or near-white all over, or "
+                       "white with a few coloured patches), coloured (black, brown, tan, grey or another "
+                       "colour covers most of it - also a dark dog with a white chest, collar or feet), "
+                       "unknown (no part of the trunk is in the photograph).",
+    }, """trunk: the back, the sides and the rump - the body behind the neck, leaving
+out the head, the front of the chest, the legs and the tail. white when the
+fur there is white, cream or near-white, all over or with a few coloured
+patches on it; coloured when black, brown, tan, grey or another colour
+covers most of it. A dark dog with a white chest, collar or feet is
+coloured; a white dog whose head or ears alone are dark is white. From the
+front, go by the shoulders and the sides you can see behind the chest."""),
+}
 
 BODY_COLOURS_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -202,46 +230,95 @@ there, with white fur between the patch and the spine, it is on the side
 (none, no)."""
 
 
+def _asked(extra: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
+    """The call's system text and schema with the `extra` questions added
+    (EXTRA_QUESTIONS); with none, the two as they stand."""
+    if not extra:
+        return BODY_COLOURS_SYSTEM, BODY_COLOURS_SCHEMA
+    properties = dict(BODY_COLOURS_SCHEMA["properties"])
+    note = properties.pop("note")
+    system = BODY_COLOURS_SYSTEM
+    for name in extra:
+        properties[name], text = EXTRA_QUESTIONS[name]
+        system += "\n\n" + text
+    properties["note"] = note
+    return system, {**BODY_COLOURS_SCHEMA, "properties": properties, "required": list(properties)}
+
+
 async def read_body_colours(transport: Transport, photo_blocks: list[dict[str, Any]],
-                            samples: int = SAMPLES) -> tuple[str, str, str, dict[str, Any]]:
+                            samples: int = SAMPLES, requests: int = 1,
+                            margins: tuple[float, ...] = (),
+                            extra: tuple[str, ...] = ()) -> tuple[str, str, str, dict[str, Any]]:
     """(chest, belly, paws, votes): the answer more than half of ALL the
     samples gave; unknown otherwise, which keeps the pattern's usual colour.
     A part most samples could not see is not painted from the one that
-    guessed (eval v2 e14: belly tan from 1 of 3, the other two unknown)."""
+    guessed (eval v2 e14: belly tan from 1 of 3, the other two unknown).
+
+    `requests` over one: the same question in that many requests at once,
+    each on its own view of the photograph when `margins` is given
+    (sampling.sample_views). The answers above come from the first, as
+    ever; the others only add votes["asks"], the three colours voted over
+    every request's samples (lite's body_by_asks reads it).
+
+    `extra`: questions asked of this model only (EXTRA_QUESTIONS); their
+    answers come back in votes[name] with votes[name + "_votes"], voted
+    over every request's samples."""
+    from .sampling import sample_views
+
+    system, schema = _asked(tuple(extra))
+
     blocks = [*photo_blocks, {"type": "text", "text": "The front of the chest, the belly and the feet: "
                                                         "what colour is each? And the patches on the body, "
                                                         "if any: where, and how much?"}]
 
-    payloads = await sample(transport, system=BODY_COLOURS_SYSTEM, blocks=blocks, schema=BODY_COLOURS_SCHEMA, n=samples)
+    batches = await sample_views(transport, system=system, blocks=blocks, schema=schema,
+                                 n=samples, requests=requests, margins=margins)
     readings: list[dict[str, Any]] = []
-    for payload in payloads:
+    for payload in batches[0]:
         if isinstance(payload, AgentRefusal):
             raise payload
         if isinstance(payload, Exception):
             continue
         readings.append(payload)
 
-    def vote(key: str, allowed: tuple[str, ...]) -> tuple[str, dict[str, int]]:
-        said = Counter(r.get(key) for r in readings if r.get(key) in allowed and r.get(key) != "unknown")
+    def vote(key: str, allowed: tuple[str, ...], over: list[dict[str, Any]] | None = None) -> tuple[str, dict[str, int]]:
+        over = readings if over is None else over
+        said = Counter(r.get(key) for r in over if r.get(key) in allowed and r.get(key) != "unknown")
         top = said.most_common(1)
-        return (top[0][0] if top and top[0][1] * 2 > len(readings) else "unknown"), dict(said)
+        return (top[0][0] if top and top[0][1] * 2 > len(over) else "unknown"), dict(said)
 
-    chest, chest_votes = vote("chest", CHEST_ANSWERS)
-    belly, belly_votes = vote("belly", BELLY_ANSWERS)
-    paws, paw_votes = vote("paws", PAW_ANSWERS)
-    # the lightness among the samples that called the chest cream
-    said = Counter(r.get("chest_lightness") for r in readings
-                   if r.get("chest") == "cream" and r.get("chest_lightness") in CREAM_SHARE)
-    lightness = said.most_common(1)[0][0] if said else None
+    def lightness_of(over: list[dict[str, Any]]) -> tuple[str | None, dict[str, int]]:
+        # the lightness among the samples that called the chest cream
+        said = Counter(r.get("chest_lightness") for r in over
+                       if r.get("chest") == "cream" and r.get("chest_lightness") in CREAM_SHARE)
+        return (said.most_common(1)[0][0] if said else None), dict(said)
+
+    parts = (("chest", CHEST_ANSWERS), ("belly", BELLY_ANSWERS), ("paws", PAW_ANSWERS))
+    (chest, chest_votes), (belly, belly_votes), (paws, paw_votes) = (vote(key, allowed) for key, allowed in parts)
+    lightness, lightness_votes = lightness_of(readings)
     tipping, tipping_votes = vote("back_tipping", TIPPING_ANSWERS)
     nape, nape_votes = vote("nape", NAPE_ANSWERS)
-    return chest, belly, paws, {"chest": chest_votes, "belly": belly_votes, "paws": paw_votes,
-                                "back_tipping": tipping, "back_tipping_votes": tipping_votes,
-                                "nape": nape, "nape_votes": nape_votes,
-                                "chest_lightness": dict(said), "cream_share": CREAM_SHARE.get(lightness),
-                                **vote_patches(readings),
-                                "samples": len(readings),
-                                "notes": [str(r.get("note", "")) for r in readings if r.get("note")]}
+    votes = {"chest": chest_votes, "belly": belly_votes, "paws": paw_votes,
+             "back_tipping": tipping, "back_tipping_votes": tipping_votes,
+             "nape": nape, "nape_votes": nape_votes,
+             "chest_lightness": lightness_votes, "cream_share": CREAM_SHARE.get(lightness),
+             **vote_patches(readings),
+             "samples": len(readings),
+             "notes": [str(r.get("note", "")) for r in readings if r.get("note")]}
+    each = [[p for p in batch if isinstance(p, dict)] for batch in batches]
+    every = [p for batch in each for p in batch]
+    for name in extra:
+        votes[name], votes[f"{name}_votes"] = vote(name, tuple(EXTRA_QUESTIONS[name][0]["enum"]), every)
+        votes[f"{name}_samples"] = len(every)
+    if len(batches) > 1:
+        asks: dict[str, Any] = {"requests": len(batches), "samples": len(every)}
+        for key, allowed in parts:
+            asks[f"{key}_answer"], asks[key] = vote(key, allowed, every)
+        asks["cream_share"] = CREAM_SHARE.get(lightness_of(every)[0])
+        # what each request alone would have answered (chest/belly/paws), for the log
+        asks["each"] = ["/".join(vote(key, allowed, batch)[0] for key, allowed in parts) for batch in each]
+        votes["asks"] = asks
+    return chest, belly, paws, votes
 
 
 def light_by_family(answer: str, said: dict[str, int] | None, samples: int | None, base_color: str) -> str:
@@ -260,6 +337,55 @@ def light_by_family(answer: str, said: dict[str, int] | None, samples: int | Non
     if cream == white:
         return "white" if str(base_color).lower() == "white" else "cream"
     return "white" if white > cream else "cream"
+
+
+def plain_front(chest: str, belly: str, base: str | None, second: str | None,
+                overlay: str | None = None) -> tuple[str, str, list[str]]:
+    """(chest, belly, what was dropped): a "dark" chest or belly on a coat
+    with no dark colour in it is not painted. The body call says dark of a
+    front in shadow, and a black bib or belly on a tan dog is a dog nobody
+    photographed: a fawn mastiff sitting, belly dark 5 of 9, got a black
+    belly (new shelter photo 1, 2026-11-14), a red dog bending forward,
+    chest dark 9 of 9, a black chest and belly (photo 20 of 11-13), a
+    grey-brown dog read tan, chest dark 3 of 3, the same (photo 13). Those
+    are the three plain warm coats of 90 on file with a dark vote for the
+    front, and none has a dark front. lite.dark_chest_seen_light undid it
+    only where the chest was measured and measured light. A coat with a dark
+    second colour, or brindled, keeps the answer: its front can be dark."""
+    from .patterns import color_family
+
+    dark = any(color_family(str(c or "")) == "dark" for c in (base, second))
+    if dark or overlay == "brindle":
+        return chest, belly, []
+    dropped = []
+    if chest in ("dark", "dark_tan_spots"):
+        dropped.append(f"chest {chest}")
+        chest = "unknown"
+    if belly == "dark":
+        dropped.append("belly dark")
+        belly = "unknown"
+    return chest, belly, dropped
+
+
+def front_not_deeper(chest: str, belly: str, pattern: str | None, base: str | None) -> tuple[str, str, list[str]]:
+    """(chest, belly, what was dropped): a "tan" chest or belly on a solid
+    white or cream coat is not painted. A dog's front is its coat's colour
+    or paler; a tan bib and belly on a cream poodle is a dog nobody has -
+    the body call said tan 3 of 3 for the front of a matted, dirty one read
+    solid cream (hard photo 73, 2026-11-14), the one of 214 dogs on file
+    with a front deeper than its plain coat."""
+    from .patterns import color_family
+
+    if pattern != "solid" or color_family(str(base or "")) != "light":
+        return chest, belly, []
+    dropped = []
+    if chest == "tan":
+        dropped.append("chest tan")
+        chest = "unknown"
+    if belly == "tan":
+        dropped.append("belly tan")
+        belly = "unknown"
+    return chest, belly, dropped
 
 
 def vote_patches(readings: list[dict[str, Any]]) -> dict[str, Any]:
@@ -364,5 +490,5 @@ def apply_body_colours(region_colors: list[dict[str, Any]], markings: list[dict[
     return changed
 
 
-__all__ = ["read_body_colours", "apply_body_colours", "filter_leg_features", "vote_patches", "PAW_ANSWERS",
-           "BODY_COLOURS_SCHEMA", "CHEST_ANSWERS", "BELLY_ANSWERS"]
+__all__ = ["read_body_colours", "apply_body_colours", "filter_leg_features", "vote_patches", "plain_front",
+           "PAW_ANSWERS", "BODY_COLOURS_SCHEMA", "CHEST_ANSWERS", "BELLY_ANSWERS", "TRUNK_ANSWERS", "EXTRA_QUESTIONS"]

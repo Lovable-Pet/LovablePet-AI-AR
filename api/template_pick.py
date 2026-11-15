@@ -6,7 +6,9 @@ no text) and a linear layer over it scores the templates: jindo,
 jindo_puppy, maltese, toypoodle, chihuahua, retriever, and "none" for the
 looks no template covers (pom-type spitz, flat-faced breeds). Age is not
 asked: a puppy is told by its looks (2026-10-18, user - the template and
-the coat need the looks, the size needs the weight).
+the coat need the looks, the size needs the weight). One exception since
+2026-11-15, in combine: a record under 60 days is not built as an adult
+retriever, nor as an adult jindo one sample doubted.
 
 Which model to BUILD is the vision call's (body_shape.py with the model
 sheet; combine below): judged against a person on 30 dogs it named the
@@ -37,6 +39,23 @@ BACKBONE = "vit_large_patch14_dinov2.lvd142m"
 TEMPLATES = ["jindo", "jindo_puppy", "maltese", "toypoodle", "chihuahua", "retriever"]
 WEIGHTS = Path(__file__).with_name("data") / "template_pick.npz"
 NO_TEMPLATE = "none"
+# combine's chihuahua_by_all: the looks' probability for a jindo-type body
+# from which the call's chihuahua is given up. 0.7 and a split vote only
+# until 2026-11-15 (the three dogs it moved then had 0.74, 0.81, 0.88); the
+# dogs that showed the looks right below it had 0.52, 0.54 and 0.64
+CHIHUAHUA_LOOKS_FLOOR = 0.5
+CHIHUAHUA_NOT_FOR = ("jindo", "jindo_puppy", "retriever")
+# combine's "under 60 days by the record": the age in days at or under which
+# an adult retriever is not built, nor an adult jindo one sample doubted
+YOUNG_DAYS = 60
+# combine's "newborn": a record weight at or under this is a pup of its first
+# days, which no model covers. Of 637 shelter dogs with a weight (the crawls
+# of 2026-11, work/cost/fair/pool*) ten weigh this or less and all ten are
+# newborns - eyes shut, lying on newspaper or held in a hand, pink skin under
+# a first coat; the next two (0.58 and 0.6 kg) sit and stand with open eyes.
+# A toy-breed pup of five weeks can weigh this too and is turned away with
+# them: the notice can be sent again when it has grown.
+NEWBORN_KG = 0.5
 
 
 @lru_cache(maxsize=1)
@@ -135,7 +154,8 @@ def _weighs_within(template: str, weight_kg: float | None) -> bool:
 
 
 def combine(looks: dict[str, Any] | None, shape: dict[str, Any] | None,
-            weight_kg: float | None = None, votes: dict[str, Any] | None = None) -> dict[str, Any]:
+            weight_kg: float | None = None, votes: dict[str, Any] | None = None,
+            age_days: int | None = None) -> dict[str, Any]:
     """The template to build and what the verdict needs, from the two
     readings of the photograph:
       looks  this module's pick (DINOv2): its "none" - pom-type and flat
@@ -173,7 +193,67 @@ def combine(looks: dict[str, Any] | None, shape: dict[str, Any] | None,
                 chihuahua and jindo, a 20 kg drop-eared dog read jindo) and
                 none of the user's 22 picks changed. Without those limits it
                 broke two of the 22
-    `moved` says which of them applied."""
+      a chihuahua by some of the votes  for a reading model with the rule
+                chihuahua_by_all (votes["read_by"], reading_model.py): a
+                chihuahua the call did not name with every sample, where the
+                looks name another real model at CHIHUAHUA_LOOKS_FLOOR or
+                more, is built as the looks' model, whatever the weight.
+                gpt-6-luna calls small short-coated dogs with pricked ears
+                chihuahuas ("head large", 2 samples of 3) where gpt-4o named
+                the jindo 2 and 3 of 3, and the chihuahua's bat ears and round
+                eyes on a jindo-type dog are the first thing seen (user,
+                2026-11-15, two of the first 19 fresh photos: 5 and 4 kg,
+                looks jindo 0.81 and 0.88 - the 4 kg one under a jindo's
+                weight range, which kept the split rule above off it). Of 214
+                gpt-6-luna dogs on file three change, none of the judged ones
+                for the worse; the chihuahuas it named with every sample and
+                those the looks call "none" (pom types) stay
+      under 60 days by the record  `age_days` (fit.parse_age's days_max: the
+                shelter's "60일미만") at YOUNG_DAYS or less: an adult
+                retriever is built as the puppy, and an adult jindo too when
+                one of the call's samples named the puppy (by "record"). The
+                age is the one thing here not read off the photograph, and
+                only this far. Of 62 such dogs with a body written down
+                beforehand (six sets, 2026-11-15) eight were given an adult
+                body and the puppy was the written body for all eight; this
+                moves six of them - five drop-eared or fluffy pups of 1-3 kg
+                named retriever (the looks said puppy for three) and a white
+                pup named jindo by two samples of three. The user's doubt
+                was the breed ("종이다르자나": the one puppy is a jindo
+                puppy), so the six were rebuilt on it side by side (11-15):
+                closer to the photograph for all six by my eye, the drop
+                ears standing half up being the loss; then the size
+                ("크기가맞으려나"): at 2 kg the adult models stand
+                23.3-23.8 cm, the puppy 17.9, and a growing dog's
+                height-weight slope (0.400-0.446, docs/size_data) puts a
+                2 kg puppy at 18-20. A jindo named by every sample stays:
+                hard photo #286, 3 kg and "under 60 days" with an adult's
+                grizzled face, is the one the user kept as the adult on
+                11-11 (the rule "a puppy" above), and the record's age does
+                not overrule that. The small models (maltese, toypoodle,
+                chihuahua) are left as picked. Not above puppy_max_kg: a
+                heavier "under 60 days" is a record to doubt
+      a retriever at puppy weight  the retriever is the one drop-eared,
+                feathered model, so the call names it for small dogs of that
+                kind too - pups, and a 4.8 kg long-coated adult that came out
+                a grown retriever's long head with its teeth showing (new6
+                46, user: "아직 기괴함"). At puppy_max_kg or less it is the
+                looks' model when that is another real one the weight is
+                inside (by "looks"), else the puppy (by "record"): of the
+                nine such dogs with a body written down (2026-11-15) the
+                retriever was the written one for none - maltese for one
+                (the looks' maltese 0.82), the puppy for seven - and the
+                three at 8-10 kg, one of them a retriever by the truth, stay
+    `moved` says which of them applied.
+
+    A newborn (weight_kg at or under NEWBORN_KG) is no model's: the pick is
+    made as for any dog and marked no_template and newborn, so it is refused
+    where the looks' "none" is (user, 2026-11-15: "거절하는게맞나" - the
+    one built, 0.18 kg, came out a white adult jindo 10 cm tall, and on the
+    puppy it would be a two-month pup 8 cm tall; neither is the animal in
+    the photograph)."""
+    from .reading_model import has_rule
+
     looks = looks or {}
     shape = shape or {}
     vision = shape.get("closest_model")
@@ -199,6 +279,22 @@ def combine(looks: dict[str, Any] | None, shape: dict[str, Any] | None,
           and not (template == "jindo_puppy" and weight_kg is not None
                    and weight_kg < (weight_range("jindo") or (0.0, 0.0))[0])):
         template, by, moved = looks["template"], "looks", f"split vote {tally}, the looks sure"
+    # ... widened the same day to every chihuahua the looks do not share, all
+    # samples or not, when the looks name a jindo-type body (CHIHUAHUA_NOT_FOR)
+    # at CHIHUAHUA_LOOKS_FLOOR or more. Of the 16 chihuahua bodies gpt-6-luna
+    # had picked on eight sets with a body written down beforehand, the four
+    # the looks also called chihuahua were chihuahuas; of the eleven they did
+    # not, none was one by the first written body, all samples of three for
+    # five of them - a black-and-white pup of 4.2 kg with drop ears (new8 3,
+    # user: "템플릿 잘못 고른 거 큰 거 같고"), a black-and-tan shiba pup, a
+    # fawn dog of 6.5 kg. Where the looks named a small breed (a dachshund:
+    # toy poodle 0.64) or nothing above the floor (an Italian greyhound pup:
+    # retriever 0.43), the chihuahua stays
+    if (has_rule((votes or {}).get("read_by"), "chihuahua_by_all") and template == "chihuahua" and by == "vision"
+            and tally and looks_real and looks["template"] in CHIHUAHUA_NOT_FOR
+            and looks.get("confidence", 0.0) >= CHIHUAHUA_LOOKS_FLOOR):
+        template, by = looks["template"], "looks"
+        moved = f"a chihuahua by {tally}, the looks {looks['template']} {looks.get('confidence')}"
     if template == "chihuahua" and by == "vision" and not _weighs_like("chihuahua", weight_kg):
         fits = looks_real and looks["template"] != "chihuahua" and _weighs_like(looks["template"], weight_kg)
         template, by = (looks["template"], "looks") if fits else ("jindo", "default")
@@ -206,16 +302,52 @@ def combine(looks: dict[str, Any] | None, shape: dict[str, Any] | None,
     if (template == "jindo" and looks.get("template") == "jindo_puppy" and looks.get("sure") and weight_kg is not None
             and looks_weights_ok() and weight_kg < (weight_range("jindo") or (0.0, 0.0))[0]):
         template, moved = "jindo_puppy", f"a puppy by its looks, {weight_kg} kg"
+    if (template == "retriever" and looks.get("template") != NO_TEMPLATE and weight_kg is not None
+            and looks_weights_ok() and weight_kg <= puppy_max_kg()):
+        other = looks.get("template")
+        # ... the looks' model only for a dog not recorded under 60 days: a
+        # 3.5 kg cream pup of that age, retriever by all three samples, went
+        # to the looks' maltese at 0.67 (new8 12, the one dog of 45 chosen for
+        # their age that this rule made worse); the maltese it was right for
+        # was a dog of some months (new4 23)
+        young = age_days is not None and age_days <= YOUNG_DAYS
+        if looks_real and other != "retriever" and _weighs_within(other, weight_kg) and not young:
+            moved, by = f"{weight_kg} kg is under a retriever's weight: the looks' {other}", "looks"
+        else:
+            other, by = "jindo_puppy", "record"
+            moved = f"{weight_kg} kg is under a retriever's weight: the puppy"
+        template = other
+    if (age_days is not None and age_days <= YOUNG_DAYS and looks.get("template") != NO_TEMPLATE
+            and (template == "retriever" or template == "jindo" and tally.get("jindo_puppy", 0) > 0)
+            and (weight_kg is None or not looks_weights_ok() or weight_kg <= puppy_max_kg())):
+        moved = f"under {age_days} days by the record, not the adult {template}"
+        template, by = "jindo_puppy", "record"
+    # ... and when the samples were split, the adult jindo's and the
+    # retriever's are counted with the puppy's: a 1.5 kg pup under 60 days
+    # read jindo puppy, jindo and retriever, one sample each, went to the
+    # looks' maltese by "no majority" - a curly small dog for a fluffy
+    # spitz-type puppy (hard photo 320, user: "템플릿 맞는지"). All three
+    # samples had named a jindo-type or drop-eared body, none a small breed
+    # (with one sample for the maltese the looks' maltese stays: first fresh
+    # photo 10, a maltese by the truth). Two dogs on file, the other a 0.7 kg
+    # pup whose written body is the puppy
+    if (age_days is not None and age_days <= YOUNG_DAYS and template != "jindo_puppy"
+            and looks.get("template") != NO_TEMPLATE and tally.get("jindo_puppy", 0) > 0
+            and sum(tally.get(k, 0) for k in ("jindo_puppy", "jindo", "retriever")) == sum(tally.values())
+            and (weight_kg is None or not looks_weights_ok() or weight_kg <= puppy_max_kg())):
+        moved = f"under {age_days} days by the record, {tally}: not the {template}"
+        template, by = "jindo_puppy", "record"
     heavy = False
     if template == "jindo_puppy" and weight_kg is not None and looks_weights_ok() and weight_kg > puppy_max_kg():
         template, heavy = "jindo", True
     kept = by == "vision"   # the call's match and differences are against its own model
+    newborn = weight_kg is not None and weight_kg <= NEWBORN_KG
     return {"template": template, "by": by, "moved": moved,
             "match": shape.get("model_match") if kept else None,
             "differences": list(shape.get("differences") or []) if kept else [],
             "heavy_puppy": heavy or looks.get("looks") == "jindo_puppy" and looks.get("template") == "jindo",
             "looks": looks.get("template"), "looks_confidence": looks.get("confidence"),
-            "no_template": looks.get("template") == NO_TEMPLATE}
+            "no_template": looks.get("template") == NO_TEMPLATE or newborn, "newborn": newborn}
 
 
 def looks_weights_ok() -> bool:
