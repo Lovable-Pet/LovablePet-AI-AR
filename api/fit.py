@@ -8,13 +8,19 @@ dog without looking forced? Without a pick (an old caller) the template is
 the adult jindo.
 
 Refused: looks no template covers (the DINOv2 "none": pom-type spitz, flat
-faces) and a model the vision call found different in POOR_FROM or more
+faces), a newborn (template_pick.NEWBORN_KG) and a model the vision call found different in POOR_FROM or more
 parts (ears, coat, muzzle, head, legs, body, tail; body_shape.py). On 30
 dogs judged by the user the two together refused 5 of the 8 the user called
 forced and 2 of the 22 the user would build (tools/template_judge.py). One
-difference is a caveat. Also counted: short legs (the size rule fails on
+difference is a caveat. That count is gpt-4o's: gpt-6-luna names two or
+more parts for most dogs, so its lists are a caveat however long
+(body_shape.match_from, the rule differences_caveat) and its poor verdicts
+come from the looks' "none", the legs and the photograph.
+Also counted: short legs (the size rule fails on
 them), a weight outside what dogs of that look weigh, a coat layout outside
-the pattern set, the photograph. Age is not asked: the looks tell a puppy.
+the pattern set, the photograph. Age is not asked: the looks tell a puppy
+(but for a record under 60 days, which keeps an adult retriever from being
+built: template_pick.combine).
 Each check
 costs points (fair 20, poor 50); a check that alone makes the result look
 wrong is "poor" and decides the verdict, and three caveats together are poor
@@ -96,7 +102,13 @@ def assess_fit(species: str, weight_kg: float, age_text: str = "",
     if from_above and pick and "legs" in (pick.get("differences") or []):
         from .body_shape import match_from
         rest = [d for d in pick["differences"] if d != "legs"]
-        pick = {**pick, "differences": rest, "match": match_from(rest) if pick.get("match") else pick.get("match")}
+        # one part fewer is never a worse match than the pick came with (a
+        # reading model whose lists stop at rough: body_shape.match_from)
+        order = ("close", "rough", "poor")
+        match = pick.get("match")
+        if match in order:
+            match = min(match, match_from(rest), key=order.index)
+        pick = {**pick, "differences": rest, "match": match}
     built = (pick or {}).get("template") or "jindo"
     name = TEMPLATE_KO.get(built, built)
     # the vision call compared the dog with the model itself: its differences
@@ -120,13 +132,17 @@ def assess_fit(species: str, weight_kg: float, age_text: str = "",
 
     if pick:
         diffs = "·".join(DIFF_KO.get(d, d) for d in pick.get("differences") or [])
-        if pick.get("no_template"):
+        if pick.get("newborn"):
+            hit("template", "poor", f"갓난 새끼({weight_kg:g}kg): 눈을 뜨기 전의 몸은 어느 모델로도 표현이 안 됨. "
+                                    "눈을 뜨고 설 무렵의 사진과 체중으로 다시 올려 주세요")
+        elif pick.get("no_template"):
             hit("template", "poor", f"맞는 템플릿 없음: 포메형·단두형 생김새, 가장 가까운 {name} 몸으로는 이 개처럼 안 보임")
         elif pick.get("match") == "poor":
             hit("template", "poor", f"{name} 모델과 다른 곳이 많음({diffs}): 다른 종류의 개처럼 보임")
         elif pick.get("match") == "rough":
             hit("template", "fair", f"{name} 모델과 다른 곳: {diffs}")
-        notes.append(f"템플릿: {name}" + (" (사진과 모델 비교)" if by_vision else " (생김새 분류)"))
+        how = {"vision": " (사진과 모델 비교)", "record": " (기록 나이 60일 미만: 성견 모델 대신 강아지 모델)"}
+        notes.append(f"템플릿: {name}" + how.get(pick.get("by"), " (생김새 분류)"))
         if pick.get("heavy_puppy"):
             notes.append(f"생김새는 진도 강아지지만 {weight_kg:g}kg이라 성견 템플릿으로 만듦")
 

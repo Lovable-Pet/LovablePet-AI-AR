@@ -4,7 +4,7 @@ Spring 서버가 보호소 기록과 사진을 보내면, 파이프라인이 그
 한 마리에 1.5~4분이 걸리므로 **작업을 등록하고 나중에 결과를 받는 방식**이다.
 
 ```
-앱 ──(기록+사진)──▶ Spring ──POST /v1/fit──▶ 파이프라인   (선택, 5~20초, 약 $0.02 · 사진 거부면 약 $0.005)
+앱 ──(기록+사진)──▶ Spring ──POST /v1/fit──▶ 파이프라인   (선택, 5~20초, 약 $0.001)
                      │      ◀── 적합/주의/부적합 + 실제 크기
                      │
                      ├──POST /v1/jobs──▶ 파이프라인   202 {job_id, status: queued}
@@ -35,6 +35,7 @@ uvicorn api.server:app --host 0.0.0.0 --port 8000
 | `PIPELINE_PUBLIC_URL` | 응답의 파일 URL 앞에 붙일 주소. 비우면 `/v1/jobs/...` 상대 경로 |
 | `BLENDER_EXE` | 미리보기 렌더용 Blender. 없으면 렌더 없이 GLB만 만든다 |
 | `PIPELINE_ALLOW_SCRIPTED=1` | 비용 없는 오프라인 대본 실행(`scripted`) 허용. 연동 테스트용 |
+| `OPENAI_MODEL` | 사진을 읽는 모델, 기본 `gpt-6-luna`. `gpt-4o`로 두면 예전 모델과 그 프롬프트로 읽는다 |
 
 필요 파일: 템플릿마다 `output/skeleton_<slug>_small.glb`, `output/templates/<slug>_small/` (jindo, jindo_puppy, maltese,
 toypoodle, chihuahua, retriever; git에 없음, 따로 전달). 생김새 분류기 `api/data/template_pick.npz`는 git에 있고, DINOv2 가중치는 처음
@@ -58,9 +59,9 @@ toypoodle, chihuahua, retriever; git에 없음, 따로 전달). 생김새 분류
 
 ## POST /v1/fit — 만들어도 되는 개인지 먼저 확인
 
-multipart: `record`, `photo` (jpeg/png/webp, 15MB 이하). 5~20초, 약 $0.02.
+multipart: `record`, `photo` (jpeg/png/webp, 15MB 이하). 5~20초, 약 $0.001.
 
-**사진 판정이 먼저**다(생성 작업의 사진 판정과 같은 것, 약 $0.005). 사진의 주 피사체가 개가 아니면
+**사진 판정이 먼저**다(생성 작업의 사진 판정과 같은 것). 사진의 주 피사체가 개가 아니면
 거부되고, 템플릿 판정 없이 바로 `fit.level: "poor"`(부적합)로 답하며 비용은 거기서 끝난다. `fit.reasons`는 작업의
 `photo_rejected` 사유와 같은 한국어 문장, `fit.photo_rejected`는 사유 코드(`not_a_dog`; 통과하면 `[]`),
 `size`·`shape`·`photo`는 `null`이다.
@@ -93,11 +94,13 @@ multipart: `record`, `photo` (jpeg/png/webp, 15MB 이하). 5~20초, 약 $0.02.
 | `poor` | 부적합 | 어느 템플릿으로도 이 개처럼 안 보인다 (포메형·단두형, 단족 등), **또는 사진이 못 쓸 사진** | 생성하지 않거나, 안내 후 사용자가 선택 |
 
 **템플릿** (`fit.template`): 이 개를 만들 모델 — `jindo`, `jindo_puppy`, `maltese`, `toypoodle`, `chihuahua`, `retriever` 중
-하나. 나이는 쓰지 않는다(강아지인지도 생김새로 본다). 기준은 "그 모델로 만들어 색을 입히면 그 개로 보이나, 억지스럽지 않나"다.
-- 체형 호출(gpt-4o, 3번 투표)에 회색 모델 6개를 A~F로 붙인 시트(`api/model_sheet.py`, 투표마다 순서를 섞음)를 같이 보내, 가장 비슷한
+하나. 나이는 한 군데에서만 쓴다(강아지인지는 생김새로 본다; 다만 기록 나이가 60일 미만인데 리트리버 모델이 뽑히면
+진도 강아지 모델로 만든다 — `picked_by: "record"`, 아래 참고). 기준은 "그 모델로 만들어 색을 입히면 그 개로 보이나, 억지스럽지 않나"다.
+- 체형 호출(판독 모델, 3번 투표)에 회색 모델 6개를 A~F로 붙인 시트(`api/model_sheet.py`, 투표마다 순서를 섞음)를 같이 보내, 가장 비슷한
   모델과 그 모델과 **뚜렷이 다른 부위**(귀·털 길이·털 결·주둥이·머리·다리·몸통·꼬리, 진도의 귀·꼬리·체격·주둥이 모프로 바꿀 수 있는 것과
   색·크기는 빼고)를 묻는다(`fit.picked_by: "vision"`). 다른 부위가 없으면 `match: "close"`, 1곳이면 `"rough"`(주의),
-  2곳 이상이면 `"poor"`(부적합). `fit.differences`가 그 부위다.
+  2곳 이상이면 `"poor"`(부적합). `fit.differences`가 그 부위다. 판독 모델이 gpt-6-luna(기본)일 때는 몇 곳이든 `"rough"`(주의)까지다 —
+  이 모델은 잘 맞는 개에도 대부분 2곳 이상을 적어서 개수로는 가려지지 않는다(`api/reading_model.py`의 `differences_caveat`).
 - DINOv2 생김새 분류(`api/template_pick.py`, 로컬)가 `fit.looks`다. `"none"`(포메형·단두형)이면 부적합이고 `fit.no_template: true`:
   **이 개는 만들지 않는다**(2026-11-12부터, `/v1/jobs`가 `unsuitable`로 끝남 — 억지로 맞춘 몸은 다른 개로 보인다). `/v1/fit`에서
   `no_template`이 `true`면 작업을 만들지 않으면 된다. 호출이 실패하면 이 분류가 모델을
@@ -108,6 +111,11 @@ multipart: `record`, `photo` (jpeg/png/webp, 15MB 이하). 5~20초, 약 $0.02.
   (`sure`) 체중이 5 kg(진도형 성견의 5번째 백분위) 미만이면 **진도 강아지**, 치와와라는데 체중이 치와와 범위(6.9 kg)를 넘으면 생김새 분류의 모델
   (체중이 맞을 때) 아니면 진도, 3표가 과반 없이 갈리면 생김새 분류의 모델. 이때는 `picked_by: "looks"`(또는 `"default"`)이고
   `differences`는 비어 있다.
+- 기록 나이가 60일 미만(`2026(60일미만)(년생)`)이고 7 kg 이하인데 위 결과가 리트리버면 **진도 강아지**로 만든다. 진도 성견은 3표 중
+  한 표라도 강아지였을 때만 바꾼다(3표 모두 성견이면 그대로) (2026-11-15, `picked_by: "record"`, `differences`는 비어 있음). 어린 강아지는 늘어진 귀·복슬한 털 때문에 리트리버로 읽히곤 하는데,
+  성견 몸은 얼굴이 길고 같은 체중에서 체고가 25%쯤 크게 나온다(2 kg: 성견 모델 23~24 cm, 강아지 모델 18 cm). 말티즈·토이푸들·치와와는 그대로.
+- 기록 체중이 0.5 kg 이하면 **갓난 새끼로 보고 만들지 않는다**(2026-11-15, `fit.no_template: true`, 사유는 `reasons`의 "갓난 새끼(…kg): …
+  다시 올려 주세요"). 눈을 뜨기 전의 몸은 어느 모델에도 없다 — 보호소 공고 637마리 중 0.5 kg 이하 10마리가 모두 그런 새끼였다.
 - 단족(다리 짧음, 3표 모두)은 부적합 — 체중으로 낸 크기가 25~35% 틀어진다. 기록 체중이 그 생김새 보호소 개 대부분(5~95%) 밖이면 주의.
 - 사람이 직접 고른 30마리(평가셋 20 + 보호소 사진 10, `tools/template_judge.py`)와 비교: 사람이 만들 만하다고 본 22마리 중 20마리에서 같은
   모델(DINOv2만으로는 13), 사람이 억지라고 본 8마리 중 7마리 부적합, 사람이 만들 만하다고 본 22마리 중 2마리 부적합.
@@ -137,7 +145,7 @@ multipart:
 | `record` | O | | 위 기록 JSON |
 | `photo` | O | | 전신이 보이는 사진 한 장 |
 | `callback_url` | | | 끝나면 작업 JSON을 POST할 주소 |
-| `fit_stop` | | `false` | `true`면 부적합일 때 비싼 단계 전에 멈추고 `unsuitable`로 끝낸다. 맞는 템플릿이 없는 개(`fit.no_template`)는 이 값과 상관없이 멈춘다 |
+| `fit_stop` | | `false` | `true`면 부적합일 때 비싼 단계 전에 멈추고 `unsuitable`로 끝낸다. 맞는 템플릿이 없는 개(`fit.no_template`: 포메형·단두형, 0.5 kg 이하 갓난 새끼)는 이 값과 상관없이 멈춘다 |
 | `refine` | | `true` | `false`면 이미지 모델 다듬기 없이 (싸고 빠르지만 경계가 딱딱함) |
 | `render` | | Blender 있으면 `true` | 미리보기 PNG 3장 |
 | `scripted` | | | 오프라인 대본 이름(`black_shiba`; `not_a_dog`은 `photo_rejected`로 끝남). `PIPELINE_ALLOW_SCRIPTED=1`일 때만 |
@@ -156,7 +164,7 @@ multipart:
 | `running` | | 만드는 중 | `started_at` |
 | `done` | O | 완성 | 아래 전부 |
 | `photo_rejected` | O | 사진의 주 피사체가 개가 아님. 사람 손·다른 동물·몸 위 글자·옷·물체 가림은 거부하지 않고 무시하고 읽는다(`fit`에 주의 사유) | `reasons` (한국어), `error` |
-| `unsuitable` | O | 맞는 템플릿이 없는 개(`fit.no_template: true`, 포메형·단두형 등) — 항상. 또는 `fit_stop=true`이고 부적합 | `fit` |
+| `unsuitable` | O | 맞는 템플릿이 없는 개(`fit.no_template: true`, 포메형·단두형, 0.5 kg 이하 갓난 새끼) — 항상. 또는 `fit_stop=true`이고 부적합 | `fit` |
 | `failed` | O | 서버 오류, 또는 서버 재시작으로 중단 | `error` |
 
 `done` 예:
@@ -297,9 +305,11 @@ Quick Look 안에서는 페이지 코드가 돌지 않아 탭·명령·음성이
 
 | 단계 | 시간 | 비용 |
 |---|---|---|
-| `/v1/fit` | 5~20초 | 약 $0.02 (사진 판정 $0.005 + 체형 판정). 사진이 거부되면 약 $0.005 |
-| `/v1/jobs` 전체 (다듬기 포함) | 1.5~4분 | 약 $0.14 (판독 약 $0.05 + 다듬기 한 번 $0.07, 다섯에 한 번꼴로 두 번) |
-| `/v1/fit` 뒤 24시간 안의 같은 사진 `/v1/jobs` | 위와 같음 | 약 $0.12 — 사진 판정과 체형 판정(약 $0.02)은 `/v1/fit`의 답을 그대로 써서 다시 묻지 않는다. 작업은 `/v1/fit`이 알려 준 템플릿으로 만든다 |
-| `refine=false` | 편집 시간만큼 짧음 | 약 $0.05 (비전 호출만, gpt-4o 기준) |
+| `/v1/fit` | 5~20초 | 약 $0.001 (사진 판정 + 체형 판정) |
+| `/v1/jobs` 전체 (다듬기 포함) | 1.5~4분 | 약 $0.09 (판독 약 $0.006 + 다듬기 한 번 $0.07, 다섯에 한 번꼴로 두 번) |
+| `/v1/fit` 뒤 24시간 안의 같은 사진 `/v1/jobs` | 위와 같음 | 약 $0.09 — 사진 판정과 체형 판정은 `/v1/fit`의 답을 그대로 써서 다시 묻지 않는다. 작업은 `/v1/fit`이 알려 준 템플릿으로 만든다 |
+| `refine=false` | 편집 시간만큼 짧음 | 약 $0.006 (비전 호출만) |
 
 같은 사진·같은 읽기로 다시 만들면 다듬기 편집은 캐시에서 나와 비용이 거의 없다.
+
+판독 모델은 `gpt-6-luna`다(2026-11-13부터). `OPENAI_MODEL=gpt-4o`로 두면 예전 모델로 읽고, 그때 판독은 약 $0.05, `/v1/fit`은 약 $0.02다.
