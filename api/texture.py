@@ -325,6 +325,29 @@ BRINDLE_STREAK_PX = 40
 BRINDLE_COVER = 0.4
 BRINDLE_SOFT = 0.6
 BRINDLE_OPACITY = 0.65
+# "veil" (BRINDLE_STYLE; the environment's BRINDLE_STYLE=streaks is the way
+# back to the streaks above): those are thin lines of one width with a firm
+# edge on a coat left at its table colour, and read as wood grain on a pale
+# orange dog (user, 2026-11-15, on a dark brindle pup: "호피무늬 자체가 좀
+# 이상하게 느껴진달까"; shown the veil beside it on three dogs: "호피 고친 게
+# 나은 거 같고" - the default since). In the photographs a brindle is
+# a darker, duller dog whose stripes are soft and low in contrast. The veil
+# paints the stripe colour over the whole coat at BRINDLE_VEIL and the streaks
+# - broader (BRINDLE_VEIL_GRAIN_PX, _STREAK_PX), fuller (_COVER), their edge
+# soft over BRINDLE_VEIL_SOFT of the field's spread and smoothed over the
+# surface by BRINDLE_VEIL_SIGMA_M - up to BRINDLE_VEIL_OPACITY, at
+# BRINDLE_VEIL_FACE of that on the face. (Bars drawn on the surface as level
+# sets of the place along the spine were tried the same day and came out as
+# marble swirls.)
+BRINDLE_STYLE = "veil"
+BRINDLE_VEIL = 0.3
+BRINDLE_VEIL_OPACITY = 0.72
+BRINDLE_VEIL_GRAIN_PX = 4.0
+BRINDLE_VEIL_STREAK_PX = 70
+BRINDLE_VEIL_COVER = 0.5
+BRINDLE_VEIL_SOFT = 2.0
+BRINDLE_VEIL_SIGMA_M = 0.004
+BRINDLE_VEIL_FACE = 0.45
 # A brindle on a DARK coat - the shelters' dark brindle puppies - is not
 # stripes at all but lighter brown hairs mixed into a dark grey-brown coat
 # in small soft clouds; drawn as stripes, fine or coarse, it came out a
@@ -2133,6 +2156,8 @@ def apply_overlay(composed: np.ndarray, gray: np.ndarray, appearance: dict[str, 
                 str(entry.get("color", "")).lower() == "gray" for entry in appearance.get("region_colors") or []):
             weight = weight * BRINDLE_MOTTLE_ON_GREY
         second = BRINDLE_MOTTLE_COLOUR
+    elif overlay == "brindle" and direction is not None and os.environ.get("BRINDLE_STYLE", BRINDLE_STYLE) == "veil":
+        weight = _brindle_veil(shape, direction, valid, seed, landmarks, masks)
     elif overlay == "brindle" and direction is not None:
         # stripes run across the hair: smear noise along the perpendicular
         across = np.stack([-direction[..., 1], direction[..., 0]], axis=-1)
@@ -2153,6 +2178,29 @@ def apply_overlay(composed: np.ndarray, gray: np.ndarray, appearance: dict[str, 
     low, high = OVERLAY_SKIP_L
     weight = weight * np.clip((high - lightness) / (high - low), 0.0, 1.0)
     return _blend(composed, paint_region(gray, second, None, palette), weight), overlay
+
+
+def _brindle_veil(shape: tuple[int, int], direction: np.ndarray, valid: np.ndarray, seed: int, landmarks,
+                  masks: "MaskLibrary | None") -> np.ndarray:
+    """A light-based brindle as a 0..1 weight of the stripe colour
+    (BRINDLE_VEIL_*): a veil over the whole coat, soft streaks across the hair
+    on top of it, the streaks weaker on the face."""
+    across = np.stack([-direction[..., 1], direction[..., 0]], axis=-1)
+    stripes = anisotropic_noise(shape, across, seed + 7, streak=BRINDLE_VEIL_STREAK_PX, grain=BRINDLE_VEIL_GRAIN_PX)
+    field = (stripes - stripes.min()) / max(float(stripes.max() - stripes.min()), 1e-6)
+    threshold = float(np.quantile(field[valid], 1.0 - BRINDLE_VEIL_COVER))
+    soft = BRINDLE_VEIL_SOFT * float(field[valid].std())
+    streaks = np.clip((field - threshold) / max(soft, 1e-6) + 0.5, 0.0, 1.0).astype(np.float32)
+    if landmarks is not None and landmarks.position is not None:
+        surface = (landmarks.valid if landmarks.valid is not None else valid) & valid
+        smooth = smooth_on_surface(streaks, landmarks.position, surface, BRINDLE_VEIL_SIGMA_M, stride=3)
+        streaks = np.where(surface, smooth, streaks)
+    if masks is not None:
+        for region in ("skull", "eyebrows", "cheeks", "muzzle_bridge"):
+            mask = masks.get(region)
+            if mask is not None:
+                streaks = streaks * (1.0 - (1.0 - BRINDLE_VEIL_FACE) * np.clip(mask, 0.0, 1.0))
+    return ((BRINDLE_VEIL + (BRINDLE_VEIL_OPACITY - BRINDLE_VEIL) * streaks) * valid).astype(np.float32)
 
 
 def _brindle_mottle(shape: tuple[int, int], direction: np.ndarray | None, valid: np.ndarray, seed: int,
