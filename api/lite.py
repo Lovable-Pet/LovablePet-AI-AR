@@ -1124,8 +1124,13 @@ def plain_crown(appearance: dict[str, Any]) -> list[str]:
     The cap ends in a line over the eyes with cream cheeks under it - a
     cream puppy in a carrier with an orange lid and a yellow labrador in an
     orange one (hard photos 356 and 225, crown tan 4 and 5 of 5), the two of
-    214 dogs on file it shows on. A dog with a tan head on a cream body
-    loses the head's colour by this; it keeps a coat a dog can have."""
+    214 dogs on file it shows on.
+
+    Warm cheeks under the crown are a tan head on a white dog, not a cap,
+    and the head is left as read: the cheeks are not the crown answer's, so
+    with the crown repainted they stayed - a white skull over a tan face
+    (hard photo 332, a tan head with a blaze on a white body; seen when the
+    standing dogs were rebuilt, 2026-11-16)."""
     from .patterns import color_family
 
     base = str(appearance.get("base_color") or "").lower()
@@ -1133,6 +1138,8 @@ def plain_crown(appearance: dict[str, Any]) -> list[str]:
         return []
     entries = {e.get("region"): e for e in appearance.get("region_colors") or []}
     if str((entries.get("back") or {}).get("color", "")).lower() != base:
+        return []
+    if color_family(str((entries.get("cheeks") or {}).get("color", "")).lower()) == "point":
         return []
     changed = []
     for region in ("skull", "eyebrows", "ears_inner"):
