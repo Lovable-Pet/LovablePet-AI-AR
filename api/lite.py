@@ -1082,7 +1082,8 @@ async def refine_coat(
 # the run
 # --------------------------------------------------------------------------
 
-def plain_brows(region_colors: list[dict[str, Any]]) -> str | None:
+def plain_brows(region_colors: list[dict[str, Any]], pattern: str | None = None,
+                base_color: str | None = None) -> str | None:
     """Eyebrow dots paler than the head they sit on take the head's colour
     (plain_brows, for a coat that is not a point pattern). gpt-6-luna answers
     "white" or "cream" brows for a dark or tan head with a white blaze or a
@@ -1099,7 +1100,16 @@ def plain_brows(region_colors: list[dict[str, Any]]) -> str | None:
     most of them on cream or fawn where the dots hardly show). Tan brows
     beside tan cheeks, a tan muzzle or tan ear cups stay: a tricolour
     terrier read with cream cheeks and tan ears has the dots in its
-    photograph (photo 5 of the second fresh set). Returns what was written."""
+    photograph (photo 5 of the second fresh set).
+
+    Tan dots on the dark head of a white piebald stay, whatever the cheeks:
+    a white face below a black head leaves the cheeks white, and the
+    tricolour piebald's tan brows went with them (2026-11-18: notices
+    448544202600471 and 447525202600486, both with clear tan dots in the
+    photograph, the first judged "another dog" for the missing tan). Of the
+    seven saved dogs whose tan brows the rule had made dark, the four without
+    dots in their photographs are two solid blacks and two black dogs with
+    white trim (irish); neither is a white piebald. Returns what was written."""
     from .patterns import color_family
 
     entries = {e.get("region"): e for e in region_colors}
@@ -1108,7 +1118,9 @@ def plain_brows(region_colors: list[dict[str, Any]]) -> str | None:
         return None
     was, head = str(brows.get("color", "")).lower(), str(skull.get("color", "")).lower()
     pale_on_darker = color_family(was) == "light" and color_family(head) != "light"
-    tan_alone = (color_family(was) == "point" and was != head
+    tricolour_piebald = (pattern == "piebald" and color_family(str(base_color or "").lower()) == "light"
+                         and color_family(head) == "dark")
+    tan_alone = (color_family(was) == "point" and was != head and not tricolour_piebald
                  and not any(color_family(str((entries.get(k) or {}).get("color", "")).lower()) == "point"
                              for k in ("cheeks", "muzzle_bridge", "ears_inner")))
     if not (pale_on_darker or tan_alone):
@@ -2877,7 +2889,7 @@ async def run_lite(
             face_log["black_brindle_plain"] = f"dark fur L {dark_l}, coat stays black: no brindle over it"
             decision.pattern, decision.overlay = "solid", None
         if has_rule(reading_model, "plain_brows") and decision.pattern not in ("tan_point", "urajiro"):
-            plain = plain_brows(region_colors)
+            plain = plain_brows(region_colors, decision.pattern, decision.base_color)
             if plain:
                 face_log["plain_brows"] = plain
         # patches are placed at random over the body, so only on a body the
