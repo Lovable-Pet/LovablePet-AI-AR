@@ -956,13 +956,19 @@ def chroma_from_coat(appearance: dict, palette: dict[str, tuple[str, str, str]],
     not pale (COAT_PALE_SHARE, COAT_TABLE_NAMES). A coat marked dull
     (appearance["dull_coat"], lite.coat_without_warm_fur: too little warm
     fur in the photo to take a chroma from) gets the least the name is
-    given, COAT_CHROMA_SHARE[0] of the table's."""
+    given, COAT_CHROMA_SHARE[0] of the table's. So does a coat the rules
+    found lighter than its name (appearance["lighter_coat"]: lite.one_coat_colour
+    and lighter_coat, tan called cream and drawn fawn) when the photo gives
+    no chroma to take: under a coloured border (a blue tarp, grass, sand) or
+    with too little warm fur, the table's chroma painted pale gold dogs
+    orange (2026-11-19: hard photo 62, new6 30, comparison 33, 35, pattern 22)."""
     from .fur import hex_to_linear, to_srgb
     from .projection import lab_to_linear, linear_to_lab
 
     usable = (bool(coat) and coat.get("border") == "neutral" and int(coat.get("pixels") or 0) >= COAT_MIN_PIXELS
               and float(coat.get("share") or 0.0) >= COAT_MIN_SHARE)
-    dull = bool(appearance.get("dull_coat")) and bool(coat) and coat.get("border") == "neutral"
+    lighter = bool(appearance.get("lighter_coat")) and not usable
+    dull = (bool(appearance.get("dull_coat")) and bool(coat) and coat.get("border") == "neutral") or lighter
     if not dull and not usable:
         return palette, None
     used: dict[str, int] = {}
@@ -1004,7 +1010,8 @@ def chroma_from_coat(appearance: dict, palette: dict[str, tuple[str, str, str]],
             moved.append(_rgb_to_hex(tuple(int(round(float(np.clip(c, 0, 1)) * 255)) for c in rgb)))
         out[name] = tuple(moved)
     return out, {"coat": coat, "main": main, "chroma": [round(mid, 1), round(target, 1)], "scale": round(scale, 2),
-                 "names": sorted(used), **({"dull": True} if dull else {}), **({"pale": True} if pale else {})}
+                 "names": sorted(used), **({"dull": True} if dull else {}), **({"pale": True} if pale else {}),
+                 **({"lighter": True} if lighter else {})}
 
 
 # A dog read cream all over takes its cream from the photo's lit fur

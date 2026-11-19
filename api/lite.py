@@ -1504,6 +1504,40 @@ PATCH_SIZE = {"small": "small", "large": "medium", "most": "large"}
 # file. For it only the measurement does: the back within SAME_COAT_DE of
 # the regions called warm.
 SAME_COAT_DE = 12.0
+# A warm coat these rules find lighter goes one warm step lighter, never to
+# cream (one_coat_colour's warm base under light calls, coat_without_warm_fur);
+# fawn, the lightest warm colour, stays. Shelter light - shade, a blue tarp,
+# overexposure - makes a fawn or tan back measure grey, and on 2026-11-19 the
+# 14 coats the two rules had turned cream (the 214 standing dogs, the fresh
+# sets 6-8 and the 102 compared) were 12 warm by blind judges of the photo
+# alone and by the comparison's judges (pale gold or tan; work/cost/fair/
+# coat_blind), one cream (hard photo 55, its back measured L 85) and one
+# split. The blue-tarp puppy the cream jump was made for (hard photo 136) was
+# judged pale gold too: fawn, not cream, is what its orange cap wanted.
+LIGHTER_WARM = {"chocolate": "tan", "tan": "fawn", "red": "fawn"}
+
+
+def lighter_coat(base: str, light: str, lightness: float | None) -> str | None:
+    """Where a warm coat found lighter goes: to `light` (cream or white) only
+    when its measured lightness (CIE L*) is nearer that colour's than the next
+    warm step's - the boundary is the palette's own, half way between fawn
+    (L 69) and cream (L 88), not one fitted to dogs - else one warm step
+    lighter (LIGHTER_WARM); None when it stays as it is (fawn not light
+    enough for cream, or nothing measured). A white jindo read fawn still goes
+    cream (shelter adult jindo 1, user: "01번 백구 다시 봐봐"), as does the
+    cream dog of hard photo 55 (back L 85); the twelve warm ones measured L 62
+    to 77 and keep a warm colour."""
+    from .fur import hex_to_linear
+    from .palette import FUR_PALETTE
+    from .projection import linear_to_lab
+
+    step = LIGHTER_WARM.get(base)
+    if lightness is not None and light in FUR_PALETTE and (step or base) in FUR_PALETTE:
+        def mid_l(name: str) -> float:
+            return float(linear_to_lab(hex_to_linear(FUR_PALETTE[name][1])[None, None, :])[0, 0][0])
+        if abs(lightness - mid_l(light)) < abs(lightness - mid_l(step or base)):
+            return light
+    return step
 
 
 def one_coat_colour(appearance: dict[str, Any], measured: dict[str, Any],
@@ -1584,18 +1618,32 @@ def one_coat_colour(appearance: dict[str, Any], measured: dict[str, Any],
     # fawn where its light belly leaves the outer thigh, fawn at the top of
     # its legs - and the cream was mixed toward it (relative_cream), a beige
     # dog (shelter adult jindo 1, user: "01번 백구 다시 봐봐")
+    # A warm base under light calls goes one warm step lighter unless the back
+    # measures as light as the light colour (lighter_coat, 2026-11-19: twelve
+    # of fourteen coats turned cream were warm dogs in grey light)
+    to = warm
+    if other == "light":
+        lightness = float(back[0]) if back is not None and len(back) else None
+        to = lighter_coat(base, warm, lightness)
+        if not to:
+            return []
     from .simple import FEATURES
     base_features = {f"feature:{name}" for name, (_, roles) in FEATURES.items() if "base" in roles.values()}
     changed = []
     for entry in entries:
         source = str(entry.get("source", ""))
         if str(entry.get("color", "")).lower() == base and (source.startswith("pattern") or source in base_features):
-            entry.update({"color": warm, "note": f"one coat: {warm} like {'/'.join(regions)}",
+            entry.update({"color": to, "note": f"one coat: {to}" + (f" like {'/'.join(regions)}" if to == warm
+                                                                      else f", a step lighter (calls said {warm} on {'/'.join(regions)})"),
                           "source": f"{witness}:one_coat"})
-            changed.append(f"{entry.get('region')}:{base}->{warm}")
+            changed.append(f"{entry.get('region')}:{base}->{to}")
     if changed:
-        appearance["base_color"] = warm
-        changed.append(f"base:{base}->{warm}")
+        appearance["base_color"] = to
+        changed.append(f"base:{base}->{to}")
+        if to != warm:
+            # found lighter than its name: where the photo gives no chroma,
+            # not the table's (palette.chroma_from_coat, lighter_coat)
+            appearance["lighter_coat"] = True
     return changed
 
 
@@ -2064,8 +2112,9 @@ def mixed_grey(base: str | None, crown_votes: dict[str, Any] | None) -> dict[str
 def coat_without_warm_fur(appearance: dict[str, Any], coat: dict[str, Any] | None,
                           coat_mid_l: float | None) -> str | None:
     """The warm base and every region of it cream when the photo's coat has
-    hardly any warm fur and the animal is light; a darker one keeps its
-    colour and is marked dull (appearance["dull_coat"]). Returns what
+    hardly any warm fur and the animal is as light as cream; a lighter one
+    goes a warm step lighter (lighter_coat) and a darker one keeps its
+    colour, both marked dull (appearance["dull_coat"]). Returns what
     changed, or None."""
     from .palette import COAT_MIN_SHARE, WARM_BASES
 
@@ -2077,7 +2126,18 @@ def coat_without_warm_fur(appearance: dict[str, Any], coat: dict[str, Any] | Non
         appearance["dull_coat"] = True
         return (f"{base} kept, drawn dull (warm fur {float(coat.get('share') or 0.0):.1%} of the animal, "
                 f"whole coat L* {coat_mid_l})")
-    colour = "cream"
+    # cream only for a coat as light as cream; else a warm step lighter, and
+    # fawn stays (lighter_coat, 2026-11-19: comparison dog 65, a fawn-tan
+    # puppy under cold light, came out an ivory dog). Either way drawn dull,
+    # as the darker coat above: with hardly any warm fur in the photo the
+    # table's chroma painted the pale blonde spitz this rule was written on
+    # (hard photo 32) orange again
+    colour = lighter_coat(base, "cream", coat_mid_l)
+    if colour != "cream":
+        appearance["dull_coat"] = True
+    if not colour:
+        return (f"{base} kept, drawn dull: not as light as cream (warm fur {float(coat.get('share') or 0.0):.1%} "
+                f"of the animal, whole coat L* {coat_mid_l})")
     changed = 0
     for entry in appearance.get("region_colors") or []:
         if str(entry.get("color", "")).lower() == base:
