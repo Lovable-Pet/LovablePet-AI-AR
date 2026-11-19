@@ -196,7 +196,9 @@ clearly warm brown, red or fawn; dark is black, chocolate or grey."""
 
 
 async def read_face_colours(transport: Transport, crop_block: dict[str, Any],
-                            samples: int = SAMPLES) -> tuple[str, str, str, str, str, dict[str, Any]]:
+                            samples: int = SAMPLES, requests: int = 1,
+                            other_crops: list[dict[str, Any]] | None = None,
+                            ) -> tuple[str, str, str, str, str, dict[str, Any]]:
     # the crown and the eye ring are returned in votes["crown_answer"] and
     # votes["eye_ring_answer"] so the five-tuple callers keep working
     """(cheeks, brows, muzzle, ears, blaze, votes): each the answer more than
@@ -208,7 +210,23 @@ async def read_face_colours(transport: Transport, crop_block: dict[str, Any],
                                                    "inside of the ears, the fur round the eyes, and whether a "
                                                    "light blaze runs up between the eyes: what colour is each?"}]
 
-    payloads = await sample(transport, system=FACE_COLOURS_SYSTEM, blocks=blocks, schema=FACE_COLOURS_SCHEMA, n=samples)
+    # `requests` over one: the same question in that many requests at once.
+    # The answers above come from the first, as ever; the others only add
+    # votes["muzzle_asks"], the muzzle answer counted over all of them
+    # (lite's dark_muzzle_by_asks reads it). `other_crops`: the head framed
+    # again (face_crop.crop_views) - request k+1 looks at other_crops[k].
+    # The same crop sent three times came back the same three times (a tan
+    # dog's black muzzle: tan 15 of 15, in a build whose crop was one grid
+    # cell wider than the build before, which said dark 5 of 5); the head
+    # cropped tight, as it was, and wide said dark 4/10, tan 10/10 and dark
+    # 10/10 (new shelter photo 37, 2026-11-14).
+    import asyncio
+    others = list(other_crops or [])
+    views = [blocks] + [[crop, blocks[1]] for crop in others]
+    views += [blocks] * (max(requests, 1) - len(views))
+    batches = await asyncio.gather(*(sample(transport, system=FACE_COLOURS_SYSTEM, blocks=view,
+                                            schema=FACE_COLOURS_SCHEMA, n=samples) for view in views))
+    payloads = batches[0]
     readings: list[dict[str, Any]] = []
     for payload in payloads:
         if isinstance(payload, AgentRefusal):
@@ -236,6 +254,12 @@ async def read_face_colours(transport: Transport, crop_block: dict[str, Any],
              "cheeks_vs_brows_answer": cheek_brow, "cheeks_vs_brows": cheek_brow_votes, "cheeks": cheek_votes, "brows": brow_votes, "muzzle": muzzle_votes, "ears": ear_votes,
              "blaze": blaze_votes, "samples": len(readings),
              "notes": [str(r.get("note", "")) for r in readings if r.get("note")]}
+    if len(batches) > 1:
+        every = [p for batch in batches for p in batch if isinstance(p, dict)]
+        votes["muzzle_asks"] = {"requests": len(batches), "samples": len(every), "crops": 1 + len(others),
+                                "votes": dict(Counter(p.get("muzzle") for p in every if p.get("muzzle") in MUZZLE_ANSWERS)),
+                                "each": [dict(Counter(p.get("muzzle") for p in batch if isinstance(p, dict)
+                                                      and p.get("muzzle") in MUZZLE_ANSWERS)) for batch in batches]}
     return cheeks, brows, muzzle, ears, blaze, votes
 
 

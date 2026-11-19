@@ -56,6 +56,8 @@ animal to whoever adopted it.
 
 from __future__ import annotations
 
+import os
+
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -323,6 +325,29 @@ BRINDLE_STREAK_PX = 40
 BRINDLE_COVER = 0.4
 BRINDLE_SOFT = 0.6
 BRINDLE_OPACITY = 0.65
+# "veil" (BRINDLE_STYLE; the environment's BRINDLE_STYLE=streaks is the way
+# back to the streaks above): those are thin lines of one width with a firm
+# edge on a coat left at its table colour, and read as wood grain on a pale
+# orange dog (user, 2026-11-15, on a dark brindle pup: "호피무늬 자체가 좀
+# 이상하게 느껴진달까"; shown the veil beside it on three dogs: "호피 고친 게
+# 나은 거 같고" - the default since). In the photographs a brindle is
+# a darker, duller dog whose stripes are soft and low in contrast. The veil
+# paints the stripe colour over the whole coat at BRINDLE_VEIL and the streaks
+# - broader (BRINDLE_VEIL_GRAIN_PX, _STREAK_PX), fuller (_COVER), their edge
+# soft over BRINDLE_VEIL_SOFT of the field's spread and smoothed over the
+# surface by BRINDLE_VEIL_SIGMA_M - up to BRINDLE_VEIL_OPACITY, at
+# BRINDLE_VEIL_FACE of that on the face. (Bars drawn on the surface as level
+# sets of the place along the spine were tried the same day and came out as
+# marble swirls.)
+BRINDLE_STYLE = "veil"
+BRINDLE_VEIL = 0.3
+BRINDLE_VEIL_OPACITY = 0.72
+BRINDLE_VEIL_GRAIN_PX = 4.0
+BRINDLE_VEIL_STREAK_PX = 70
+BRINDLE_VEIL_COVER = 0.5
+BRINDLE_VEIL_SOFT = 2.0
+BRINDLE_VEIL_SIGMA_M = 0.004
+BRINDLE_VEIL_FACE = 0.45
 # A brindle on a DARK coat - the shelters' dark brindle puppies - is not
 # stripes at all but lighter brown hairs mixed into a dark grey-brown coat
 # in small soft clouds; drawn as stripes, fine or coarse, it came out a
@@ -1013,6 +1038,39 @@ def _chest_spots(landmarks, mask: np.ndarray, noise: np.ndarray) -> np.ndarray |
     return out if float((out > 0.5).sum()) >= 30 else None
 
 
+# One small white patch on the breastbone (the layout call's
+# white_chest_patch): a single mark on the midline, taller than it is wide.
+# Drawn with the doberman's pair of spots it came out as two round balls of
+# white either side of the chest (new shelter photos, 2026-11-14: a black
+# puppy and three tan dogs, each with one small streak on the breastbone).
+# Half-sizes across and down the chest, in eye distances.
+CHEST_PATCH_ACROSS_EYES = 0.45
+CHEST_PATCH_DOWN_EYES = 0.85
+
+
+def _chest_patch(landmarks, mask: np.ndarray, noise: np.ndarray) -> np.ndarray | None:
+    """One soft patch on the midline of the chest mask's front, broken by the noise."""
+    if landmarks.position is None or landmarks.normal is None or "chest_center" not in landmarks.points:
+        return None
+    front = (mask > 0.5) & (-landmarks.normal[..., 1] > 0.3)
+    if not front.any():
+        return None
+    centre = landmarks.world("chest_center")
+    eye = landmarks.eye_distance
+    pos = landmarks.position[front]
+    tx, tz = centre[0], centre[2] - CHEST_SPOT_DOWN_EYES * eye
+    seed = pos[int(np.argmin((pos[:, 0] - tx) ** 2 + (pos[:, 2] - tz) ** 2))]
+    rows, cols = np.nonzero(mask > 0.5)
+    offset = (landmarks.position[rows, cols] - seed) / eye
+    # depth counts as height does: the patch follows the chest round, it does not go through it
+    distance = np.sqrt((offset[:, 0] / CHEST_PATCH_ACROSS_EYES) ** 2
+                       + (offset[:, 1] ** 2 + offset[:, 2] ** 2) / CHEST_PATCH_DOWN_EYES ** 2)
+    disc = np.zeros(mask.shape, dtype=np.float32)
+    disc[rows, cols] = np.clip(1.0 - distance, 0.0, 1.0)
+    out = np.clip((disc * (0.55 + 0.9 * noise) - 0.25) * 2.5, 0.0, 1.0)
+    return out if float((out > 0.5).sum()) >= 30 else None
+
+
 def _below_eyes(landmarks, jitter: np.ndarray | None) -> np.ndarray:
     """1 below the line CHEEK_POINT_BELOW_EYE under the eyes, 0 above, with a
     fur-level edge."""
@@ -1421,6 +1479,12 @@ def compose_body(
                 placed.append(f"chest_spots:{region}@chest_center")
             else:
                 continue    # no geometry: a dark chest is closer than a random patch
+        if blob is None and marking_type == "chest_patch" and landmarks is not None:
+            blob = _chest_patch(landmarks, mask, noise)
+            if blob is not None:
+                placed.append(f"chest_patch:{region}@chest_center")
+            else:
+                continue    # no geometry: the coat's own chest is closer than a random patch
         if blob is None and marking_type == "patches":
             # piebald spots: large blobs anywhere on the region. The shape is
             # a random field smoothed over the dog's SURFACE: from the UV
@@ -2084,6 +2148,7 @@ def apply_overlay(composed: np.ndarray, gray: np.ndarray, appearance: dict[str, 
         # stripes made a tiger
         second = "chocolate"
     shape = gray.shape
+    field = None
     if (overlay == "brindle" and color_family(base) == "dark" and landmarks is not None
             and landmarks.position is not None):
         weight = _brindle_mottle(shape, direction, valid, seed, landmarks, floor=BRINDLE_MOTTLE_FLOOR)
@@ -2091,6 +2156,8 @@ def apply_overlay(composed: np.ndarray, gray: np.ndarray, appearance: dict[str, 
                 str(entry.get("color", "")).lower() == "gray" for entry in appearance.get("region_colors") or []):
             weight = weight * BRINDLE_MOTTLE_ON_GREY
         second = BRINDLE_MOTTLE_COLOUR
+    elif overlay == "brindle" and direction is not None and os.environ.get("BRINDLE_STYLE", BRINDLE_STYLE) == "veil":
+        weight = _brindle_veil(shape, direction, valid, seed, landmarks, masks)
     elif overlay == "brindle" and direction is not None:
         # stripes run across the hair: smear noise along the perpendicular
         across = np.stack([-direction[..., 1], direction[..., 0]], axis=-1)
@@ -2100,7 +2167,7 @@ def apply_overlay(composed: np.ndarray, gray: np.ndarray, appearance: dict[str, 
     else:
         field = noise_field(shape, seed + 11)
         cover, soft, opacity = MERLE_COVER, 0.06, 1.0
-    if overlay != "brindle" or color_family(base) != "dark" or landmarks is None or landmarks.position is None:
+    if field is not None:
         threshold = float(np.quantile(field[valid], 1.0 - cover))
         weight = np.clip((field - threshold) / max(soft, 1e-6) + 0.5, 0.0, 1.0) * valid * opacity
     # a brindle's or a merle's white markings carry no stripes: drawn over
@@ -2111,6 +2178,29 @@ def apply_overlay(composed: np.ndarray, gray: np.ndarray, appearance: dict[str, 
     low, high = OVERLAY_SKIP_L
     weight = weight * np.clip((high - lightness) / (high - low), 0.0, 1.0)
     return _blend(composed, paint_region(gray, second, None, palette), weight), overlay
+
+
+def _brindle_veil(shape: tuple[int, int], direction: np.ndarray, valid: np.ndarray, seed: int, landmarks,
+                  masks: "MaskLibrary | None") -> np.ndarray:
+    """A light-based brindle as a 0..1 weight of the stripe colour
+    (BRINDLE_VEIL_*): a veil over the whole coat, soft streaks across the hair
+    on top of it, the streaks weaker on the face."""
+    across = np.stack([-direction[..., 1], direction[..., 0]], axis=-1)
+    stripes = anisotropic_noise(shape, across, seed + 7, streak=BRINDLE_VEIL_STREAK_PX, grain=BRINDLE_VEIL_GRAIN_PX)
+    field = (stripes - stripes.min()) / max(float(stripes.max() - stripes.min()), 1e-6)
+    threshold = float(np.quantile(field[valid], 1.0 - BRINDLE_VEIL_COVER))
+    soft = BRINDLE_VEIL_SOFT * float(field[valid].std())
+    streaks = np.clip((field - threshold) / max(soft, 1e-6) + 0.5, 0.0, 1.0).astype(np.float32)
+    if landmarks is not None and landmarks.position is not None:
+        surface = (landmarks.valid if landmarks.valid is not None else valid) & valid
+        smooth = smooth_on_surface(streaks, landmarks.position, surface, BRINDLE_VEIL_SIGMA_M, stride=3)
+        streaks = np.where(surface, smooth, streaks)
+    if masks is not None:
+        for region in ("skull", "eyebrows", "cheeks", "muzzle_bridge"):
+            mask = masks.get(region)
+            if mask is not None:
+                streaks = streaks * (1.0 - (1.0 - BRINDLE_VEIL_FACE) * np.clip(mask, 0.0, 1.0))
+    return ((BRINDLE_VEIL + (BRINDLE_VEIL_OPACITY - BRINDLE_VEIL) * streaks) * valid).astype(np.float32)
 
 
 def _brindle_mottle(shape: tuple[int, int], direction: np.ndarray | None, valid: np.ndarray, seed: int,

@@ -119,9 +119,23 @@ thickness), body (depth, length, a barrel or a slim waist), tail. Leave out
 what the model can change and leave out colour, markings and size."""
 
 
-def match_from(differences: list[str]) -> str:
-    """close with no clear difference, rough with one, poor from POOR_FROM."""
+def match_from(differences: list[str], model: str | None = None) -> str:
+    """close with no clear difference, rough with one, poor from POOR_FROM.
+
+    `model`: the reading model that listed them. With the rule
+    differences_caveat (reading_model.py) the grade stops at rough however
+    many parts are named: gpt-6-luna takes "be strict" to the letter and
+    names two or more parts for most dogs, the well-fitted ones too. On the
+    178 of its dogs with a body written down beforehand (six sets,
+    2026-11-15) two or more parts were named for 121 of the 152 given a
+    body that passes and 24 of the 26 given a wrong one, and no higher count
+    separates them either (five or more: 31 and 10). On the same 64 hard
+    photographs gpt-4o's lists made 14 matches poor, gpt-6-luna's 42."""
+    from .reading_model import has_rule
+
     n = len(set(differences))
+    if n >= POOR_FROM and has_rule(model, "differences_caveat"):
+        return "rough"
     return "close" if n == 0 else "poor" if n >= POOR_FROM else "rough"
 
 # answers -> morph-target weights (shape_keys.py target names)
@@ -205,13 +219,14 @@ async def read_body_shape(transport: Transport, photo_blocks: list[dict[str, Any
 
     readings: list[dict[str, Any]] = []
     errors: list[str] = []
+    read_by = getattr(transport, "model", None)
 
     def keep(reading: dict[str, Any], letters: dict[str, str]) -> None:
         # the letter means a different model on each vote's sheet
         if models:
             diffs = sorted({d for d in reading.get("differences") or [] if d in DIFFERENCES})
             reading = {**reading, "closest_model": letters.get(str(reading.get("closest_model")), "unknown"),
-                       "differences": diffs, "model_match": match_from(diffs)}
+                       "differences": diffs, "model_match": match_from(diffs, read_by)}
         readings.append(reading)
 
     payloads = await asyncio.gather(*(one(n) for n in range(samples)), return_exceptions=True)
@@ -237,7 +252,9 @@ async def read_body_shape(transport: Transport, photo_blocks: list[dict[str, Any
             errors.append(f"{type(exc).__name__}: {str(exc)[:160]}")
 
     answers: dict[str, str] = {}
-    votes: dict[str, Any] = {"samples": len(readings)}
+    # read_by: the model that answered - what the pick does with a split vote
+    # goes by it (template_pick.combine, reading_model.py)
+    votes: dict[str, Any] = {"samples": len(readings), "read_by": read_by}
     for key, allowed in (("ears", EAR_ANSWERS), ("tail_build", TAIL_BUILD_ANSWERS),
                          ("tail_carriage", TAIL_CARRIAGE_ANSWERS), ("build", BUILD_ANSWERS),
                          ("muzzle", MUZZLE_ANSWERS), ("coat_length", COAT_LENGTH_ANSWERS),
@@ -254,7 +271,7 @@ async def read_body_shape(transport: Transport, photo_blocks: list[dict[str, Any
         backing = [r for r in readings if r.get("closest_model") == answers["closest_model"]]
         named = Counter(d for r in backing for d in r["differences"])
         answers["differences"] = sorted(d for d, n in named.items() if n * 2 > len(backing))
-        answers["model_match"] = match_from(answers["differences"]) if backing else "unknown"
+        answers["model_match"] = match_from(answers["differences"], read_by) if backing else "unknown"
         votes["model_match"] = dict(Counter(r["model_match"] for r in readings))
         # each vote's own model and differences, so a split pick shows its doubt
         votes["by_model"] = [f"{r.get('closest_model')}:{'+'.join(r['differences']) or '-'}" for r in readings]
