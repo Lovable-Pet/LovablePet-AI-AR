@@ -357,7 +357,8 @@ async def create_job(record: str = Form(..., description="shelter record JSON (K
                      photo: UploadFile = File(...),
                      callback_url: str | None = Form(None),
                      fit_stop: bool = Form(False, description="stop before the coat when the verdict is poor"),
-                     refine: bool = Form(True, description="false: no image-model edit (mask build only)"),
+                     refine: bool = Form(False, description="true: the image-model edit that adds fur grain "
+                                                            "(about $0.07-0.14 and 45-90 s more a dog)"),
                      render: bool | None = Form(None, description="preview renders; default when Blender exists"),
                      scripted: str | None = Form(None, description="offline case (PIPELINE_ALLOW_SCRIPTED=1 only)")
                      ) -> JSONResponse:

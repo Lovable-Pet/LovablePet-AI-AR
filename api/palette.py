@@ -914,8 +914,36 @@ def ramps_from_measurement(
 # Only under a neutral border, and with enough warm fur: COAT_MIN_PIXELS of
 # it and COAT_MIN_SHARE of the animal (a black-and-tan's points are too few
 # and too mixed with the black).
+# Under the table's chroma only for a pale coat, on a tan (2026-11-16): a
+# coat whose chroma, over COAT_RENDER_CHROMA, is COAT_PALE_SHARE of the
+# table's or less. Photographed fur measures under the table on nearly every
+# warm dog - of the 115 standing dogs the step ran on it lowered 113 - so a
+# shortfall alone says little about the dog. The 85 it lowered to under 0.8
+# were built again unlowered and set beside their photographs. Where the coat
+# measured over 0.60 of the table (37 dogs: orange and red-brown dogs that
+# had come out dull beige and taupe) the unlowered build was nearer on 27 and
+# the lowered one on none. At 0.60 and under (48) it was 16 against 17: the
+# 17 are cream and pale fawn dogs the reading had named tan or fawn (hard
+# photos 37 and 10), which the lowering brings back, and the 16 are tan dogs
+# photographed dark or dull (hard photos 2 and 15, built a dull beige still)
+# that no measure here tells from them. The cut is fitted on those 85, judged
+# by one eye with the two builds plain to tell apart; the dogs nearest it sit
+# at 0.592 (the lowering right) and 0.604 (wrong).
+# Tan only (COAT_TABLE_NAMES). The 21 standing tan and fawn dogs between 0.60
+# and the table, which the cut was not fitted on, were then built both ways.
+# Of the 17 tans the table's chroma was nearer on 9 and the photograph's on 2
+# (a shade each, both at 0.9 of the table). Of the 4 fawns the photograph's
+# was nearer on 3 (a pale fawn french bulldog, a newborn, a cream golden) and
+# the table's on none - against 4 and none for the fawns among the 85: a dog
+# named fawn that measures under the table is as often a pale dog as a dulled
+# photograph, so fawn follows the photograph down as before. So do red and
+# chocolate: red's table chroma is 53, the one red dog judged (a poodle, pale
+# by this measure) was carrot orange unlowered, and nothing was judged on a
+# chocolate. Not checked on photographs outside the standing sets.
 COAT_RENDER_CHROMA = 1.06
 COAT_CHROMA_SHARE = (0.55, 1.5)
+COAT_PALE_SHARE = 0.60
+COAT_TABLE_NAMES = frozenset({"tan"})
 COAT_MIN_PIXELS = 1500
 COAT_MIN_SHARE = 0.1
 
@@ -923,16 +951,25 @@ COAT_MIN_SHARE = 0.1
 def chroma_from_coat(appearance: dict, palette: dict[str, tuple[str, str, str]],
                      coat: dict | None) -> tuple[dict[str, tuple[str, str, str]], dict | None]:
     """(palette, report): every warm ramp's a*/b* scaled by one factor, the
-    one that puts the most-used warm name's mid at the coat's chroma. A coat
-    marked dull (appearance["dull_coat"], lite.coat_without_warm_fur: too
-    little warm fur in the photo to take a chroma from) gets the least the
-    name is given, COAT_CHROMA_SHARE[0] of the table's."""
+    one that puts the most-used warm name's mid at the coat's chroma - or at
+    the table's, when the coat's is under it and the coat is a tan that is
+    not pale (COAT_PALE_SHARE, COAT_TABLE_NAMES). A coat marked dull
+    (appearance["dull_coat"], lite.coat_without_warm_fur: too little warm
+    fur in the photo to take a chroma from) gets the least the name is
+    given, COAT_CHROMA_SHARE[0] of the table's. So does a coat the rules
+    found lighter than its name (appearance["lighter_coat"]: lite.one_coat_colour
+    and lighter_coat, tan called cream and drawn fawn) when the photo gives
+    no chroma to take: under a coloured border (a blue tarp, grass, sand) or
+    with too little warm fur, the table's chroma painted pale gold dogs
+    orange (2026-11-19: hard photo 62, new6 30, comparison 33, 35, pattern 22)."""
     from .fur import hex_to_linear, to_srgb
     from .projection import lab_to_linear, linear_to_lab
 
-    dull = bool(appearance.get("dull_coat")) and bool(coat) and coat.get("border") == "neutral"
-    if not dull and (not coat or coat.get("border") != "neutral" or int(coat.get("pixels") or 0) < COAT_MIN_PIXELS
-                     or float(coat.get("share") or 0.0) < COAT_MIN_SHARE):
+    usable = (bool(coat) and coat.get("border") == "neutral" and int(coat.get("pixels") or 0) >= COAT_MIN_PIXELS
+              and float(coat.get("share") or 0.0) >= COAT_MIN_SHARE)
+    lighter = bool(appearance.get("lighter_coat")) and not usable
+    dull = (bool(appearance.get("dull_coat")) and bool(coat) and coat.get("border") == "neutral") or lighter
+    if not dull and not usable:
         return palette, None
     used: dict[str, int] = {}
     for entry in [*(appearance.get("region_colors") or []), *(appearance.get("markings") or [])]:
@@ -954,9 +991,15 @@ def chroma_from_coat(appearance: dict, palette: dict[str, tuple[str, str, str]],
     mid = float(np.hypot(*labs(palette.get(main) or FUR_PALETTE[main])[1][1:]))
     if table < 1e-3 or mid < 1e-3:
         return palette, None
-    target = (COAT_CHROMA_SHARE[0] * table if dull else
-              float(np.clip(float(coat["chroma"]) / COAT_RENDER_CHROMA,
-                            COAT_CHROMA_SHARE[0] * table, COAT_CHROMA_SHARE[1] * table)))
+    pale = False
+    if dull:
+        target = COAT_CHROMA_SHARE[0] * table
+    else:
+        seen = float(coat["chroma"]) / COAT_RENDER_CHROMA
+        pale = seen <= COAT_PALE_SHARE * table
+        # a tan coat that is not pale keeps the table's chroma at least
+        least = 1.0 if main in COAT_TABLE_NAMES and not pale else COAT_CHROMA_SHARE[0]
+        target = float(np.clip(seen, least * table, COAT_CHROMA_SHARE[1] * table))
     scale = target / mid
     out = dict(palette)
     for name in used:
@@ -967,7 +1010,8 @@ def chroma_from_coat(appearance: dict, palette: dict[str, tuple[str, str, str]],
             moved.append(_rgb_to_hex(tuple(int(round(float(np.clip(c, 0, 1)) * 255)) for c in rgb)))
         out[name] = tuple(moved)
     return out, {"coat": coat, "main": main, "chroma": [round(mid, 1), round(target, 1)], "scale": round(scale, 2),
-                 "names": sorted(used), **({"dull": True} if dull else {})}
+                 "names": sorted(used), **({"dull": True} if dull else {}), **({"pale": True} if pale else {}),
+                 **({"lighter": True} if lighter else {})}
 
 
 # A dog read cream all over takes its cream from the photo's lit fur
