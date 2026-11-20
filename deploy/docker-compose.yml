@@ -10,7 +10,7 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
-      - ./output:/app/output    # templates (from the assets-v1 release) + output/jobs
+      - ./output:/app/output    # templates (the Release deploy.yml's ASSETS_TAG names) + output/jobs
       - ./cache:/cache          # DINOv2, rembg weights: downloaded once, kept across deploys
     ports:
       - "127.0.0.1:8000:8000"   # reachable from the server itself only (curl checks)

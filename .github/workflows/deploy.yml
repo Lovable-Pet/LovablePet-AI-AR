@@ -20,6 +20,11 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # The template Release the server should have. A new set: upload it as a
+  # Release (with SHA256.txt), put its tag here, merge to main.
+  ASSETS_TAG: assets-v3
+
 jobs:
   build:
     name: Build & Smoke test
@@ -91,28 +96,45 @@ jobs:
           GH_ACTOR: ${{ github.actor }}
           REPO: ${{ github.repository }}
           SHA: ${{ github.sha }}
+          ASSETS_TAG: ${{ env.ASSETS_TAG }}
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
-          envs: GH_TOKEN,GH_ACTOR,REPO,SHA
+          envs: GH_TOKEN,GH_ACTOR,REPO,SHA,ASSETS_TAG
+          command_timeout: 20m          # a template swap downloads ~640 MB
           script: |
             set -e
             cd ~/lovablepet-ai
             [ -f .env ] || { echo "~/lovablepet-ai/.env is missing (see README)"; exit 1; }
             docker network create lovablepet 2>/dev/null || true
 
-            # templates: first deploy only, from the assets-v1 release
-            if [ ! -d output/templates/jindo_small ]; then
-              gh release download assets-v1 -R "$REPO" -D /tmp/pet-assets --clobber
-              for f in /tmp/pet-assets/*.tar.gz; do tar -xzf "$f"; done
+            # templates: the Release ASSETS_TAG names, fetched when the server
+            # has another set (output/.assets-tag; none on a first deploy). The
+            # bundles are checked against its SHA256.txt before anything is
+            # unpacked, so a bad download stops here and leaves the old set.
+            RECREATE=
+            if [ "$(cat output/.assets-tag 2>/dev/null)" != "$ASSETS_TAG" ]; then
               rm -rf /tmp/pet-assets
+              gh release download "$ASSETS_TAG" -R "$REPO" -D /tmp/pet-assets --clobber
+              if [ -f /tmp/pet-assets/SHA256.txt ]; then
+                (cd /tmp/pet-assets && grep '\.tar\.gz$' SHA256.txt | sha256sum -c --quiet -)
+              fi
+              mkdir -p output
+              for f in /tmp/pet-assets/*.tar.gz; do tar -xzf "$f"; done
+              if [ -f /tmp/pet-assets/SHA256.txt ]; then
+                grep -E '[ *]output/' /tmp/pet-assets/SHA256.txt | sha256sum -c --quiet -   # '*': written on Windows
+              fi
+              echo "$ASSETS_TAG" > output/.assets-tag
+              rm -rf /tmp/pet-assets
+              echo "templates: $ASSETS_TAG"
+              RECREATE=--force-recreate   # the server keeps template data in memory
             fi
 
             echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
             export PIPELINE_IMAGE="ghcr.io/${REPO,,}:$SHA"
             docker compose pull
-            docker compose up -d --remove-orphans
+            docker compose up -d --remove-orphans $RECREATE
             docker logout ghcr.io
             # a hand-run `docker compose up -d` has no PIPELINE_IMAGE and falls
             # back to :latest - tag it here, or compose pulls it and GHCR says unauthorized

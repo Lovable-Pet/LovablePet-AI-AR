@@ -18,7 +18,7 @@ tests/scripts.py  오프라인 대본 (PIPELINE_ALLOW_SCRIPTED=1, 호출·비용
 ```
 
 템플릿 자산은 git에 없다(약 1.2 GB): `output/skeleton_<slug>_small.glb`, `output/templates/<slug>_small/`, `output/model_sheet/`
-(slug: jindo, jindo_puppy, maltese, toypoodle, chihuahua, retriever). GitHub Release `assets-v1`에 tar.gz로 있고,
+(slug: jindo, jindo_puppy, maltese, toypoodle, chihuahua, retriever). GitHub Release(`assets-v3` 등)에 tar.gz로 있고,
 프로젝트 루트에서 풀면 제자리에 들어간다.
 
 ## 로컬 실행
@@ -26,7 +26,7 @@ tests/scripts.py  오프라인 대본 (PIPELINE_ALLOW_SCRIPTED=1, 호출·비용
 ```
 pip install torch torchvision          # GPU가 있으면 CUDA 빌드
 pip install -r requirements.txt
-# Release assets-v1의 *.tar.gz를 프로젝트 루트에서 tar -xzf
+# Release(deploy.yml의 ASSETS_TAG)의 *.tar.gz를 프로젝트 루트에서 tar -xzf
 # .env: OPENAI_API_KEY=sk-...
 uvicorn api.server:app --port 8000
 python -m api.run --record <기록.json> --photo <사진> --out output/runs/<이름>
@@ -47,7 +47,7 @@ docker run -p 8000:8000 --env-file .env -v ./output:/app/output -v ./cache:/cach
 
 `.github/workflows/deploy.yml`: dev·main으로의 PR과 push마다 이미지를 빌드하고 `/health`로 뜨는지 확인한다.
 main에 머지되면 이미지를 GHCR(`ghcr.io/lovable-pet/lovablepet-ai-ar`)에 올리고 EC2에서 새 이미지로 교체한다.
-첫 배포 때 서버에 템플릿이 없으면 Release `assets-v1`에서 받아 푼다.
+서버 템플릿(`output/.assets-tag`)이 `deploy.yml`의 `ASSETS_TAG`와 다르면 그 Release를 받아 `SHA256.txt`로 확인하고 푼다.
 
 서버 준비 (한 번):
 
@@ -163,5 +163,4 @@ tar -czf dist/tpl_<slug>.tar.gz output/skeleton_<slug>_small.glb output/template
 tar -czf dist/model_sheet.tar.gz output/model_sheet
 ```
 
-Release에 올리고 서버의 `~/lovablepet-ai`에서 `gh release download <태그> -D /tmp/a && for f in /tmp/a/*.tar.gz; do tar -xzf "$f"; done`
-후 `docker compose restart`.
+`SHA256.txt`(`(cd dist && sha256sum *.tar.gz) > dist/SHA256.txt; sha256sum output/skeleton_*_small.glb >> dist/SHA256.txt`)와 함께 새 태그의 Release에 올리고, `deploy.yml`의 `ASSETS_TAG`를 그 태그로 바꿔 main에 머지.
