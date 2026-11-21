@@ -208,6 +208,24 @@ def combine(looks: dict[str, Any] | None, shape: dict[str, Any] | None,
                 gpt-6-luna dogs on file three change, none of the judged ones
                 for the worse; the chihuahuas it named with every sample and
                 those the looks call "none" (pom types) stay
+      a toy poodle the looks call maltese  for a reading model with the rule
+                maltese_by_looks: a toy poodle the call named - with every
+                sample too, which the split rule above leaves alone - is the
+                maltese when the looks are sure of it and the dog weighs
+                inside a maltese look's range. gpt-6-luna names the toy poodle
+                for long-coated white small dogs: on the size test set (AI Hub
+                71520, tools/size_eval, 2026-11-21) it built 13 of the 30
+                maltese by the breed label as toy poodles, where the looks
+                said maltese for all 30, and those stood 17% too tall at their
+                weight (toy poodle 28 cm at 3.8 kg, maltese 23 at 3.0). Made
+                on the 690 shelter dogs with a saved pick: of the 31 the call
+                named toy poodle and the looks maltese, the record names the
+                maltese for 13 and a poodle or bichon for 4, the looks sure of
+                none of the 4. It moves 7 of the 690 (2 maltese, 2 maltipoo,
+                3 mixes), none of the judged 30 or the hard 64. Checked after
+                on the test set: 11 dogs move, 10 nearer their measured height
+                (all 8 maltese), 1 farther (a 7 kg cocker spaniel, -14% to
+                -24%); the maltese's median error 13.7% to 11.8%
       under 60 days by the record  `age_days` (fit.parse_age's days_max: the
                 shelter's "60일미만") at YOUNG_DAYS or less: an adult
                 retriever is built as the puppy, and an adult jindo too when
@@ -295,6 +313,11 @@ def combine(looks: dict[str, Any] | None, shape: dict[str, Any] | None,
             and looks.get("confidence", 0.0) >= CHIHUAHUA_LOOKS_FLOOR):
         template, by = looks["template"], "looks"
         moved = f"a chihuahua by {tally}, the looks {looks['template']} {looks.get('confidence')}"
+    if (has_rule((votes or {}).get("read_by"), "maltese_by_looks") and template == "toypoodle" and by == "vision"
+            and looks_real and looks["template"] == "maltese" and looks.get("sure")
+            and _weighs_within("maltese", weight_kg)):
+        template, by = "maltese", "looks"
+        moved = f"a toy poodle by {tally}, the looks maltese {looks.get('confidence')}"
     if template == "chihuahua" and by == "vision" and not _weighs_like("chihuahua", weight_kg):
         fits = looks_real and looks["template"] != "chihuahua" and _weighs_like(looks["template"], weight_kg)
         template, by = (looks["template"], "looks") if fits else ("jindo", "default")
