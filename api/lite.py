@@ -3506,7 +3506,7 @@ async def run_lite(
     if real_size:
         from .size import apply_scale, scale_for
         try:
-            size_info = scale_for(meta.weight_kg, template_glb)
+            size_info = scale_for(meta.weight_kg, template_glb, meta.breed)
         except KeyError as exc:
             # a mesh without the joints to measure its shape: the model
             # stays at the template's own size rather than a guessed one

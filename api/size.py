@@ -97,6 +97,24 @@ REFERENCE: dict[str, tuple[float, float]] = {
     # jindo_puppy: none (Kim 1989 has monthly withers but no weights; AI Hub
     # has no jindo under a year), so the shape rule below, k 15.5
 }
+# A dog the shelter record names a mix (APMS 품종 "믹스견", "도사 믹스견",
+# "말티즈믹스", ...) is no breed, so no template breed's k: built on an adult
+# template it stands MIX_K * weight^(1/3), whichever template it looks like.
+# MIX_K is the median k of the 5,182 AI Hub 71520 adults outside the size test
+# set, all breeds (tools/size_eval, 2026-11-21). On that set the 68 adult
+# mixes built with their template's k stood +14% tall in every weight band
+# (40 built as the jindo: +14.8%); with MIX_K the median error is 10.5%
+# against 14.4%, the template's k nearer for 20 and farther for 48 (p 0.001).
+# Using it for mixes was decided on that set (user, 2026-11-21: half of the
+# shelters' adult dogs are recorded as mixes, and the set's few heavy mixes,
+# 17 of 10 kg or more, were as far off as the small ones). Not checked on
+# shelter dogs: none has a measured height. The puppy keeps its shape k.
+MIX_K = 16.83
+
+
+def is_mix(breed: str | None) -> bool:
+    """The record's breed field names a mix."""
+    return "믹스" in (breed or "") or "mix" in (breed or "").lower()
 
 
 def template_name(glb_path: str | Path) -> str:
@@ -268,16 +286,20 @@ def template_k(glb_path: str | Path) -> float:
     return _template_k(str(p.resolve()), p.stat().st_mtime)
 
 
-def scale_for(weight_kg: float, glb_path: str | Path) -> dict[str, float]:
+def scale_for(weight_kg: float, glb_path: str | Path, breed: str = "") -> dict[str, float]:
     """The weight rule with the template's measured adult reference where
-    it has one, else with the k from its mesh shape; KeyError when that
-    mesh cannot be measured."""
+    it has one (MIX_K instead for a record that names a mix), else with the
+    k from its mesh shape; KeyError when that mesh cannot be measured."""
     name = template_name(glb_path)
     w = float(weight_kg)
     if not w > 0:
         raise ValueError(f"weight must be positive, got {weight_kg!r}")
     k = None
-    if name in REFERENCE:
+    if name in REFERENCE and is_mix(breed):
+        k = MIX_K
+        target = k / 100 * w ** (1 / 3)
+        rule = "mix"
+    elif name in REFERENCE:
         target = withers_for_weight(w, name)
         rule = "weight"
     else:
@@ -310,5 +332,5 @@ def apply_scale(glb_path: str | Path, scale: float, out_path: str | Path | None 
     return out
 
 
-__all__ = ["REFERENCE", "SHAPE_K", "apply_scale", "scale_for", "shape_k", "template_k", "template_name",
+__all__ = ["MIX_K", "REFERENCE", "SHAPE_K", "apply_scale", "is_mix", "scale_for", "shape_k", "template_k", "template_name",
            "template_shape", "template_withers", "withers_for_weight"]

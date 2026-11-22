@@ -40,6 +40,10 @@ class PetMetadata(BaseModel):
     이름 and 추정나이 are parsed so they can be echoed back for display. No
     other module reads them: age-based temperament inference is an unvalidated
     generalization and is out of scope for this pipeline.
+
+    품종 is the shelter's breed field as APMS gives it ("믹스견", "[개] 믹스견",
+    "도사 믹스견"); optional. Only the size reads it, and only whether it names
+    a mix (size.is_mix): the template is still picked from the photograph.
     """
 
     model_config = ConfigDict(populate_by_name=True)
@@ -52,6 +56,7 @@ class PetMetadata(BaseModel):
     sex: str = Field(alias="성별", default="")
     neutered: bool = Field(alias="중성화", default=False)
     age_text: str = Field(alias="추정나이", default="")
+    breed: str | None = Field(alias="품종", default="")   # null from a Java client that has none
 
 
 # Free-text colours cannot be turned into a fur ramp, and "dark brown" against
