@@ -1,6 +1,6 @@
 """Build a whole template from a model file, rigged or not, in one go.
 
-The template a pet is painted on is a dozen files (see README, "템플릿"):
+The template a pet is painted on is a dozen files (see docs/DEVELOP.md):
 the GLB with clips, the UV layout, sixteen source masks and ten region
 masks, canonical views, the baked geometry, landmarks, fur direction,
 protect map and the five pattern anchors. They come from eight scripts in
