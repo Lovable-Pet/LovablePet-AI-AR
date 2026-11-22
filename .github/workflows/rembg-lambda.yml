@@ -1,7 +1,7 @@
 # Background-removal Lambda (lambda/rembg/): build the image, push it to ECR,
 # point the function at it. Runs when its files change on main, or by hand.
 #
-# One-time AWS setup (README, "배경 제거 Lambda"): ECR repository and Lambda
+# One-time AWS setup: ECR repository and Lambda
 # function both named lovablepet-rembg. Secrets AWS_ACCESS_KEY_ID and
 # AWS_SECRET_ACCESS_KEY: an IAM user allowed to push to that repository and
 # update that function. Before the function exists a run only pushes the image.
@@ -67,5 +67,5 @@ jobs:
             aws lambda wait function-updated --function-name "$FUNCTION"
             echo "updated $FUNCTION -> $IMAGE"
           else
-            echo "::notice::No function $FUNCTION yet. Create it from $IMAGE (README); later runs update it."
+            echo "::notice::No function $FUNCTION yet. Create it from $IMAGE; later runs update it."
           fi

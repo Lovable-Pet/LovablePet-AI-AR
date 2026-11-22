@@ -2,7 +2,7 @@
 # Push to main: also push it to GHCR and redeploy on EC2.
 #
 # Secrets: SSH_HOST (Elastic IP), SSH_USER (ubuntu), SSH_KEY (private key whose
-# .pub is in the server's ~/.ssh/authorized_keys). One-time server setup: README.
+# .pub is in the server's ~/.ssh/authorized_keys).
 # A redeploy marks running jobs failed (api/server.py), so merge to main when idle.
 name: CI/CD
 
@@ -106,7 +106,7 @@ jobs:
           script: |
             set -e
             cd ~/lovablepet-ai
-            [ -f .env ] || { echo "~/lovablepet-ai/.env is missing (see README)"; exit 1; }
+            [ -f .env ] || { echo "~/lovablepet-ai/.env is missing"; exit 1; }
             docker network create lovablepet 2>/dev/null || true
 
             # templates: the Release ASSETS_TAG names, fetched when the server
