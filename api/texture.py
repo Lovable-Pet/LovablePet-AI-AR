@@ -1973,6 +1973,12 @@ SABLE_BLUR_PX = 8.0
 SABLE_SURFACE_SIGMA_M = 0.025
 # surface samples: every Nth texel in each direction
 SURFACE_STRIDE = 5
+# ... their neighbours looked up this many samples at a time: all at once,
+# the lists of neighbour indices (tens of thousands of samples, over a
+# thousand neighbours each, as Python ints) took 5-6 GB, and a sable dog
+# took the 8 GB service host down with the jobs queued behind it (OOM kill,
+# 2026-11-26 15:00 UTC, fresh shelter photo 1). The result is the same.
+SURFACE_CHUNK = 4096
 
 
 def smooth_on_surface(field: np.ndarray, position: np.ndarray, valid: np.ndarray,
@@ -1988,13 +1994,16 @@ def smooth_on_surface(field: np.ndarray, position: np.ndarray, valid: np.ndarray
     points = position[rows, cols].astype(np.float64)
     values = field[rows, cols].astype(np.float64)
     tree = cKDTree(points)
-    neighbours = tree.query_ball_point(points, r=2.5 * sigma_m, workers=-1)
     smoothed = np.empty(len(points))
-    for index, near in enumerate(neighbours):
-        near = np.asarray(near)
-        d2 = np.sum((points[near] - points[index]) ** 2, axis=1)
-        w = np.exp(-d2 / (2.0 * sigma_m * sigma_m))
-        smoothed[index] = float(np.dot(w, values[near]) / w.sum())
+    for start in range(0, len(points), SURFACE_CHUNK):
+        neighbours = tree.query_ball_point(points[start:start + SURFACE_CHUNK], r=2.5 * sigma_m, workers=-1)
+        for offset, near in enumerate(neighbours):
+            index = start + offset
+            near = np.asarray(near)
+            d2 = np.sum((points[near] - points[index]) ** 2, axis=1)
+            w = np.exp(-d2 / (2.0 * sigma_m * sigma_m))
+            smoothed[index] = float(np.dot(w, values[near]) / w.sum())
+        del neighbours
     # every texel from its nearest samples on the surface
     out = np.zeros((height, width), dtype=np.float32)
     all_rows, all_cols = np.nonzero(valid)
