@@ -81,6 +81,14 @@ PROFILES: dict[str, dict[str, Any]] = {
     #   mask_seen_light   a dark muzzle whose own region measures light is not drawn
     #   faded_black_all_over  a black coat goes charcoal only when every measured
     #                     one of skull, back and legs is charcoal
+    #   coloured_trunk    a piebald whose trunk is coloured with no patches on
+    #                     the body is an irish coat (the white_trunk reversed)
+    #   tall_box_by_call  off a head box much taller than wide (the back in the
+    #                     crop), the face samples win where the crop says the
+    #                     opposite: no full blaze, no grey or dark cheeks
+    #   black_back_kept   a coat read black that the crown answer "gray" turned
+    #                     grey is black again when its back measures dark
+    #                     (lite.black_back_kept)
     #   plain_on_close_vote  a marked layout that beat solid by a bare majority
     #                     is built solid (pattern_classify.classify_pattern)
     #   piebald_by_dark_eyes  a piebald with a light crown and too little colour
@@ -106,14 +114,14 @@ PROFILES: dict[str, dict[str, Any]] = {
                    "view_margins": (0.0, 0.06, 0.12), "face_pads": (0.0, 0.2),
                    "body_extra": ("trunk",),
                    "rules": ("piebald_by_head", "patches_by_body", "dark_muzzle_by_asks", "body_by_asks",
-                             "plain_front", "irish_as_seen", "white_trunk", "pale_warm_coat",
+                             "plain_front", "irish_as_seen", "white_trunk", "coloured_trunk", "pale_warm_coat",
                              "warm_coat_measured", "black_brindle_plain",
                              "plain_brows", "plain_crown", "front_not_deeper", "chihuahua_by_all",
                              "maltese_by_looks",
-                             "mask_seen_light", "faded_black_all_over", "plain_on_close_vote",
+                             "mask_seen_light", "faded_black_all_over", "black_back_kept", "plain_on_close_vote",
                              "sable_tips_black", "sable_by_most", "sable_front_tipped",
                              "brindle_stripes_black", "brindle_front_striped",
-                             "piebald_by_dark_eyes",
+                             "piebald_by_dark_eyes", "tall_box_by_call",
                              "differences_caveat")},
 }
 
