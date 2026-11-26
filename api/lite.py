@@ -1470,6 +1470,24 @@ def cheeks_to_head(region_colors: list[dict[str, Any]]) -> str | None:
 DARK_BRINDLE_SHARE = 0.6
 # ... and under this share a white blaze covers the head (texture "full")
 BLAZE_FULL_DARK_SHARE = 0.6
+# A head box this many times taller than wide holds more than the head: a dog
+# with its head bowed toward the camera has its back above it in the crop,
+# and the crop's fixed upper and lower bands (palette.FACE_UPPER, FACE_LOWER)
+# measure the back as the crown and the dark face as the cheeks. Service pet
+# 970 (2026-11-26): both box samples took the top row of the photo, box 1.63
+# times taller than wide; its "crown" was the white back (dark fur 15 %) and
+# its white cheeks measured grey off the black face. 88 of the 799 dogs on
+# file have such a box. Where the crop then says the opposite of every face
+# sample, the samples win (tall_box_by_call).
+TALL_FACE_BOX = 1.45
+
+
+def tall_face_box(box: list[int] | tuple[int, ...] | None) -> float | None:
+    """The box's height over width when it is a tall one, else None."""
+    if not box or len(box) != 4 or box[2] <= box[0]:
+        return None
+    ratio = (box[3] - box[1]) / (box[2] - box[0])
+    return round(ratio, 2) if ratio >= TALL_FACE_BOX else None
 # body_colours patch_amount -> the patches' size (texture.PATCH_AREA). large
 # is patches bigger than the head, not more of the body: the medium area
 PATCH_SIZE = {"small": "small", "large": "medium", "most": "large"}
@@ -1949,6 +1967,38 @@ def faded_black(appearance: dict[str, Any], measured: dict[str, Any],
     back = lab["back"]
     appearance["gray_lab"] = gray_target(float(back[0]), float(back[1]), float(back[2]), lift=0.0)
     return f"{changed} black entries grey at {appearance['gray_lab']} ({', '.join(light)} at L* {STEEL_MIN_L:.0f}+)"
+
+
+# A coat read black that the head close-up's crown answer "gray" alone turned
+# grey (gray_for_black) is black again where its back measures darker than
+# STEEL_MIN_L - the line steel_saddle and faded_black draw between a black
+# coat and a grey one. The crown question sees the fluff of a black puppy's
+# head in soft light as grey: a black-and-tan puppy (record "검정&황갈색",
+# layout tan_point black/tan, its tan measured L* 38) came out mid grey all
+# over on the service (2026-11-26, pet 1858, user: "너무 못나왔는데"). The two
+# coats on file read black whose crown read gray were grey dogs, and their
+# backs measured lighter: new7 15, a grizzled wire coat, L* 36.3; main 9, a
+# grey husky type, L* 66.9. Without a measured back the grey stays.
+def black_back_kept(appearance: dict[str, Any], measured: dict[str, Any],
+                    face_log: dict[str, Any]) -> str | None:
+    """The entries the grey crown turned grey, black again on a coat read
+    black whose back measures dark; returns what changed, or None."""
+    if face_log.get("crown") != "gray" or not face_log.get("gray_for_black"):
+        return None
+    if appearance.get("base_color") != "black" or appearance.get("second_color") == "gray":
+        return None
+    lab = ((measured or {}).get("back") or {}).get("lab")
+    if not lab or float(lab[0]) >= STEEL_MIN_L:
+        return None
+    changed = 0
+    for entry in [*(appearance.get("region_colors") or []), *(appearance.get("markings") or [])]:
+        note = str(entry.get("note", ""))
+        if str(entry.get("color", "")).lower() == "gray" and "gray crown on the close-up" in note:
+            entry["color"] = "black"
+            entry["note"] = note.replace("gray crown on the close-up",
+                                         f"black: the back measured L* {float(lab[0]):.0f}")
+            changed += 1
+    return f"{changed} grey-crown entries black again (back measured L* {float(lab[0]):.1f})" if changed else None
 
 
 # A coat read light or warm that measures dark wherever it was measured, and
@@ -2532,6 +2582,16 @@ async def run_lite(
                         verdict = cheeks_from_photo(cheeks, share, light_lab)
                         if tan_crown and verdict != "dark":
                             verdict = cheeks
+                        # ... nor off a tall box against every sample: its lower
+                        # band is the dark face, not the cheeks (TALL_FACE_BOX;
+                        # service pet 970, white cheeks 5/5 measured grey)
+                        tall = tall_face_box(face_log.get("box"))
+                        if (verdict in ("gray", "dark") and verdict != cheeks and tall
+                                and has_rule(reading_model, "tall_box_by_call")
+                                and set(votes.get("cheeks") or {}) == {cheeks}):
+                            face_log["cheeks_kept_tall_box"] = (f"crop {verdict} (light fur {share}, {light_lab}), "
+                                                                f"every sample {cheeks}, box {tall}")
+                            verdict = cheeks
                         # white cheeks every sample named, on a coat with no warm
                         # colour in it, are not tan: a black-and-white dog lying in
                         # low evening sun measured its white jaw (63, 2, 12) and came
@@ -2649,6 +2709,16 @@ async def run_lite(
                         dark_crown = (face_log.get("face_dark") or [None, None, 0.0])
                         mostly_light = (dark_crown[0] is not None and dark_crown[2] >= FACE_CUT_MIN_SHARE
                                         and dark_crown[0] < BLAZE_FULL_DARK_SHARE)
+                        # ... not off a tall box whose "crown" every face sample
+                        # called dark (TALL_FACE_BOX): the light there was the
+                        # back, and a black head with a narrow white stripe came
+                        # out white to the top of the skull (service pet 970)
+                        tall = tall_face_box(face_log.get("box"))
+                        if (mostly_light and tall and has_rule(reading_model, "tall_box_by_call")
+                                and set(votes.get("crown") or {}) == {"dark"}):
+                            mostly_light = False
+                            face_log["blaze_not_full"] = (f"box {tall} times taller than wide, crown dark "
+                                                          f"{votes.get('crown')}, crop dark share {dark_crown[0]}")
                         size = "full" if mostly_light else "large" if cheeks in ("white", "cream") else "medium"
                         markings.append({"type": "blaze", "region": "skull", "color": blaze,
                                          "size": size,
@@ -2792,6 +2862,28 @@ async def run_lite(
                                        f"{decision.second_color}/{decision.base_color} (trunk {trunk_votes})")
             decision.pattern = "piebald"
             decision.base_color, decision.second_color = decision.second_color, decision.base_color
+        # ... and the other way (coloured_trunk): "piebald white/red" whose
+        # trunk every sample calls coloured, with no patches on the body in
+        # any body sample, is a coloured dog with white trim - the irish it
+        # would have been called. The body call wrote it out: "the body is
+        # mostly reddish brown, not a patch on a white body"; drawn as the
+        # piebald with its patches dropped, a red dog came out white with a
+        # red cap (service pet 1301, 2026-11-26, user: "너무 못나왔는데"). Of
+        # the 1,563 builds on file asked the trunk question it fits one
+        # other dog, a sable puppy with a white chest built white likewise
+        # (new 45). A real piebald's trunk is white (pet 970: white 9 of 9).
+        if (has_rule(reading_model, "coloured_trunk") and decision.pattern == "piebald"
+                and color_family(str(decision.base_color or "")) == "light"
+                and decision.second_color not in (None, "none")
+                and color_family(str(decision.second_color)) != "light"
+                and (body_log.get("votes") or {}).get("trunk") == "coloured" and not trunk_votes.get("white")):
+            patch_votes = ((body_log.get("votes") or {}).get("patch_votes") or {}).get("amount") or {}
+            if patch_votes.get("none", 0) == (body_log.get("votes") or {}).get("samples", -1):
+                body_log["coloured_trunk"] = (f"piebald {decision.base_color}/{decision.second_color} -> irish "
+                                              f"{decision.second_color}/{decision.base_color} "
+                                              f"(trunk {trunk_votes}, patches {patch_votes})")
+                decision.pattern = "irish"
+                decision.base_color, decision.second_color = decision.second_color, decision.base_color
         # a sable's dark muzzle is dark-tipped hair, not a black bar: drawn by
         # the sable overlay at half strength over the base (fixture_sable3)
         # the sable overlay only where the back itself was seen tipped
@@ -3217,6 +3309,11 @@ async def run_lite(
             for reading in measured.values():
                 if isinstance(reading, dict):
                     reading.setdefault("border", kind)
+    from .reading_model import has_rule as _model_rule
+    if _model_rule(appearance.get("reading_model"), "black_back_kept"):
+        kept = black_back_kept(appearance, measured or {}, log["steps"].get("face") or {})
+        if kept:
+            log["steps"]["black_back_kept"] = kept
     back = irish_back(appearance, measured or {}, bool((log["steps"].get("face") or {}).get("irish_to_piebald")))
     if back:
         log["steps"]["irish_back"] = back
