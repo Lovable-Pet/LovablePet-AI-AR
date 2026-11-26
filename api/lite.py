@@ -2160,6 +2160,9 @@ def own_gray(appearance: dict[str, Any], grey: dict[str, Any] | None, sunlit: bo
 MIXED_MIN_VOTES = 2
 MIXED_MIN_SAMPLES = 4
 MIXED_PER_VOTE = 0.5
+# a whole coat under this chroma (photo_colours.sun_cast mid_chroma) is
+# grey enough to be drawn dull off any border (coat_without_warm_fur)
+GREY_COAT_MAX_CHROMA = 10.0
 
 
 def mixed_grey(base: str | None, crown_votes: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -2183,18 +2186,35 @@ def mixed_grey(base: str | None, crown_votes: dict[str, Any] | None) -> dict[str
 
 
 def coat_without_warm_fur(appearance: dict[str, Any], coat: dict[str, Any] | None,
-                          coat_mid_l: float | None) -> str | None:
+                          coat_mid_l: float | None, coat_mid_chroma: float | None = None,
+                          grey_any_border: bool = False) -> str | None:
     """The warm base and every region of it cream when the photo's coat has
     hardly any warm fur and the animal is as light as cream; a lighter one
     goes a warm step lighter (lighter_coat) and a darker one keeps its
-    colour, both marked dull (appearance["dull_coat"]). Returns what
-    changed, or None."""
+    colour, both marked dull (appearance["dull_coat"]). Off a border that
+    is no grey card only a coat grey all over (grey_any_border) is drawn
+    dull, its colour kept. Returns what changed, or None."""
     from .palette import COAT_MIN_SHARE, WARM_BASES
 
     base = str(appearance.get("base_color") or "").lower()
-    if (base not in WARM_BASES or not coat or coat.get("border") != "neutral" or coat_mid_l is None
+    if (base not in WARM_BASES or not coat or coat_mid_l is None
             or float(coat.get("share") or 0.0) >= COAT_MIN_SHARE or coat_mid_l < STEEL_MIN_L):
         return None
+    if coat.get("border") != "neutral":
+        # ... a grey-beige puppy on a green mat or a dirt floor: the photo
+        # is not white-balanced, so its colour stays, but with hardly any
+        # warm fur AND the whole coat near grey (photo_colours.sun_cast
+        # mid_chroma) the table's orange tan is not this dog (fresh shelter
+        # photo 1 of 2026-11-26, a grey-tan sable puppy on a green mat,
+        # warm fur 4 %, coat chroma 7.1; new6 83, chroma 3.7 - the two
+        # builds on file it takes, both grey-beige puppies built orange)
+        if (not grey_any_border or coat_mid_chroma is None
+                or float(coat_mid_chroma) >= GREY_COAT_MAX_CHROMA):
+            return None
+        appearance["dull_coat"] = True
+        appearance["dull_any_border"] = True   # palette.chroma_from_coat takes it off this border too
+        return (f"{base} kept, drawn dull off a {coat.get('border')} border (warm fur "
+                f"{float(coat.get('share') or 0.0):.1%}, whole coat L* {coat_mid_l}, chroma {coat_mid_chroma})")
     if coat_mid_l < PALE_COAT_MIN_L:
         appearance["dull_coat"] = True
         return (f"{base} kept, drawn dull (warm fur {float(coat.get('share') or 0.0):.1%} of the animal, "
@@ -3386,7 +3406,9 @@ async def run_lite(
                          coat_mid_chroma=(sun or {}).get("mid_chroma"))
     if dark:
         log["steps"]["dark_all_over"] = dark
-    unwarm = coat_without_warm_fur(appearance, coat, (sun or {}).get("mid_l"))
+    from .reading_model import has_rule as _rule_on
+    unwarm = coat_without_warm_fur(appearance, coat, (sun or {}).get("mid_l"), (sun or {}).get("mid_chroma"),
+                                   grey_any_border=_rule_on(appearance.get("reading_model"), "grey_any_border"))
     if unwarm:
         log["steps"]["no_warm_fur"] = unwarm
     # a coat read grey from the start: the grey of its own fur (own_gray)
