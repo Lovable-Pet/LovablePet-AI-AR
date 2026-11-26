@@ -1480,6 +1480,15 @@ BLAZE_FULL_DARK_SHARE = 0.6
 # file have such a box. Where the crop then says the opposite of every face
 # sample, the samples win (tall_box_by_call).
 TALL_FACE_BOX = 1.45
+# ... and the same crop when its "crown" band is mostly light though every
+# face sample called the crown dark: the box can fall just short of
+# TALL_FACE_BOX and still hold the back. Pet 970 rebuilt on the service the
+# same evening came out white-headed again; its photo's grid cells are 1.43
+# times taller than wide, so a 7 x 7 cell box is 1.43 (replayed: crop dark
+# 23 %, full blaze). Of the 129 dogs on file whose crown every sample called
+# dark, four measure under this share (970 at 15 %, three with dark cheeks
+# at 21-31 %, which no crop test touches), the next at 52 %.
+CROP_CROWN_MIN_DARK = 0.35
 
 
 def tall_face_box(box: list[int] | tuple[int, ...] | None) -> float | None:
@@ -1488,6 +1497,20 @@ def tall_face_box(box: list[int] | tuple[int, ...] | None) -> float | None:
         return None
     ratio = (box[3] - box[1]) / (box[2] - box[0])
     return round(ratio, 2) if ratio >= TALL_FACE_BOX else None
+
+
+def crop_off_head(face_log: dict[str, Any], crown_votes: dict[str, Any] | None) -> str | None:
+    """Why the face crop's fixed bands are not the head (a tall box, or a
+    crown every sample called dark that the crop measures mostly light),
+    or None."""
+    tall = tall_face_box(face_log.get("box"))
+    if tall:
+        return f"box {tall} times taller than wide"
+    dark = (list(face_log.get("face_dark") or []) + [None, None, 0.0])[:3]
+    if (set(crown_votes or {}) == {"dark"} and dark[0] is not None and dark[2] >= FACE_CUT_MIN_SHARE
+            and dark[0] < CROP_CROWN_MIN_DARK):
+        return f"crown dark {crown_votes}, the crop's crown band {dark[0]} dark"
+    return None
 # body_colours patch_amount -> the patches' size (texture.PATCH_AREA). large
 # is patches bigger than the head, not more of the body: the medium area
 PATCH_SIZE = {"small": "small", "large": "medium", "most": "large"}
@@ -2585,12 +2608,12 @@ async def run_lite(
                         # ... nor off a tall box against every sample: its lower
                         # band is the dark face, not the cheeks (TALL_FACE_BOX;
                         # service pet 970, white cheeks 5/5 measured grey)
-                        tall = tall_face_box(face_log.get("box"))
-                        if (verdict in ("gray", "dark") and verdict != cheeks and tall
+                        off_head = crop_off_head(face_log, votes.get("crown"))
+                        if (verdict in ("gray", "dark") and verdict != cheeks and off_head
                                 and has_rule(reading_model, "tall_box_by_call")
                                 and set(votes.get("cheeks") or {}) == {cheeks}):
                             face_log["cheeks_kept_tall_box"] = (f"crop {verdict} (light fur {share}, {light_lab}), "
-                                                                f"every sample {cheeks}, box {tall}")
+                                                                f"every sample {cheeks}, {off_head}")
                             verdict = cheeks
                         # white cheeks every sample named, on a coat with no warm
                         # colour in it, are not tan: a black-and-white dog lying in
@@ -2713,12 +2736,11 @@ async def run_lite(
                         # called dark (TALL_FACE_BOX): the light there was the
                         # back, and a black head with a narrow white stripe came
                         # out white to the top of the skull (service pet 970)
-                        tall = tall_face_box(face_log.get("box"))
-                        if (mostly_light and tall and has_rule(reading_model, "tall_box_by_call")
+                        off_head = crop_off_head(face_log, votes.get("crown"))
+                        if (mostly_light and off_head and has_rule(reading_model, "tall_box_by_call")
                                 and set(votes.get("crown") or {}) == {"dark"}):
                             mostly_light = False
-                            face_log["blaze_not_full"] = (f"box {tall} times taller than wide, crown dark "
-                                                          f"{votes.get('crown')}, crop dark share {dark_crown[0]}")
+                            face_log["blaze_not_full"] = f"{off_head}, crop dark share {dark_crown[0]}"
                         size = "full" if mostly_light else "large" if cheeks in ("white", "cream") else "medium"
                         markings.append({"type": "blaze", "region": "skull", "color": blaze,
                                          "size": size,
@@ -2727,6 +2749,16 @@ async def run_lite(
             except Exception as exc:  # noqa: BLE001 - the face then keeps the layout's colours
                 face_log["error"] = f"{type(exc).__name__}: {exc}"
         log["steps"]["face"] = face_log
+        if face_log.get("asked"):
+            # the service keeps no job folder once Spring has the files: this
+            # line in the container's log is what is left to read a face by
+            box = face_log.get("box") or []
+            print(f"[lite] face: box {round((box[3] - box[1]) / max(box[2] - box[0], 1), 2) if len(box) == 4 else None}, "
+                  f"crown {(face_log.get('votes') or {}).get('crown')}, dark {face_log.get('face_dark')}, "
+                  f"light {face_log.get('face_light')}, cheeks {face_log.get('cheeks')}, "
+                  f"blaze {[m.get('size') for m in markings if m.get('type') == 'blaze']}"
+                  + "".join(f", {k}" for k in ("blaze_not_full", "cheeks_kept_tall_box", "cheeks_from_photo",
+                                               "gray_for_black") if face_log.get(k)))
         as_read = decision.pattern
         decision.pattern = irish_on_light(decision.pattern, decision.base_color, decision.second_color)
         if decision.pattern != as_read:
