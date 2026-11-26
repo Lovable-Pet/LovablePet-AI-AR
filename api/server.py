@@ -181,7 +181,7 @@ def _size_view(size: dict[str, Any] | None) -> dict[str, Any] | None:
     if not size or size.get("skipped"):
         return None
     out = {"weight_kg": size["weight_kg"], "withers_m": size["withers_target_m"], "scale": size["scale"],
-           "rule": size.get("rule")}   # "weight" (measured adult) or "shape" (mesh-shape k)
+           "rule": size.get("rule")}   # "weight" (measured adult), "mix" (a mix by the record) or "shape" (mesh-shape k)
     return out
 
 
@@ -510,7 +510,7 @@ async def fit_check(record: str = Form(...), photo: UploadFile = File(...)) -> d
     base = template_file(fit["template"], resolved.size_class)
     glb, _ = template_paths(base)
     try:
-        size = _size_view(scale_for(meta.weight_kg, glb))
+        size = _size_view(scale_for(meta.weight_kg, glb, meta.breed))
     except KeyError as exc:  # a mesh without the joints to measure its shape
         size = {"skipped": True, "reason": str(exc)}
     report(f"{fit['level']} on {fit['template']}")

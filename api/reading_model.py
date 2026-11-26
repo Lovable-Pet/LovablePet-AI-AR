@@ -75,6 +75,9 @@ PROFILES: dict[str, dict[str, Any]] = {
     #                     not painted tan
     #   chihuahua_by_all  the template: a chihuahua by some of the shape call's
     #                     samples only is the looks' model (template_pick.combine)
+    #   maltese_by_looks  the template: a toy poodle the shape call named, all
+    #                     samples or not, is the maltese the looks are sure of
+    #                     (template_pick.combine)
     #   mask_seen_light   a dark muzzle whose own region measures light is not drawn
     #   faded_black_all_over  a black coat goes charcoal only when every measured
     #                     one of skull, back and legs is charcoal
@@ -106,6 +109,7 @@ PROFILES: dict[str, dict[str, Any]] = {
                              "plain_front", "irish_as_seen", "white_trunk", "pale_warm_coat",
                              "warm_coat_measured", "black_brindle_plain",
                              "plain_brows", "plain_crown", "front_not_deeper", "chihuahua_by_all",
+                             "maltese_by_looks",
                              "mask_seen_light", "faded_black_all_over", "plain_on_close_vote",
                              "sable_tips_black", "sable_by_most", "sable_front_tipped",
                              "brindle_stripes_black", "brindle_front_striped",
