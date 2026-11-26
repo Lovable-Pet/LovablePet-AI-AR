@@ -968,7 +968,8 @@ def chroma_from_coat(appearance: dict, palette: dict[str, tuple[str, str, str]],
     usable = (bool(coat) and coat.get("border") == "neutral" and int(coat.get("pixels") or 0) >= COAT_MIN_PIXELS
               and float(coat.get("share") or 0.0) >= COAT_MIN_SHARE)
     lighter = bool(appearance.get("lighter_coat")) and not usable
-    dull = (bool(appearance.get("dull_coat")) and bool(coat) and coat.get("border") == "neutral") or lighter
+    dull = (bool(appearance.get("dull_coat")) and bool(coat)
+            and (coat.get("border") == "neutral" or bool(appearance.get("dull_any_border")))) or lighter
     if not dull and not usable:
         return palette, None
     used: dict[str, int] = {}

@@ -83,6 +83,8 @@ PROFILES: dict[str, dict[str, Any]] = {
     #                     one of skull, back and legs is charcoal
     #   coloured_trunk    a piebald whose trunk is coloured with no patches on
     #                     the body is an irish coat (the white_trunk reversed)
+    #   grey_any_border   a warm coat with hardly any warm fur and a grey whole
+    #                     coat is drawn dull off any border (lite.coat_without_warm_fur)
     #   tall_box_by_call  off a head box much taller than wide (the back in the
     #                     crop), the face samples win where the crop says the
     #                     opposite: no full blaze, no grey or dark cheeks
@@ -121,7 +123,7 @@ PROFILES: dict[str, dict[str, Any]] = {
                              "mask_seen_light", "faded_black_all_over", "black_back_kept", "plain_on_close_vote",
                              "sable_tips_black", "sable_by_most", "sable_front_tipped",
                              "brindle_stripes_black", "brindle_front_striped",
-                             "piebald_by_dark_eyes", "tall_box_by_call",
+                             "piebald_by_dark_eyes", "tall_box_by_call", "grey_any_border",
                              "differences_caveat")},
 }
 
