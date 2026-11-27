@@ -1556,14 +1556,22 @@ SAME_COAT_DE = 12.0
 # split. The blue-tarp puppy the cream jump was made for (hard photo 136) was
 # judged pale gold too: fawn, not cream, is what its orange cap wanted.
 LIGHTER_WARM = {"chocolate": "tan", "tan": "fawn", "red": "fawn"}
+# How much nearer the light colour than the warm step a coat must measure to
+# go light (distances in L*; 6 = 3 L* past the half-way line, L 81.5 between
+# fawn and cream). At the line itself the warm step is the safer side: a tan
+# malinois on a dirt floor whose back measured L 79.4, 0.9 past half way,
+# came out a cream dog with a tan nose (service pet 3718, 2026-11-28). The
+# creams on file measured 85 and 90, the warm coats 62 to 77; no build on
+# file measured between 78.5 and 81.5.
+LIGHTER_MARGIN_L = 6.0
 
 
 def lighter_coat(base: str, light: str, lightness: float | None) -> str | None:
     """Where a warm coat found lighter goes: to `light` (cream or white) only
     when its measured lightness (CIE L*) is nearer that colour's than the next
-    warm step's - the boundary is the palette's own, half way between fawn
-    (L 69) and cream (L 88), not one fitted to dogs - else one warm step
-    lighter (LIGHTER_WARM); None when it stays as it is (fawn not light
+    warm step's by LIGHTER_MARGIN_L - the boundary is the palette's own, half
+    way between fawn (L 69) and cream (L 88), plus that margin - else one warm
+    step lighter (LIGHTER_WARM); None when it stays as it is (fawn not light
     enough for cream, or nothing measured). A white jindo read fawn still goes
     cream (shelter adult jindo 1, user: "01번 백구 다시 봐봐"), as does the
     cream dog of hard photo 55 (back L 85); the twelve warm ones measured L 62
@@ -1576,7 +1584,7 @@ def lighter_coat(base: str, light: str, lightness: float | None) -> str | None:
     if lightness is not None and light in FUR_PALETTE and (step or base) in FUR_PALETTE:
         def mid_l(name: str) -> float:
             return float(linear_to_lab(hex_to_linear(FUR_PALETTE[name][1])[None, None, :])[0, 0][0])
-        if abs(lightness - mid_l(light)) < abs(lightness - mid_l(step or base)):
+        if abs(lightness - mid_l(step or base)) - abs(lightness - mid_l(light)) > LIGHTER_MARGIN_L:
             return light
     return step
 
@@ -2642,7 +2650,16 @@ async def run_lite(
                         # model (first fresh photo 3, user: "턱에 갈색 뭔지 모르겠음").
                         # Of all builds on file white became tan for two dogs, both
                         # black-and-white piebalds; the tan the rule was written for
-                        # was read "cream" on black-and-tan coats, and stays
+                        # was read "cream" on black-and-tan coats, and stays.
+                        # Cheeks every sample called cream or white the same: a
+                        # husky's white face in indoor shade measured (56, -1, 8.5),
+                        # nearer the table's tan than its cream by lightness, and the
+                        # dog came out with orange cheeks under a black head (service
+                        # pet 3821, 2026-11-28, cream 5/5 on a black/cream urajiro).
+                        # Of the builds on file it keeps two more light: an Irish
+                        # black/white with grizzled grey-beige cheeks (cream 5/5) and
+                        # a white-faced tricolour chihuahua (white 2, cream 3); the
+                        # eight that became tan on a tan or black-and-tan coat stay
                         from .patterns import color_family as _family
                         # grizzled cheeks (palette's frost) are white hairs through a dark
                         # head: with the crown's samples split (dark 3, tan 2 on a beige
@@ -2653,7 +2670,9 @@ async def run_lite(
                         if verdict == "gray" and set(crown_said) != {"dark"}:
                             face_log["frost_skipped"] = f"crown {crown_said}"
                             verdict = "dark"
-                        if (verdict == "tan" and cheeks == "white" and set(votes.get("cheeks") or {}) == {"white"}
+                        said_cheeks = set(votes.get("cheeks") or {})
+                        if (verdict == "tan" and cheeks in ("white", "cream") and said_cheeks
+                                and said_cheeks <= {"white", "cream"}
                                 and not any(_family(str(c or "").lower()) == "point"
                                             for c in (decision.base_color, decision.second_color))):
                             face_log["white_cheeks_kept"] = f"light fur {light_lab} on a {decision.base_color}/{decision.second_color} coat"
