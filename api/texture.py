@@ -194,6 +194,43 @@ SOFT_LIGHT_GAIN = 1.4
 # a black-and-white dog's thighs, broken at every seam - see SURFACE_EDGE_GAIN)
 SOFT_LIGHT_JITTER = 0.0
 SOFT_LIGHT_STRIDE = 7
+# The template's own head may sit darker or lighter than its body (the jindo
+# puppy's cream template: skull 6 L under its back), and TEMPLATE_SHADING
+# carried that onto every coat - a white or cream puppy came out with a grey
+# cast over the head alone (prod 3861, 4322; user 11-28 "얼굴만 살짝 달라서
+# 어색"). Each head region's shading is brought to the back's median, at most
+# HEAD_EVEN_LIMIT either way, the correction faded over the surface
+# (HEAD_EVEN_SIGMA_M) so no line shows where it ends.
+HEAD_EVEN = True
+HEAD_EVEN_REGIONS = ("skull", "cheeks", "eyebrows")
+HEAD_EVEN_SIGMA_M = 0.015
+HEAD_EVEN_LIMIT = 0.15
+# ... and a light face region read a neighbouring light colour from the body
+# (white cheeks on a cream retriever, cream cheeks on a white jindo; prod 308,
+# 4193) was a mask a shade off, its edge the region's line. Such a region is
+# laid on softly - its weight averaged over the surface (FACE_NEAR_SIGMA_M)
+# and at most FACE_NEAR_SHARE of its colour - a face that lightens or warms
+# gradually, as fur does, instead of a cut-out.
+FACE_NEAR_SOFT = True
+FACE_NEAR_REGIONS = ("skull", "cheeks", "eyebrows", "muzzle_bridge")
+FACE_NEAR_SIGMA_M = 0.02
+FACE_NEAR_SHARE = 0.4
+# ... and where a light leg meets the dark coat, the line is the leg mask's
+# top: one straight ring round each leg at the same height on all four, the
+# black of an Irish-marked dog cut off at the elbow as if laid on (prod 1837,
+# user 11-28: "팔로 오면 갑자기 잘리는느낌"). There the light regions' summed
+# weight is smoothed wide (LEG_WAVE_SIGMA_M), shifted by a wave drawn in 3D
+# through the position map (so it cannot break at a seam, unlike the atlas
+# noise that drew flames up the thighs) plus one offset per leg, and cut
+# again; the usual soft edge is laid over that. Only near the legs: the
+# chest and belly keep their own lines.
+LEG_WAVE = True
+LEG_WAVE_SIGMA_M = 0.03
+LEG_WAVE_STRIDE = 21
+LEG_WAVE_AMP = 0.22
+LEG_WAVE_LENGTH_M = 0.08
+LEG_WAVE_PER_LEG = 0.6
+LEG_WAVE_GAIN = 8.0
 # ... and a light underside stays off the outer face of the thighs: the
 # underside mask takes in a fifth of the jindo's outer thigh, the stifle's
 # front, where the cream sat as a block. Where the surface faces away from
@@ -1270,7 +1307,17 @@ def compose_body(
         painted = paint_region(gray, color_name, mask, palette)
         fade = _gradient_weight(landmarks, entry, mask)
         if fade is not None:
-            painted = _blend(painted, paint_region(gray, entry["gradient_to"], mask, palette), fade)
+            far = str(entry["gradient_to"])
+            far_painted = paint_region(gray, far, mask, palette)
+            # a fade that ends on a light colour next to a light body's (a dark
+            # mask at the nose fading to cream cheeks on a white jindo, prod
+            # 4193): its far end is mostly the body's colour (FACE_NEAR_*)
+            if (FACE_NEAR_SOFT and region in FACE_NEAR_REGIONS and far != base_color
+                    and color_family(far) == "light" and color_family(base_color) == "light"):
+                far_painted = _blend(paint_region(gray, base_color, mask, palette), far_painted,
+                                     np.full(gray.shape, FACE_NEAR_SHARE, dtype=np.float32))
+                gradients_drawn.append(f"{region}:->{far} mostly {base_color}")
+            painted = _blend(painted, far_painted, fade)
             gradients_drawn.append(f"{region}:{color_name}->{entry['gradient_to']}@{entry['gradient_anchor']}")
             # a gradient already says where the colour thins out; a partial
             # coverage on top of it would cut holes in the fade
@@ -1319,6 +1366,14 @@ def compose_body(
                 and color_family(base_color) != "light"):
             applied = applied * _not_outward(landmarks, masks.jitter)
 
+        if (FACE_NEAR_SOFT and soft_ready and region in FACE_NEAR_REGIONS and color_name != base_color
+                and color_family(color_name) == "light" and color_family(base_color) == "light"):
+            near_valid = landmarks.valid if landmarks.valid is not None else (gray > -1)
+            wide = smooth_fields_on_surface([np.asarray(applied, dtype=np.float32)], landmarks.position,
+                                            near_valid, FACE_NEAR_SIGMA_M)[0]
+            applied = (np.clip(wide, 0.0, 1.0) * FACE_NEAR_SHARE * near_valid).astype(np.float32)
+            gradients_drawn.append(f"{region}:{color_name} soft on {base_color}")
+
         if (soft_ready and region in SOFT_LIGHT_REGIONS and color_family(color_name) == "light"
                 and color_family(base_color) != "light"):
             soft_light.append((f"{region}:{color_name}", painted, applied))
@@ -1356,6 +1411,15 @@ def compose_body(
         # dark lines inside the white along every edge between them; user,
         # 11-05: "흑백 경계면에 알 수 없는 선들")
         total = np.clip(np.sum(smoothed, axis=0), 0.0, 1.0)
+        legs_raw = [w for name, _, w in soft_light if name.startswith("legs_lower:")]
+        if LEG_WAVE and legs_raw:
+            raw_sum = np.clip(np.sum([np.asarray(w, dtype=np.float32) for _, _, w in soft_light], axis=0), 0.0, 1.0)
+            wavy = _wavy_leg_top(raw_sum, np.asarray(legs_raw[0], dtype=np.float32), landmarks, valid_here, noise)
+            total = np.clip(smooth_fields_on_surface([wavy], landmarks.position, valid_here, SOFT_LIGHT_SIGMA_M)[0],
+                            0.0, 1.0)
+            gradients_drawn.append("legs_lower:wavy top")
+            if debug:
+                _save_debug(debug, "02_soft_light_wavy_raw", wavy)
         weight = (total - 0.5) * SOFT_LIGHT_GAIN + 0.5
         if masks.jitter is not None:
             # the hair noise in the transition only: out in the coat it
@@ -1546,6 +1610,21 @@ def compose_body(
             # be picked, and the region's share came out a third more of the
             # trunk once the neck and tail were taken out (eval e13, a
             # blanket from the withers to the rump)
+            # ending before the back's own edge (PATCH_INNER_*): cut to the mask,
+            # a patch reaching the shoulder ended on the region's line - a
+            # straight vertical cut where the back meets the chest (prod 1574,
+            # 3938; user 11-28 "갑자기 잘리는느낌"). Let past the edge instead,
+            # it ran down the upper foreleg as a black sleeve (1574) and hooked
+            # round the elbow (970). So the field sinks over the last few
+            # centimetres inside the edge and the patch rounds off on its own.
+            if PATCH_INNER and trunk is not None and region == "back":
+                reach = smooth_on_surface(inside.astype(np.float32), landmarks.position, surface,
+                                          PATCH_INNER_M,
+                                          stride=max(SURFACE_STRIDE,
+                                                     round(SURFACE_STRIDE * PATCH_INNER_M / 0.035)))
+                field = field - PATCH_INNER_DROP * np.clip((PATCH_INNER_FROM - reach) / (PATCH_INNER_FROM - 0.5),
+                                                           0.0, 1.0)
+                placed.append("patches: rounded inside the back's edge")
             blob = _select(mask, field, PATCH_AREA.get(size, PATCH_AREA["medium"]), domain=trunk)
             if trunk is not None:
                 # no lone round spot beside the patches: its area goes back
@@ -1763,6 +1842,15 @@ PATCH_CORE_STRIDE = 7
 # (maltese 7, ~35 %); of the trunk, 0.25 draws maltese 7 as a saddle and a
 # separate rump patch and eval e13 with a white back before its rump patch.
 PATCH_AREA = {"small": 0.12, "medium": 0.25, "large": 0.45}
+# A patch on the back rounds off before the back region's edge: the region
+# smoothed on the surface (PATCH_INNER_M) falls from 1 deep inside to 0.5 on
+# the edge, and the patch field is lowered by up to PATCH_INNER_DROP (field
+# units, spread PATCH_FIELD_SPREAD) from where it drops under PATCH_INNER_FROM
+# to the edge - the patch stops on its own curve, not on the mask's line.
+PATCH_INNER = True
+PATCH_INNER_M = 0.03
+PATCH_INNER_DROP = 0.5
+PATCH_INNER_FROM = 0.9
 # A place the reading put patches on, drawn there on top of the top-of-body
 # bias: along the trunk, 0 at the front feet and 1 at the hind feet, as
 # (centre, gaussian sigma), times the height on the trunk (0 at its lowest
@@ -2043,6 +2131,73 @@ def smooth_fields_on_surface(fields: list[np.ndarray], position: np.ndarray, val
         full[all_rows, all_cols] = np.sum(near_w * smoothed[nearest], axis=1).astype(np.float32)
         out.append(full)
     return out
+
+
+def _even_head_shading(gray: np.ndarray, masks: "MaskLibrary", landmarks, report: dict[str, Any]) -> np.ndarray:
+    """The template shading with each head region's median brought to the
+    back's (HEAD_EVEN_*), the correction faded over the surface."""
+    valid = landmarks.valid if landmarks.valid is not None else np.ones(gray.shape, dtype=bool)
+    if valid.shape != gray.shape:
+        return gray
+    protect = masks.extra("protect")
+    fur = valid & (protect < 0.1 if protect is not None and protect.shape == gray.shape else True)
+    back = masks.get("back")
+    if back is None or not ((back > 0.5) & fur).any():
+        return gray
+    reference = float(np.median(gray[(back > 0.5) & fur]))
+    weights, gains, names = [], [], []
+    for region in HEAD_EVEN_REGIONS:
+        mask = masks.get(region)
+        if mask is None:
+            continue
+        inside = (mask > 0.5) & fur
+        if int(inside.sum()) < 200:
+            continue
+        gain = float(np.clip(reference / max(float(np.median(gray[inside])), 1e-4),
+                             1.0 - HEAD_EVEN_LIMIT, 1.0 + HEAD_EVEN_LIMIT))
+        if abs(gain - 1.0) < 0.02:
+            continue
+        weights.append(np.clip(mask, 0.0, 1.0).astype(np.float32))
+        gains.append(gain)
+        names.append(region)
+    if not weights:
+        return gray
+    smoothed = smooth_fields_on_surface(weights, landmarks.position, valid, HEAD_EVEN_SIGMA_M)
+    factor = np.ones(gray.shape, dtype=np.float32)
+    for weight, gain in zip(smoothed, gains):
+        factor *= 1.0 + (gain - 1.0) * np.clip(weight, 0.0, 1.0)
+    report["head_even"] = {name: round(gain, 3) for name, gain in zip(names, gains)}
+    return (gray * np.where(valid, factor, 1.0)).astype(np.float32)
+
+
+def _wavy_leg_top(raw_sum: np.ndarray, legs: np.ndarray, landmarks, valid: np.ndarray,
+                  noise: np.ndarray) -> np.ndarray:
+    """The light regions' summed weight with the top of the light legs made
+    a wavy line at a different height on each leg (LEG_WAVE_*). Away from
+    the legs it is raw_sum unchanged."""
+    wide_total, wide_legs = smooth_fields_on_surface([raw_sum, legs], landmarks.position, valid,
+                                                     LEG_WAVE_SIGMA_M, stride=LEG_WAVE_STRIDE)
+    # this pet's own wave, seeded from its atlas noise (itself seeded by the pet)
+    seed = int(hashlib.md5(np.ascontiguousarray(noise[::97, ::89]).tobytes()).hexdigest()[:8], 16)
+    rng = np.random.default_rng(seed)
+    pos = landmarks.position.astype(np.float32)
+    count = 6
+    wave = np.zeros(raw_sum.shape, dtype=np.float32)
+    for _ in range(count):
+        direction = rng.normal(size=3)
+        direction /= np.linalg.norm(direction)
+        wave += np.sin(pos @ (direction * 2.0 * np.pi / LEG_WAVE_LENGTH_M).astype(np.float32)
+                       + np.float32(rng.uniform(0.0, 2.0 * np.pi)))
+    wave = np.clip(wave / np.sqrt(count / 2.0), -1.5, 1.5) / 1.5
+    # one height per leg: left/right by x, front/hind by y (-y is forward)
+    inside = valid & (legs > 0.5)
+    y_mid = float(np.median(pos[inside][:, 1])) if inside.any() else 0.0
+    leg = (pos[..., 0] >= 0).astype(np.int64) * 2 + (pos[..., 1] < y_mid).astype(np.int64)
+    per_leg = rng.uniform(-1.0, 1.0, size=4).astype(np.float32)
+    shift = LEG_WAVE_AMP * (wave + LEG_WAVE_PER_LEG * per_leg[leg])
+    wavy = np.clip((wide_total - 0.5 + shift) * LEG_WAVE_GAIN + 0.5, 0.0, 1.0)
+    near = np.clip(wide_legs * 2.0, 0.0, 1.0)
+    return ((1.0 - near) * raw_sum + near * wavy).astype(np.float32) * valid
 
 
 def _not_outward(landmarks, jitter: np.ndarray | None) -> np.ndarray:
@@ -2372,6 +2527,9 @@ def compose_texture(
             landmarks.face_scale = _face_scale(landmarks, template_dir)
     else:
         print("[texture] no landmarks.json; gradients and placed markings off")
+
+    if TEMPLATE_SHADING and HEAD_EVEN and landmarks is not None:
+        gray = _even_head_shading(gray, masks, landmarks, report)
 
     direction = defined = None
     if (template_dir / "fur_direction.png").exists():
